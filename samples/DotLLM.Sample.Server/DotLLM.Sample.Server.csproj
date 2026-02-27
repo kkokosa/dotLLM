@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DotLLM.Core\DotLLM.Core.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Models\DotLLM.Models.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Tokenizers\DotLLM.Tokenizers.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Engine\DotLLM.Engine.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Server\DotLLM.Server.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Telemetry\DotLLM.Telemetry.csproj" />
+  </ItemGroup>
+
+</Project>

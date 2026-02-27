@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
+  </ItemGroup>
+
+</Project>

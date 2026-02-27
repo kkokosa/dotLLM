@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DotLLM.Core\DotLLM.Core.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Models\DotLLM.Models.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Tokenizers\DotLLM.Tokenizers.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Cpu\DotLLM.Cpu.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Engine\DotLLM.Engine.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Diagnostics\DotLLM.Diagnostics.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Telemetry\DotLLM.Telemetry.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+  </ItemGroup>
+
+</Project>

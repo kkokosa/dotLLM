@@ -1,0 +1,26 @@
+<Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/DotLLM.Benchmarks/DotLLM.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/DotLLM.Sample.Console/DotLLM.Sample.Console.csproj" />
+    <Project Path="samples/DotLLM.Sample.Interpretability/DotLLM.Sample.Interpretability.csproj" />
+    <Project Path="samples/DotLLM.Sample.Server/DotLLM.Sample.Server.csproj" />
+    <Project Path="samples/DotLLM.Sample.ToolCalling/DotLLM.Sample.ToolCalling.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/DotLLM.Core/DotLLM.Core.csproj" />
+    <Project Path="src/DotLLM.Cpu/DotLLM.Cpu.csproj" />
+    <Project Path="src/DotLLM.Cuda/DotLLM.Cuda.csproj" />
+    <Project Path="src/DotLLM.Diagnostics/DotLLM.Diagnostics.csproj" />
+    <Project Path="src/DotLLM.Engine/DotLLM.Engine.csproj" />
+    <Project Path="src/DotLLM.Models/DotLLM.Models.csproj" />
+    <Project Path="src/DotLLM.Server/DotLLM.Server.csproj" />
+    <Project Path="src/DotLLM.Telemetry/DotLLM.Telemetry.csproj" />
+    <Project Path="src/DotLLM.Tokenizers/DotLLM.Tokenizers.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DotLLM.Tests.Integration/DotLLM.Tests.Integration.csproj" />
+    <Project Path="tests/DotLLM.Tests.Unit/DotLLM.Tests.Unit.csproj" />
+  </Folder>
+</Solution>
