@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(python:*)",
-      "Bash(dotnet:*)"
+      "Bash(dotnet:*)",
+      "Bash(mkdir:*)"
     ]
   }
 }
