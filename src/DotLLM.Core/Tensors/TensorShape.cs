@@ -4,9 +4,22 @@ namespace DotLLM.Core.Tensors;
 /// Describes the shape of a tensor: its dimensions, rank, and total element count.
 /// Dimensions are stored as a managed array — this is metadata, not tensor data.
 /// </summary>
-/// <param name="Dimensions">Size of each dimension (e.g., [batch, seq_len, hidden_size]).</param>
-public readonly record struct TensorShape(int[] Dimensions)
+public readonly record struct TensorShape
 {
+    private readonly int[]? _dimensions;
+
+    /// <summary>Size of each dimension (e.g., [batch, seq_len, hidden_size]).</summary>
+    public int[] Dimensions => _dimensions ?? [];
+
+    /// <summary>
+    /// Creates a new tensor shape with the specified dimensions.
+    /// </summary>
+    /// <param name="dimensions">Size of each dimension. Empty for scalar (rank-0) tensors.</param>
+    public TensorShape(params ReadOnlySpan<int> dimensions)
+    {
+        _dimensions = dimensions.ToArray();
+    }
+
     /// <summary>Number of dimensions (axes).</summary>
     public int Rank => Dimensions.Length;
 
@@ -15,11 +28,6 @@ public readonly record struct TensorShape(int[] Dimensions)
     {
         get
         {
-            if (Dimensions.Length == 0)
-            {
-                return 0;
-            }
-
             long count = 1;
             for (int i = 0; i < Dimensions.Length; i++)
             {
