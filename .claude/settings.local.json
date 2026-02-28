@@ -8,7 +8,10 @@
       "Bash(gh pr:*)",
       "Bash(gh api:*)",
       "WebSearch",
-      "Bash(gh repo:*)"
+      "Bash(gh repo:*)",
+      "Bash(ls:*)",
+      "Bash(gh issue:*)",
+      "Bash(gh label:*)"
     ]
   }
 }

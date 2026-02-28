@@ -147,6 +147,17 @@ dotLLM/
 | Multi-GPU | [docs/MULTI_GPU.md](docs/MULTI_GPU.md) | Tensor/pipeline parallelism, NCCL |
 | Implementation roadmap | [docs/ROADMAP.md](docs/ROADMAP.md) | Planning, task sequencing |
 
+## Development Workflow
+
+All development follows an issue-driven workflow.
+
+1. **Every task starts with a GitHub issue.** Before writing code, a GitHub issue must exist describing the work with acceptance criteria and relevant roadmap/doc references.
+2. **Dedicated branch per issue.** Branch from `main` using: `issue/{number}-{short-kebab-description}` (e.g., `issue/7-gguf-loader`).
+3. **Commits reference the issue.** Include `(#{number})` in commit messages.
+4. **PRs close the issue.** Use `Closes #{N}` in the PR description. PR targets `main`.
+5. **One issue, one branch, one PR.** If scope grows, split into a new issue.
+6. **Read the relevant docs first.** Before starting, read docs listed in the Documentation Index for the module being implemented.
+
 ## What Claude Should Know
 
 - **Author**: Konrad — expert .NET dev, "Pro .NET Memory Management" (2nd ed.), MVP, 20+ yrs perf. AI/agents at Nethermind. Do NOT over-explain .NET basics.
