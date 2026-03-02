@@ -13,7 +13,7 @@ Each step is designed to be a discrete unit of work suitable for a single implem
 | Step | Feature | Description | Key Files | Depends On |
 |------|---------|-------------|-----------|------------|
 | 1 | **GGUF loader** :white_check_mark: | Parse header, metadata KV pairs, tensor descriptors. Memory-map tensor data section via `MemoryMappedFile`. | `Models/Gguf/GgufReader.cs`, `GgufMetadata.cs`, `GgufTensorDescriptor.cs` | — |
-| 2 | **FP16/Q8_0 dequantization** | Dequantize FP16 (trivial: half→float) and Q8_0 (scale × int8). Validates tensor data access through mmap. | `Cpu/Kernels/Dequantize.cs` | 1 |
+| 2 | **FP16/Q8_0 dequantization** :white_check_mark: | Dequantize FP16 (trivial: half→float) and Q8_0 (scale × int8). Validates tensor data access through mmap. | `Cpu/Kernels/Dequantize.cs` | 1 |
 | 3 | **Basic CPU tensor ops** | MatMul (f32 GEMV for single-token decode, then quantized GEMV operating directly on Q8_0/Q4_K blocks — no dequantization to f32, fused scale×int dot-product into accumulator, as llama.cpp does), RMSNorm, SiLU, Softmax. Use `TensorPrimitives` + SIMD intrinsics. Scalar reference implementations for correctness validation. | `Cpu/Kernels/MatMul.cs`, `RmsNorm.cs`, `SiLu.cs`, `Softmax.cs` | — |
 | 4 | **BPE tokenizer** | Parse vocabulary and merges from GGUF metadata (`tokenizer.ggml.tokens`, `tokenizer.ggml.scores`). Trie-based encode, simple decode. | `Tokenizers/Bpe/BpeTokenizer.cs`, `Tokenizers/Trie.cs` | 1 |
 | 5 | **GQA attention + RoPE** | Grouped-query attention with pre-computed cos/sin tables. Single implementation covering MHA/MQA/GQA via `num_kv_heads`. | `Cpu/Kernels/Attention.cs`, `Cpu/Kernels/RoPE.cs` | 3 |
