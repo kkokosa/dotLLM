@@ -1,0 +1,306 @@
+using DotLLM.Models.Gguf;
+using DotLLM.Tokenizers.Bpe;
+using Xunit;
+
+namespace DotLLM.Tests.Unit.Tokenizers;
+
+/// <summary>
+/// Unit tests for <see cref="BpeTokenizer"/> using synthetic in-memory vocabularies.
+/// No file I/O; all vocab data is built inline.
+/// </summary>
+public class BpeTokenizerTests
+{
+    // -------------------------------------------------------------------------
+    // Vocabulary helpers
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Minimal SentencePiece-style vocab: single chars + two merges.
+    /// <code>
+    /// 0: &lt;unk&gt;  1: a  2: b  3: c  4: ab (score -0.5)  5: bc (score -0.8)  6: abc (score -0.2)
+    /// </code>
+    /// With addBosSpace=false for deterministic unit-test behaviour.
+    /// </summary>
+    private static BpeTokenizer BuildMinimalVocab()
+    {
+        string[] tokens = ["<unk>", "a", "b", "c", "ab", "bc", "abc"];
+        float[] scores  = [0f, -1.0f, -2.0f, -3.0f, -0.5f, -0.8f, -0.2f];
+        return BpeTokenizer.CreateSentencePiece(tokens, scores, tokenTypes: null,
+            bosId: 0, eosId: 0, addBosSpace: false);
+    }
+
+    /// <summary>
+    /// Vocab with ▁ marker and merges building up "▁hello".
+    /// Used to verify SentencePiece space-marker handling.
+    /// </summary>
+    private static BpeTokenizer BuildSpaceMarkerVocab()
+    {
+        string[] tokens =
+        [
+            "<unk>",   // 0
+            "\u2581",  // 1  ▁
+            "h",       // 2
+            "e",       // 3
+            "l",       // 4
+            "o",       // 5
+            "\u2581h", // 6  ▁h
+            "\u2581he",// 7  ▁he
+            "\u2581hel",// 8 ▁hel
+            "\u2581hell",// 9 ▁hell
+            "\u2581hello",// 10 ▁hello
+        ];
+        float[] scores = [0f, -5f, -4f, -3f, -2f, -1f, -0.5f, -0.4f, -0.3f, -0.2f, -0.1f];
+        return BpeTokenizer.CreateSentencePiece(tokens, scores, tokenTypes: null,
+            bosId: 0, eosId: 0, addBosSpace: true);
+    }
+
+    /// <summary>
+    /// Vocab with byte-fallback tokens for bytes 0x61='a' and non-ASCII bytes.
+    /// </summary>
+    private static BpeTokenizer BuildByteVocab()
+    {
+        // 256 byte tokens (<0x00>–<0xFF>) plus a few regular tokens.
+        var tokenList = new List<string>(260);
+        tokenList.Add("<unk>"); // 0
+        tokenList.Add("a");    // 1
+        for (int i = 0; i < 256; i++)
+            tokenList.Add($"<0x{i:X2}>"); // 2–257
+        string[] tokens = [.. tokenList];
+        float[] scores = new float[tokens.Length]; // all 0
+        return BpeTokenizer.CreateSentencePiece(tokens, scores, tokenTypes: null,
+            bosId: 0, eosId: 0, addBosSpace: false);
+    }
+
+    // -------------------------------------------------------------------------
+    // Encode tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void Encode_EmptyString_ReturnsEmpty()
+    {
+        var tok = BuildMinimalVocab();
+        Assert.Empty(tok.Encode(string.Empty));
+    }
+
+    [Fact]
+    public void Encode_SingleKnownToken_ReturnsSingleId()
+    {
+        var tok = BuildMinimalVocab();
+        // "a" is token 1; no merge possible with a single symbol.
+        int[] ids = tok.Encode("a");
+        Assert.Equal([1], ids);
+    }
+
+    [Fact]
+    public void Encode_TwoTokenWord_MergesIntoOne()
+    {
+        var tok = BuildMinimalVocab();
+        // "ab" → initial [a(1), b(2)] → bigram (a,b) → "ab"(4) → result [4]
+        int[] ids = tok.Encode("ab");
+        Assert.Equal([4], ids);
+    }
+
+    [Fact]
+    public void Encode_ThreeChars_MergesByScorePriority()
+    {
+        var tok = BuildMinimalVocab();
+        // "abc" → initial [a(1), b(2), c(3)]
+        // Possible merges: (a,b)→ab score -0.5, (b,c)→bc score -0.8
+        // -0.5 > -0.8 so "ab" has higher priority → merge (a,b) first → [ab(4), c(3)]
+        // Then (ab,c) → "abc"(6) → [abc(6)]
+        int[] ids = tok.Encode("abc");
+        Assert.Equal([6], ids);
+    }
+
+    [Fact]
+    public void Encode_StaleQueueEntry_IsSkipped()
+    {
+        var tok = BuildMinimalVocab();
+        // "abc" encodes to [6]. The (b,c)→bc bigram was enqueued but b is consumed by (a,b) merge.
+        // The stale (b,c) entry must be silently discarded.
+        int[] ids = tok.Encode("abc");
+        // If stale entry were not skipped we'd get a wrong result; [6] is the correct merge.
+        Assert.Equal([6], ids);
+    }
+
+    [Fact]
+    public void Encode_LowPriorityMerge_NotAppliedWhenConsumed()
+    {
+        // "bc" alone should produce [5] (bc merged).
+        var tok = BuildMinimalVocab();
+        int[] ids = tok.Encode("bc");
+        Assert.Equal([5], ids);
+    }
+
+    [Fact]
+    public void Encode_UnknownChar_UsesByteTokenFallback()
+    {
+        var tok = BuildByteVocab();
+        // 'Z' = 0x5A; no regular token for 'Z', but <0x5A> (index 2+0x5A=92) exists.
+        int byteTokenId = 2 + 0x5A; // 0x5A = 90 → token index 92
+        int[] ids = tok.Encode("Z");
+        Assert.Equal([byteTokenId], ids);
+    }
+
+    [Fact]
+    public void Encode_SpaceMarkerPrepended_WhenAddBosSpaceTrue()
+    {
+        var tok = BuildSpaceMarkerVocab();
+        // "hello" → normalized "▁hello" → eventually merges to token 10
+        int[] ids = tok.Encode("hello");
+        Assert.Equal([10], ids);
+    }
+
+    [Fact]
+    public void Encode_SpaceMarkerNotDoublePrepended_WhenTextStartsWithSpace()
+    {
+        var tok = BuildSpaceMarkerVocab();
+        // " hello" already starts with space → normalized "▁hello" → same as "hello"
+        int[] ids1 = tok.Encode("hello");
+        int[] ids2 = tok.Encode(" hello");
+        Assert.Equal(ids1, ids2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Decode tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void Decode_RestoresSpaceFromSentencePieceMarker()
+    {
+        var tok = BuildSpaceMarkerVocab();
+        // Token 6 = "▁h"; DecodeToken should replace ▁ with space.
+        Assert.Equal(" h", tok.DecodeToken(6));
+    }
+
+    [Fact]
+    public void Decode_ByteTokenSequence_ReturnsUtf8Char()
+    {
+        var tok = BuildByteVocab();
+        // é = U+00E9 = UTF-8 bytes 0xC3 0xA9
+        int id_c3 = 2 + 0xC3; // 195 + 2 = 197
+        int id_a9 = 2 + 0xA9; // 169 + 2 = 171
+        string result = tok.Decode([id_c3, id_a9]);
+        Assert.Equal("é", result);
+    }
+
+    [Fact]
+    public void Decode_EmptySpan_ReturnsEmpty()
+    {
+        var tok = BuildMinimalVocab();
+        Assert.Equal(string.Empty, tok.Decode([]));
+    }
+
+    [Fact]
+    public void Decode_SingleToken_ReturnsTokenText()
+    {
+        var tok = BuildMinimalVocab();
+        Assert.Equal("ab", tok.Decode([4]));
+    }
+
+    [Fact]
+    public void Decode_MultipleTokens_Concatenates()
+    {
+        var tok = BuildMinimalVocab();
+        Assert.Equal("abc", tok.Decode([4, 3])); // "ab" + "c"
+    }
+
+    // -------------------------------------------------------------------------
+    // Roundtrip tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void Roundtrip_AsciiText_WithSpaceMarkerVocab()
+    {
+        var tok = BuildSpaceMarkerVocab();
+        const string text = "hello";
+        Assert.Equal(text, tok.Decode(tok.Encode(text)));
+    }
+
+    [Fact]
+    public void Roundtrip_AsciiText_WithMinimalVocab()
+    {
+        var tok = BuildMinimalVocab();
+        const string text = "abc";
+        Assert.Equal(text, tok.Decode(tok.Encode(text)));
+    }
+
+    [Fact]
+    public void Roundtrip_UnicodeChar_ViaByteTokens()
+    {
+        var tok = BuildByteVocab();
+        // 'a' has a regular token; 'é' goes through byte fallback.
+        const string text = "aé";
+        Assert.Equal(text, tok.Decode(tok.Encode(text)));
+    }
+
+    // -------------------------------------------------------------------------
+    // VocabSize / BOS / EOS
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void VocabSize_MatchesTokenCount()
+    {
+        var tok = BuildMinimalVocab();
+        Assert.Equal(7, tok.VocabSize);
+    }
+
+    [Fact]
+    public void BosEosIds_CorrectlySet()
+    {
+        string[] tokens = ["<unk>", "<s>", "</s>", "a"];
+        float[] scores  = [0f, 0f, 0f, -1f];
+        var tok = BpeTokenizer.CreateSentencePiece(tokens, scores, tokenTypes: null,
+            bosId: 1, eosId: 2);
+        Assert.Equal(1, tok.BosTokenId);
+        Assert.Equal(2, tok.EosTokenId);
+    }
+
+    // -------------------------------------------------------------------------
+    // GgufBpeTokenizerFactory unit test (no file I/O — direct metadata construction)
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void GgufFactory_LoadsSentencePieceTokenizer()
+    {
+        // Build GgufMetadata directly from a dictionary — no file needed.
+        var entries = new Dictionary<string, GgufMetadataValue>
+        {
+            ["tokenizer.ggml.model"]        = new(GgufValueType.String, "llama"),
+            ["tokenizer.ggml.tokens"]       = new(GgufValueType.Array, new string[] { "<unk>", "<s>", "</s>", "a", "b", "ab" }),
+            ["tokenizer.ggml.scores"]       = new(GgufValueType.Array, new float[]  { 0f, 0f, 0f, -1.0f, -2.0f, -0.5f }),
+            ["tokenizer.ggml.token_type"]   = new(GgufValueType.Array, new int[]    { 1, 2, 2, 0, 0, 0 }),
+            ["tokenizer.ggml.bos_token_id"] = new(GgufValueType.UInt32, 1u),
+            ["tokenizer.ggml.eos_token_id"] = new(GgufValueType.UInt32, 2u),
+        };
+        var metadata = new GgufMetadata(entries);
+
+        BpeTokenizer tokenizer = GgufBpeTokenizerFactory.Load(metadata);
+
+        Assert.NotNull(tokenizer);
+        Assert.Equal(1, tokenizer.BosTokenId);
+        Assert.Equal(2, tokenizer.EosTokenId);
+        Assert.Equal(6, tokenizer.VocabSize);
+
+        // "ab" should encode to token 5 (the "ab" merge).
+        int[] ids = tokenizer.Encode("ab");
+        Assert.Equal([5], ids);
+    }
+
+    [Fact]
+    public void GgufFactory_DefaultsToLlamaWhenModelKeyMissing()
+    {
+        // No "tokenizer.ggml.model" key → defaults to SentencePiece.
+        var entries = new Dictionary<string, GgufMetadataValue>
+        {
+            ["tokenizer.ggml.tokens"]       = new(GgufValueType.Array, new string[] { "<unk>", "a" }),
+            ["tokenizer.ggml.scores"]       = new(GgufValueType.Array, new float[]  { 0f, -1f }),
+            ["tokenizer.ggml.bos_token_id"] = new(GgufValueType.UInt32, 0u),
+            ["tokenizer.ggml.eos_token_id"] = new(GgufValueType.UInt32, 0u),
+        };
+        var metadata = new GgufMetadata(entries);
+
+        BpeTokenizer tokenizer = GgufBpeTokenizerFactory.Load(metadata);
+        Assert.Equal(2, tokenizer.VocabSize);
+    }
+}
