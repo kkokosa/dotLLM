@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
+    <ProjectReference Include="..\DotLLM.Tokenizers\DotLLM.Tokenizers.csproj" />
   </ItemGroup>
 
 </Project>
