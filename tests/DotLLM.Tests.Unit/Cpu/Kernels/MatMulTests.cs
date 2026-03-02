@@ -278,6 +278,16 @@ public sealed unsafe class MatMulTests
         }
     }
 
+    [Fact]
+    public void GemvQ8_0_NonAlignedK_Throws()
+    {
+        Assert.Throws<ArgumentException>(() =>
+        {
+            fixed (float* dummy = new float[33])
+                MatMul.GemvQ8_0(null, dummy, dummy, 1, 33);
+        });
+    }
+
     // ──────────────────── Helpers ────────────────────
 
     private static nint AllocQ8_0Block(Half scale, Func<int, sbyte> fillQs)

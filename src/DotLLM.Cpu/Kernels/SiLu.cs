@@ -15,7 +15,7 @@ public static class SiLu
     /// </summary>
     /// <param name="input">Input span.</param>
     /// <param name="result">Destination span. Must have length &gt;= <paramref name="input"/>.Length.
-    /// May alias <paramref name="input"/> for in-place operation.</param>
+    /// Must not alias <paramref name="input"/>.</param>
     [SkipLocalsInit]
     public static void Execute(ReadOnlySpan<float> input, Span<float> result)
     {

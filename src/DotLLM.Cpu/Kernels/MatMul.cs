@@ -71,6 +71,10 @@ public static unsafe class MatMul
     [SkipLocalsInit]
     public static void GemvQ8_0(byte* weightsQ8, float* x, float* result, int m, int k)
     {
+        if (k % Q8_0GroupSize != 0)
+            throw new ArgumentException(
+                $"k must be a multiple of {Q8_0GroupSize}, got {k}", nameof(k));
+
         int blockCount = k / Q8_0GroupSize;
         int xQ8Bytes = blockCount * Q8_0BlockBytes;
 
