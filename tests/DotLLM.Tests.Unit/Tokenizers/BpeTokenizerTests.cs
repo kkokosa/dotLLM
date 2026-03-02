@@ -264,12 +264,14 @@ public class BpeTokenizerTests
     public void GgufFactory_LoadsSentencePieceTokenizer()
     {
         // Build GgufMetadata directly from a dictionary — no file needed.
+        // Vocab includes ▁ (token 6) so that addBosSpace=true doesn't fall through to byte
+        // fallback — real SentencePiece models always have ▁ in the vocabulary.
         var entries = new Dictionary<string, GgufMetadataValue>
         {
             ["tokenizer.ggml.model"]        = new(GgufValueType.String, "llama"),
-            ["tokenizer.ggml.tokens"]       = new(GgufValueType.Array, new string[] { "<unk>", "<s>", "</s>", "a", "b", "ab" }),
-            ["tokenizer.ggml.scores"]       = new(GgufValueType.Array, new float[]  { 0f, 0f, 0f, -1.0f, -2.0f, -0.5f }),
-            ["tokenizer.ggml.token_type"]   = new(GgufValueType.Array, new int[]    { 1, 2, 2, 0, 0, 0 }),
+            ["tokenizer.ggml.tokens"]       = new(GgufValueType.Array, new string[] { "<unk>", "<s>", "</s>", "a", "b", "ab", "\u2581" }),
+            ["tokenizer.ggml.scores"]       = new(GgufValueType.Array, new float[]  { 0f, 0f, 0f, -1.0f, -2.0f, -0.5f, -5f }),
+            ["tokenizer.ggml.token_type"]   = new(GgufValueType.Array, new int[]    { 1, 2, 2, 0, 0, 0, 0 }),
             ["tokenizer.ggml.bos_token_id"] = new(GgufValueType.UInt32, 1u),
             ["tokenizer.ggml.eos_token_id"] = new(GgufValueType.UInt32, 2u),
         };
@@ -280,11 +282,12 @@ public class BpeTokenizerTests
         Assert.NotNull(tokenizer);
         Assert.Equal(1, tokenizer.BosTokenId);
         Assert.Equal(2, tokenizer.EosTokenId);
-        Assert.Equal(6, tokenizer.VocabSize);
+        Assert.Equal(7, tokenizer.VocabSize);
 
-        // "ab" should encode to token 5 (the "ab" merge).
+        // "ab" with addBosSpace=true normalises to "▁ab".
+        // ▁(6) is a direct vocab hit; (a,b) merges to ab(5) → [▁, ab].
         int[] ids = tokenizer.Encode("ab");
-        Assert.Equal([5], ids);
+        Assert.Equal([6, 5], ids);
     }
 
     [Fact]
