@@ -112,7 +112,7 @@ def call_gemini(api_key: str, prompt: str) -> str:
     )
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=300) as resp:
                 body = json.loads(resp.read())
             return body['candidates'][0]['content']['parts'][0]['text']
         except urllib.error.HTTPError as e:
@@ -123,6 +123,13 @@ def call_gemini(api_key: str, prompt: str) -> str:
                 time.sleep(wait)
                 continue
             raise RuntimeError(f'Gemini API error {e.code}: {error_body}') from e
+        except TimeoutError as e:
+            if attempt < 2:
+                wait = 20 * (attempt + 1)  # 20s, then 40s
+                print(f'Gemini timeout (attempt {attempt + 1}/3) — retrying in {wait}s...')
+                time.sleep(wait)
+                continue
+            raise RuntimeError('Gemini API timed out after 3 attempts (300s each)') from e
     raise RuntimeError('Gemini API unreachable after 3 attempts')
 
 
@@ -263,6 +270,12 @@ def main():
                 '**Gemini** ✦\n\n'
                 '> ⚠️ The Gemini API is temporarily unavailable (503 — high demand). '
                 'Please retry your `@gemini` comment in a few minutes.'
+            )
+        elif 'timed out' in msg:
+            reply = (
+                '**Gemini** ✦\n\n'
+                '> ⏱️ The Gemini API timed out (prompt was likely too large or the model '
+                'is under load). Please retry your `@gemini` comment in a few minutes.'
             )
         else:
             reply = f'**Gemini** ✦\n\n> ❌ Unexpected API error: `{msg}`'
