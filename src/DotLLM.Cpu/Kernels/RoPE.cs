@@ -23,6 +23,13 @@ public static class RoPE
     private const int StackAllocThreshold = 8192;
 
     /// <summary>
+    /// AVX2 deinterleave permutation indices: lower lane [0,2,4,6] gathers evens,
+    /// upper lane [1,3,5,7] gathers odds. Stored as RVA static data to avoid
+    /// re-materialization at each inlined call site.
+    /// </summary>
+    private static ReadOnlySpan<int> DeinterleaveIndices => [0, 2, 4, 6, 1, 3, 5, 7];
+
+    /// <summary>
     /// Pre-computes cos/sin frequency tables for RoPE. Tables are indexed as
     /// <c>table[pos * halfDim + i]</c> where <c>halfDim = headDim / 2</c>.
     /// </summary>
@@ -118,9 +125,7 @@ public static class RoPE
         {
             // Process 4 dimension pairs (8 floats) per iteration.
             // Deinterleave even/odd via a single permute, apply rotation, re-interleave.
-            // Index vector: lower lane [0,2,4,6] gathers evens, upper lane [1,3,5,7] gathers odds.
-            // Hoisted out of the loop — constant vector creation inside would re-materialize each iteration.
-            var deinterleaveIdx = Vector256.Create(0, 2, 4, 6, 1, 3, 5, 7);
+            var deinterleaveIdx = Vector256.Create(DeinterleaveIndices);
 
             for (; i + 4 <= halfDim; i += 4)
             {

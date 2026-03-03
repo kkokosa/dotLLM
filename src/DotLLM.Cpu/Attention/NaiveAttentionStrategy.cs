@@ -121,6 +121,11 @@ public sealed class NaiveAttentionStrategy : IAttentionStrategy
             _elementCount = shape.ElementCount;
         }
 
+        ~UnmanagedTensor()
+        {
+            Dispose();
+        }
+
         public void Dispose()
         {
             if (_ptr != 0)
@@ -131,6 +136,7 @@ public sealed class NaiveAttentionStrategy : IAttentionStrategy
                 }
                 _ptr = 0;
             }
+            GC.SuppressFinalize(this);
         }
     }
 }

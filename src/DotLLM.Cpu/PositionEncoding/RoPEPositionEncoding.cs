@@ -56,6 +56,8 @@ public sealed class RoPEPositionEncoding : IPositionEncoding, IDisposable
         // Expected layout: [seqLen, numHeads * headDim] for Q, [seqLen, numKvHeads * headDim] for K.
         // Head count uses _headDim (full head dimension) for correct stride computation.
         int seqLen = positions.Length;
+        if (seqLen == 0) return (q, k);
+
         int qTotalDim = (int)(q.ElementCount / seqLen);
         int kTotalDim = (int)(k.ElementCount / seqLen);
         int numHeads = qTotalDim / _headDim;
