@@ -123,14 +123,16 @@ def call_gemini(api_key: str, prompt: str) -> str:
                 time.sleep(wait)
                 continue
             raise RuntimeError(f'Gemini API error {e.code}: {error_body}') from e
-        except TimeoutError as e:
+        except OSError as e:
+            # Catches TimeoutError, ConnectionResetError, RemoteDisconnected, etc.
+            # — all network-layer failures inherit from OSError.
             if attempt < 2:
                 wait = 20 * (attempt + 1)  # 20s, then 40s
-                print(f'Gemini timeout (attempt {attempt + 1}/3) — retrying in {wait}s...')
+                print(f'Gemini network error ({type(e).__name__}, attempt {attempt + 1}/3)'
+                      f' — retrying in {wait}s...')
                 time.sleep(wait)
                 continue
-            raise RuntimeError('Gemini API timed out after 3 attempts (300s each)') from e
-    raise RuntimeError('Gemini API unreachable after 3 attempts')
+            raise RuntimeError(f'Gemini API unreachable after 3 attempts: {e}') from e
 
 
 def post_reply(event_name: str, event: dict, repo: str, body: str):
@@ -271,11 +273,12 @@ def main():
                 '> ⚠️ The Gemini API is temporarily unavailable (503 — high demand). '
                 'Please retry your `@gemini` comment in a few minutes.'
             )
-        elif 'timed out' in msg:
+        elif 'unreachable' in msg or 'timed out' in msg:
             reply = (
                 '**Gemini** ✦\n\n'
-                '> ⏱️ The Gemini API timed out (prompt was likely too large or the model '
-                'is under load). Please retry your `@gemini` comment in a few minutes.'
+                '> ⏱️ The Gemini API did not respond after 3 attempts (timeout, '
+                'disconnection, or overload). Please retry your `@gemini` comment '
+                'in a few minutes.'
             )
         else:
             reply = f'**Gemini** ✦\n\n> ❌ Unexpected API error: `{msg}`'
