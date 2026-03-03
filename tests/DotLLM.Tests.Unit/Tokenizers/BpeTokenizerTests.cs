@@ -161,6 +161,17 @@ public class BpeTokenizerTests
         Assert.Equal(ids1, ids2);
     }
 
+    [Fact]
+    public void Encode_SpaceMarkerNotDoublePrepended_WhenTextStartsWithRawMarker()
+    {
+        var tok = BuildSpaceMarkerVocab();
+        // Input starting with raw ▁ (U+2581) should NOT get another ▁ prepended.
+        // "\u2581hello" → stays "▁hello" (no double ▁▁hello), same result as "hello".
+        int[] ids1 = tok.Encode("hello");
+        int[] ids2 = tok.Encode("\u2581hello");
+        Assert.Equal(ids1, ids2);
+    }
+
     // -------------------------------------------------------------------------
     // Decode tests
     // -------------------------------------------------------------------------

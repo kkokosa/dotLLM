@@ -116,32 +116,48 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
     {
         // Convert text to GPT-2 byte-level Unicode encoding:
         // each UTF-8 byte of the input maps to a specific Unicode char (byte_encoder in GPT-2).
-        byte[] utf8Bytes = Encoding.UTF8.GetBytes(text);
-        char[] gpt2Chars = ArrayPool<char>.Shared.Rent(utf8Bytes.Length);
-        for (int i = 0; i < utf8Bytes.Length; i++)
-            gpt2Chars[i] = Gpt2ByteToUnicode[utf8Bytes[i]];
-        string gpt2Text = new string(gpt2Chars, 0, utf8Bytes.Length);
-        ArrayPool<char>.Shared.Return(gpt2Chars);
-
-        // TODO: implement regex pre-tokenization using tokenizer.ggml.pre pattern.
-        // Without it, this path treats the whole GPT-2-encoded text as one segment, which is
-        // incorrect for most tiktoken models (splits should happen at word boundaries first).
-        Symbol[] symbols = ArrayPool<Symbol>.Shared.Rent(gpt2Text.Length * 2);
-        int symbolCount;
+        // Uses ArrayPool for both byte[] and char[] to avoid heap allocations.
+        int utf8Len = Encoding.UTF8.GetByteCount(text);
+        byte[] rentedUtf8 = ArrayPool<byte>.Shared.Rent(utf8Len);
         try
         {
-            symbolCount = BuildInitialSymbols(gpt2Text, symbols);
+            Encoding.UTF8.GetBytes(text, rentedUtf8);
+            char[] rentedGpt2 = ArrayPool<char>.Shared.Rent(utf8Len);
+            try
+            {
+                for (int i = 0; i < utf8Len; i++)
+                    rentedGpt2[i] = Gpt2ByteToUnicode[rentedUtf8[i]];
+                ReadOnlySpan<char> gpt2Text = rentedGpt2.AsSpan(0, utf8Len);
 
-            var queue = new PriorityQueue<BgramEntry, (int, int)>();
-            for (int i = 0; i < symbolCount - 1; i++)
-                TryEnqueueBigram(symbols, i, i + 1, queue);
+                // TODO: implement regex pre-tokenization using tokenizer.ggml.pre pattern.
+                // Without it, this path treats the whole GPT-2-encoded text as one segment, which is
+                // incorrect for most tiktoken models (splits should happen at word boundaries first).
+                Symbol[] symbols = ArrayPool<Symbol>.Shared.Rent(utf8Len * 2);
+                int symbolCount;
+                try
+                {
+                    symbolCount = BuildInitialSymbols(gpt2Text, symbols);
 
-            RunMergeLoop(symbols, queue);
-            return BpeCore.CollectTokenIds(symbols, symbolCount);
+                    var queue = new PriorityQueue<BgramEntry, (int, int)>(symbolCount);
+                    for (int i = 0; i < symbolCount - 1; i++)
+                        TryEnqueueBigram(symbols, i, i + 1, queue);
+
+                    RunMergeLoop(symbols, queue);
+                    return BpeCore.CollectTokenIds(symbols, symbolCount);
+                }
+                finally
+                {
+                    ArrayPool<Symbol>.Shared.Return(symbols, clearArray: false);
+                }
+            }
+            finally
+            {
+                ArrayPool<char>.Shared.Return(rentedGpt2);
+            }
         }
         finally
         {
-            ArrayPool<Symbol>.Shared.Return(symbols, clearArray: false);
+            ArrayPool<byte>.Shared.Return(rentedUtf8);
         }
     }
 
@@ -186,18 +202,30 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
         if ((uint)tokenId >= (uint)_idToToken.Length) return string.Empty;
         string token = _idToToken[tokenId];
         // GPT-2: each token char encodes one byte.
-        byte[] bytes = new byte[token.Length];
-        for (int i = 0; i < token.Length; i++)
+        // stackalloc for typical tokens (≤256 chars), ArrayPool fallback for safety.
+        byte[]? rented = null;
+        try
         {
-            int idx = (int)token[i];
-            short bval = (uint)idx < (uint)Gpt2UnicodeToByteTable.Length
-                ? Gpt2UnicodeToByteTable[idx] : (short)-1;
-            bytes[i] = bval >= 0 ? (byte)bval : (byte)0;
+            Span<byte> bytes = token.Length <= 256
+                ? stackalloc byte[256]
+                : (rented = ArrayPool<byte>.Shared.Rent(token.Length));
+            bytes = bytes[..token.Length];
+            for (int i = 0; i < token.Length; i++)
+            {
+                int idx = (int)token[i];
+                short bval = (uint)idx < (uint)Gpt2UnicodeToByteTable.Length
+                    ? Gpt2UnicodeToByteTable[idx] : (short)-1;
+                bytes[i] = bval >= 0 ? (byte)bval : (byte)0;
+            }
+            return Encoding.UTF8.GetString(bytes);
         }
-        return Encoding.UTF8.GetString(bytes);
+        finally
+        {
+            if (rented is not null) ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
-    private int BuildInitialSymbols(string text, Symbol[] symbols)
+    private int BuildInitialSymbols(ReadOnlySpan<char> text, Symbol[] symbols)
     {
         int count = 0;
         int i = 0;
@@ -206,7 +234,7 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
         {
             int charLen = char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])
                 ? 2 : 1;
-            ReadOnlySpan<char> cpSpan = text.AsSpan(i, charLen);
+            ReadOnlySpan<char> cpSpan = text.Slice(i, charLen);
             i += charLen;
 
             if (_vocabTrie.TryMatchLongest(cpSpan, out int tokenId, out _, out int ml) && ml == charLen)
@@ -242,20 +270,31 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
         if (!_mergeRanks.TryGetValue((symbols[leftIdx].TokenId, symbols[rightIdx].TokenId), out int rank)) return;
 
         // Resolve merged token ID via trie (stack-allocated concat — no heap alloc).
+        // ArrayPool fallback for the rare case where combined token length exceeds 256.
         string leftText = _idToToken[symbols[leftIdx].TokenId];
         string rightText = _idToToken[symbols[rightIdx].TokenId];
         int totalLen = leftText.Length + rightText.Length;
-        Span<char> buf = totalLen <= 256 ? stackalloc char[256] : new char[totalLen];
-        Span<char> concat = buf[..totalLen];
-        leftText.AsSpan().CopyTo(concat);
-        rightText.AsSpan().CopyTo(concat[leftText.Length..]);
-
-        if (_vocabTrie.TryMatchLongest(concat, out int mergedId, out _, out int ml) && ml == totalLen)
+        char[]? rented = null;
+        try
         {
-            int leftToken = symbols[leftIdx].TokenId;
-            int rightToken = symbols[rightIdx].TokenId;
-            queue.Enqueue(new BgramEntry(leftIdx, rightIdx, mergedId, leftToken, rightToken),
-                (rank, leftIdx));
+            Span<char> buf = totalLen <= 256
+                ? stackalloc char[256]
+                : (rented = ArrayPool<char>.Shared.Rent(totalLen));
+            Span<char> concat = buf[..totalLen];
+            leftText.AsSpan().CopyTo(concat);
+            rightText.AsSpan().CopyTo(concat[leftText.Length..]);
+
+            if (_vocabTrie.TryMatchLongest(concat, out int mergedId, out _, out int ml) && ml == totalLen)
+            {
+                int leftToken = symbols[leftIdx].TokenId;
+                int rightToken = symbols[rightIdx].TokenId;
+                queue.Enqueue(new BgramEntry(leftIdx, rightIdx, mergedId, leftToken, rightToken),
+                    (rank, leftIdx));
+            }
+        }
+        finally
+        {
+            if (rented is not null) ArrayPool<char>.Shared.Return(rented);
         }
     }
 

@@ -40,30 +40,43 @@ internal sealed class SentencePieceEncoding : IBpeEncoding
     public int[] Encode(string text)
     {
         // 1. Normalize: replace ' ' with ▁ throughout; optionally prepend ▁.
-        string normalized = text.Replace(' ', SpaceMarker);
-        if (_addBosSpace && (normalized.Length == 0 || normalized[0] != SpaceMarker))
-            normalized = SpaceMarker + normalized;
-
-        // 2. Build initial symbol list: one symbol per Unicode code point.
-        Symbol[] symbols = ArrayPool<Symbol>.Shared.Rent(normalized.Length);
-        int symbolCount;
+        //    Uses ArrayPool to avoid string allocations on the hot path.
+        bool needPrepend = _addBosSpace && (text.Length == 0 || (text[0] != ' ' && text[0] != SpaceMarker));
+        int normalizedLen = text.Length + (needPrepend ? 1 : 0);
+        char[] rentedNorm = ArrayPool<char>.Shared.Rent(normalizedLen);
         try
         {
-            symbolCount = BuildInitialSymbols(normalized, symbols);
+            int offset = needPrepend ? 1 : 0;
+            if (needPrepend) rentedNorm[0] = SpaceMarker;
+            text.AsSpan().CopyTo(rentedNorm.AsSpan(offset));
+            MemoryExtensions.Replace(rentedNorm.AsSpan(offset, text.Length), ' ', SpaceMarker);
+            ReadOnlySpan<char> normalized = rentedNorm.AsSpan(0, normalizedLen);
 
-            // 3. Run BPE merge loop using a min-heap with (-score, leftIdx) as priority.
-            var queue = new PriorityQueue<BgramEntry, (float, int)>();
-            for (int i = 0; i < symbolCount - 1; i++)
-                TryEnqueueBigram(symbols, i, i + 1, queue);
+            // 2. Build initial symbol list: one symbol per Unicode code point.
+            Symbol[] symbols = ArrayPool<Symbol>.Shared.Rent(normalizedLen);
+            int symbolCount;
+            try
+            {
+                symbolCount = BuildInitialSymbols(normalized, symbols);
 
-            RunMergeLoop(symbols, queue);
+                // 3. Run BPE merge loop using a min-heap with (-score, leftIdx) as priority.
+                var queue = new PriorityQueue<BgramEntry, (float, int)>(symbolCount);
+                for (int i = 0; i < symbolCount - 1; i++)
+                    TryEnqueueBigram(symbols, i, i + 1, queue);
 
-            // 4. Collect surviving symbols.
-            return BpeCore.CollectTokenIds(symbols, symbolCount);
+                RunMergeLoop(symbols, queue);
+
+                // 4. Collect surviving symbols.
+                return BpeCore.CollectTokenIds(symbols, symbolCount);
+            }
+            finally
+            {
+                ArrayPool<Symbol>.Shared.Return(symbols, clearArray: false);
+            }
         }
         finally
         {
-            ArrayPool<Symbol>.Shared.Return(symbols, clearArray: false);
+            ArrayPool<char>.Shared.Return(rentedNorm);
         }
     }
 
@@ -93,7 +106,9 @@ internal sealed class SentencePieceEncoding : IBpeEncoding
             else
             {
                 BpeCore.FlushByteBuffer(sb, byteBuffer, ref byteCount);
-                sb.Append(token.Replace(SpaceMarker, ' '));
+                int startLen = sb.Length;
+                sb.Append(token);
+                sb.Replace(SpaceMarker, ' ', startLen, token.Length);
             }
         }
         BpeCore.FlushByteBuffer(sb, byteBuffer, ref byteCount);
@@ -101,13 +116,9 @@ internal sealed class SentencePieceEncoding : IBpeEncoding
         if (byteBuffer != null)
             ArrayPool<byte>.Shared.Return(byteBuffer);
 
-        string result = sb.ToString();
-
         // Strip the single leading space introduced by ▁ prepending (matches HF tokeniser behaviour).
-        if (_addBosSpace && result.Length > 0 && result[0] == ' ')
-            result = result[1..];
-
-        return result;
+        bool stripLeading = _addBosSpace && sb.Length > 0 && sb[0] == ' ';
+        return stripLeading ? sb.ToString(1, sb.Length - 1) : sb.ToString();
     }
 
     public string DecodeToken(int tokenId)
@@ -117,12 +128,13 @@ internal sealed class SentencePieceEncoding : IBpeEncoding
         if (BpeCore.IsByteToken(token, out byte b))
         {
             // Return single-byte interpretation; caller should use Decode for multi-byte sequences.
-            return Encoding.Latin1.GetString([b]);
+            Span<byte> single = stackalloc byte[] { b };
+            return Encoding.Latin1.GetString(single);
         }
-        return token.Replace(SpaceMarker, ' ');
+        return token.Contains(SpaceMarker) ? token.Replace(SpaceMarker, ' ') : token;
     }
 
-    private int BuildInitialSymbols(string text, Symbol[] symbols)
+    private int BuildInitialSymbols(ReadOnlySpan<char> text, Symbol[] symbols)
     {
         int count = 0;
         int i = 0;
@@ -133,7 +145,7 @@ internal sealed class SentencePieceEncoding : IBpeEncoding
             // Consume one Unicode code point (1 or 2 chars for a surrogate pair).
             int charLen = char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])
                 ? 2 : 1;
-            ReadOnlySpan<char> cpSpan = text.AsSpan(i, charLen);
+            ReadOnlySpan<char> cpSpan = text.Slice(i, charLen);
             i += charLen;
 
             // Try exact vocab match for this code point.
@@ -173,20 +185,31 @@ internal sealed class SentencePieceEncoding : IBpeEncoding
         int totalLen = leftText.Length + rightText.Length;
 
         // Build concatenation on the stack to avoid string allocation.
-        Span<char> buf = totalLen <= 256 ? stackalloc char[256] : new char[totalLen];
-        Span<char> concat = buf[..totalLen];
-        leftText.AsSpan().CopyTo(concat);
-        rightText.AsSpan().CopyTo(concat[leftText.Length..]);
-
-        if (_vocabTrie.TryMatchLongest(concat, out int mergedId, out float score, out int ml)
-            && ml == totalLen)
+        // ArrayPool fallback for the rare case where combined token length exceeds 256.
+        char[]? rented = null;
+        try
         {
-            int leftToken = symbols[leftIdx].TokenId;
-            int rightToken = symbols[rightIdx].TokenId;
-            // Negate score so the min-heap behaves as a max-heap by score.
-            // Use leftIdx as secondary key: lower index = higher priority on ties.
-            queue.Enqueue(new BgramEntry(leftIdx, rightIdx, mergedId, leftToken, rightToken),
-                (-score, leftIdx));
+            Span<char> buf = totalLen <= 256
+                ? stackalloc char[256]
+                : (rented = ArrayPool<char>.Shared.Rent(totalLen));
+            Span<char> concat = buf[..totalLen];
+            leftText.AsSpan().CopyTo(concat);
+            rightText.AsSpan().CopyTo(concat[leftText.Length..]);
+
+            if (_vocabTrie.TryMatchLongest(concat, out int mergedId, out float score, out int ml)
+                && ml == totalLen)
+            {
+                int leftToken = symbols[leftIdx].TokenId;
+                int rightToken = symbols[rightIdx].TokenId;
+                // Negate score so the min-heap behaves as a max-heap by score.
+                // Use leftIdx as secondary key: lower index = higher priority on ties.
+                queue.Enqueue(new BgramEntry(leftIdx, rightIdx, mergedId, leftToken, rightToken),
+                    (-score, leftIdx));
+            }
+        }
+        finally
+        {
+            if (rented is not null) ArrayPool<char>.Shared.Return(rented);
         }
     }
 
