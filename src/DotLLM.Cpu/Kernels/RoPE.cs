@@ -40,14 +40,38 @@ public static class RoPE
 
         int halfDim = headDim / 2;
 
+        // Frequencies depend only on dimension index, not on position.
+        // Precompute once to avoid calling MathF.Pow O(maxSeqLen × halfDim) times —
+        // for headDim=128 and seqLen=4096 that is 4096× fewer Pow calls.
+        if (halfDim * sizeof(float) <= StackAllocThreshold)
+        {
+            Span<float> freqs = stackalloc float[halfDim];
+            FillTables(maxSeqLen, headDim, theta, cosTable, sinTable, freqs);
+        }
+        else
+        {
+            float[] rented = ArrayPool<float>.Shared.Rent(halfDim);
+            FillTables(maxSeqLen, headDim, theta, cosTable, sinTable, rented.AsSpan(0, halfDim));
+            ArrayPool<float>.Shared.Return(rented);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void FillTables(int maxSeqLen, int headDim, float theta,
+                                    Span<float> cosTable, Span<float> sinTable, Span<float> freqs)
+    {
+        int halfDim = freqs.Length;
+        for (int i = 0; i < halfDim; i++)
+            freqs[i] = 1.0f / MathF.Pow(theta, 2.0f * i / headDim);
+
         for (int pos = 0; pos < maxSeqLen; pos++)
         {
+            int tableBase = pos * halfDim;
             for (int i = 0; i < halfDim; i++)
             {
-                float freq = 1.0f / MathF.Pow(theta, 2.0f * i / headDim);
-                float angle = pos * freq;
-                cosTable[pos * halfDim + i] = MathF.Cos(angle);
-                sinTable[pos * halfDim + i] = MathF.Sin(angle);
+                float angle = pos * freqs[i];
+                cosTable[tableBase + i] = MathF.Cos(angle);
+                sinTable[tableBase + i] = MathF.Sin(angle);
             }
         }
     }
@@ -82,6 +106,7 @@ public static class RoPE
     /// <param name="cos">Cosine table slice for this position. Length must equal headDim / 2.</param>
     /// <param name="sin">Sine table slice for this position. Length must equal headDim / 2.</param>
     /// <param name="headDim">Dimension per head (must be even).</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     [SkipLocalsInit]
     public static void ApplyRotation(Span<float> vec, ReadOnlySpan<float> cos,
                                       ReadOnlySpan<float> sin, int headDim)
@@ -92,7 +117,11 @@ public static class RoPE
         if (Avx2.IsSupported && halfDim >= 4)
         {
             // Process 4 dimension pairs (8 floats) per iteration.
-            // Deinterleave even/odd, apply rotation matrix, re-interleave.
+            // Deinterleave even/odd via a single permute, apply rotation, re-interleave.
+            // Index vector: lower lane [0,2,4,6] gathers evens, upper lane [1,3,5,7] gathers odds.
+            // Hoisted out of the loop — constant vector creation inside would re-materialize each iteration.
+            var deinterleaveIdx = Vector256.Create(0, 2, 4, 6, 1, 3, 5, 7);
+
             for (; i + 4 <= halfDim; i += 4)
             {
                 int vecOffset = i * 2;
@@ -100,29 +129,30 @@ public static class RoPE
                 // Load 8 interleaved floats: [e0, o0, e1, o1, e2, o2, e3, o3]
                 var interleaved = Vector256.LoadUnsafe(ref vec[vecOffset]);
 
-                // Deinterleave to even: [e0, e1, e2, e3] and odd: [o0, o1, o2, o3]
-                // Using permute: indices 0,2,4,6 for even, 1,3,5,7 for odd
-                var even = Avx2.PermuteVar8x32(interleaved.AsSingle(),
-                    Vector256.Create(0, 2, 4, 6, 1, 3, 5, 7)).GetLower();
-                var odd = Avx2.PermuteVar8x32(interleaved.AsSingle(),
-                    Vector256.Create(0, 2, 4, 6, 1, 3, 5, 7)).GetUpper();
+                // Single permute — extract lower (evens) and upper (odds) from same result.
+                var permuted = Avx2.PermuteVar8x32(interleaved.AsSingle(), deinterleaveIdx);
+                var even = permuted.GetLower(); // [e0, e1, e2, e3]
+                var odd  = permuted.GetUpper(); // [o0, o1, o2, o3]
 
                 // Load cos/sin for these 4 pairs
                 var cosVec = Vector128.LoadUnsafe(in cos[i]);
                 var sinVec = Vector128.LoadUnsafe(in sin[i]);
 
-                // Rotation: even' = even * cos - odd * sin
-                //           odd'  = even * sin + odd * cos
+                // Rotation: even' = even*cos - odd*sin = -(odd*sin) + even*cos
+                //           odd'  = even*sin + odd*cos
                 Vector128<float> newEven, newOdd;
                 if (Fma.IsSupported)
                 {
-                    newEven = Fma.MultiplySubtract(even, cosVec, odd * sinVec);
-                    newOdd = Fma.MultiplyAdd(even, sinVec, odd * cosVec);
+                    // MultiplyAddNegated(a, b, c) = -(a*b) + c = c - a*b
+                    // even' = -(odd * sin) + (even * cos)
+                    newEven = Fma.MultiplyAddNegated(odd, sinVec, even * cosVec);
+                    // odd'  = (even * sin) + (odd * cos)
+                    newOdd  = Fma.MultiplyAdd(even, sinVec, odd * cosVec);
                 }
                 else
                 {
                     newEven = even * cosVec - odd * sinVec;
-                    newOdd = even * sinVec + odd * cosVec;
+                    newOdd  = even * sinVec + odd * cosVec;
                 }
 
                 // Re-interleave: [ne0, no0, ne1, no1, ne2, no2, ne3, no3]

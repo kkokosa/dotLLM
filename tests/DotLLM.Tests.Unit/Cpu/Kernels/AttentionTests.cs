@@ -354,6 +354,28 @@ public sealed class AttentionTests
                               numHeads: 3, numKvHeads: 2, headDim: 4, positionOffset: 0));
     }
 
+    [Fact]
+    public void ApplyCausalMask_ChunkedPrefill_CorrectBoundary()
+    {
+        // Second chunk of a prefill: positionOffset=2, seqQ=2.
+        // Q token 0 is at absolute position 2 → can attend j ≤ 2 (not j=3,4)
+        // Q token 1 is at absolute position 3 → can attend j ≤ 3 (not j=4)
+        const int seqQ = 2, seqKv = 5, positionOffset = 2;
+        float[] scores = new float[seqQ * seqKv];
+        Array.Fill(scores, 1.0f);
+
+        Attention.ApplyCausalMask(scores, seqQ, seqKv, positionOffset);
+
+        // Row 0: visible j=0..2, masked j=3,4
+        Assert.Equal(1.0f, scores[0 * seqKv + 2]);
+        Assert.Equal(float.NegativeInfinity, scores[0 * seqKv + 3]);
+        Assert.Equal(float.NegativeInfinity, scores[0 * seqKv + 4]);
+
+        // Row 1: visible j=0..3, masked j=4
+        Assert.Equal(1.0f, scores[1 * seqKv + 3]);
+        Assert.Equal(float.NegativeInfinity, scores[1 * seqKv + 4]);
+    }
+
     private static float[] RandomArray(Random rng, int length)
     {
         float[] arr = new float[length];

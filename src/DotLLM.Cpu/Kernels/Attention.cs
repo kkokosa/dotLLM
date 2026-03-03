@@ -65,7 +65,6 @@ public static class Attention
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void ExecuteCore(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
                                      Span<float> output, Span<float> scores,
                                      int seqQ, int seqKv, int numHeads, int headDim,
@@ -98,6 +97,7 @@ public static class Attention
 
     /// <summary>
     /// Scalar reference implementation of <see cref="Execute"/> for correctness verification.
+    /// Not for use on the inference hot path — allocates a managed scores array.
     /// </summary>
     [SkipLocalsInit]
     internal static void ExecuteScalar(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
@@ -218,6 +218,8 @@ public static class Attention
             for (int j = 0; j < seqKv; j++)
             {
                 float w = weights[i * seqKv + j];
+                // Exact 0f comparison is safe: softmax(exp(-∞ - max)) == 0f exactly in IEEE 754.
+                // ApplyCausalMask writes float.NegativeInfinity, which exp() maps to exactly zero.
                 if (w == 0f) continue;
 
                 var vRow = v.Slice(j * kvStride + kvHeadIdx * headDim, headDim);
