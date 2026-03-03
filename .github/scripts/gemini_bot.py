@@ -13,6 +13,7 @@ import os
 import sys
 import subprocess
 import tempfile
+import time
 import urllib.request
 import urllib.error
 
@@ -109,12 +110,20 @@ def call_gemini(api_key: str, prompt: str) -> str:
         headers={'Content-Type': 'application/json'},
         method='POST',
     )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            body = json.loads(resp.read())
-        return body['candidates'][0]['content']['parts'][0]['text']
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f'Gemini API error {e.code}: {e.read().decode()}') from e
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read())
+            return body['candidates'][0]['content']['parts'][0]['text']
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode()
+            if e.code == 503 and attempt < 2:
+                wait = 15 * (attempt + 1)  # 15s, then 30s
+                print(f'Gemini 503 (attempt {attempt + 1}/3) — retrying in {wait}s...')
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f'Gemini API error {e.code}: {error_body}') from e
+    raise RuntimeError('Gemini API unreachable after 3 attempts')
 
 
 def post_reply(event_name: str, event: dict, repo: str, body: str):
@@ -244,8 +253,21 @@ def main():
     # -----------------------------------------------------------------------
     # Call Gemini and post reply
     # -----------------------------------------------------------------------
-    response = call_gemini(api_key, full_prompt)
-    reply = f'**Gemini** ✦\n\n{response}'
+    try:
+        response = call_gemini(api_key, full_prompt)
+        reply = f'**Gemini** ✦\n\n{response}'
+    except RuntimeError as e:
+        msg = str(e)
+        if '503' in msg:
+            reply = (
+                '**Gemini** ✦\n\n'
+                '> ⚠️ The Gemini API is temporarily unavailable (503 — high demand). '
+                'Please retry your `@gemini` comment in a few minutes.'
+            )
+        else:
+            reply = f'**Gemini** ✦\n\n> ❌ Unexpected API error: `{msg}`'
+        print(f'API error, posting notice: {msg}', file=sys.stderr)
+
     post_reply(event_name, event, repo, reply)
     print('Reply posted successfully.')
 
