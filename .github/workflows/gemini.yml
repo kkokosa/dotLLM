@@ -1,0 +1,38 @@
+name: Gemini Bot
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened]
+
+jobs:
+  gemini:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@gemini') && github.event.comment.user.login != 'github-actions[bot]') ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@gemini') && github.event.comment.user.login != 'github-actions[bot]') ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@gemini') && github.event.review.user.login != 'github-actions[bot]') ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@gemini') || contains(github.event.issue.title, '@gemini')) && github.event.issue.user.login != 'github-actions[bot]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Gemini bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Set GEMINI_MODEL as a repository variable (Settings → Variables) to
+          # upgrade the model without touching code. Falls back to gemini-2.5-pro.
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python .github/scripts/gemini_bot.py
