@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using DotLLM.Core.Attention;
 using DotLLM.Core.Tensors;
 
@@ -53,12 +54,11 @@ public sealed class NaiveAttentionStrategy : IAttentionStrategy
         int numKvHeads = kShape[1] / headDim;
 
         // Allocate output tensor with same layout as Q.
-        // For now, create an unmanaged buffer matching Q's shape.
         long outputElements = q.ElementCount;
         nint outputPtr;
         unsafe
         {
-            outputPtr = (nint)System.Runtime.InteropServices.NativeMemory.AlignedAlloc(
+            outputPtr = (nint)NativeMemory.AlignedAlloc(
                 (nuint)(outputElements * sizeof(float)), 64);
         }
 
@@ -90,53 +90,8 @@ public sealed class NaiveAttentionStrategy : IAttentionStrategy
             unsafe
             {
                 if (outputPtr != 0)
-                    System.Runtime.InteropServices.NativeMemory.AlignedFree((void*)outputPtr);
+                    NativeMemory.AlignedFree((void*)outputPtr);
             }
-        }
-    }
-
-    /// <summary>
-    /// Minimal tensor implementation wrapping an unmanaged float buffer.
-    /// Owns the memory and frees it on disposal.
-    /// </summary>
-    private sealed class UnmanagedTensor : ITensor
-    {
-        private nint _ptr;
-        private readonly long _elementCount;
-
-        public TensorShape Shape { get; }
-        public DType DType { get; }
-        public int DeviceId { get; }
-        public nint DataPointer => _ptr;
-        public TensorMetadata Metadata => new(Shape, DType, DeviceId, DataPointer);
-        public long ElementCount => _elementCount;
-        public long ByteCount => _elementCount * DType.SizeInBytes;
-
-        public UnmanagedTensor(TensorShape shape, DType dtype, int deviceId, nint ptr)
-        {
-            Shape = shape;
-            DType = dtype;
-            DeviceId = deviceId;
-            _ptr = ptr;
-            _elementCount = shape.ElementCount;
-        }
-
-        ~UnmanagedTensor()
-        {
-            Dispose();
-        }
-
-        public void Dispose()
-        {
-            if (_ptr != 0)
-            {
-                unsafe
-                {
-                    System.Runtime.InteropServices.NativeMemory.AlignedFree((void*)_ptr);
-                }
-                _ptr = 0;
-            }
-            GC.SuppressFinalize(this);
         }
     }
 }
