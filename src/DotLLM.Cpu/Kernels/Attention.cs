@@ -19,6 +19,7 @@ public static class Attention
 
     /// <summary>
     /// Computes scaled dot-product attention with causal masking and GQA head broadcast.
+    /// Convenience overload that computes <c>scale = 1/sqrt(headDim)</c>.
     /// </summary>
     /// <param name="q">Query tensor. Layout: <c>[seqQ, numHeads * headDim]</c>.</param>
     /// <param name="k">Key tensor. Layout: <c>[seqKv, numKvHeads * headDim]</c>.</param>
@@ -35,6 +36,28 @@ public static class Attention
                                 Span<float> output,
                                 int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
                                 int positionOffset)
+        => Execute(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                   positionOffset, 1.0f / MathF.Sqrt(headDim));
+
+    /// <summary>
+    /// Computes scaled dot-product attention with causal masking, GQA head broadcast, and caller-provided scale.
+    /// </summary>
+    /// <param name="q">Query tensor. Layout: <c>[seqQ, numHeads * headDim]</c>.</param>
+    /// <param name="k">Key tensor. Layout: <c>[seqKv, numKvHeads * headDim]</c>.</param>
+    /// <param name="v">Value tensor. Layout: <c>[seqKv, numKvHeads * headDim]</c>.</param>
+    /// <param name="output">Output tensor. Layout: <c>[seqQ, numHeads * headDim]</c>.</param>
+    /// <param name="seqQ">Number of query positions (tokens being generated).</param>
+    /// <param name="seqKv">Number of key/value positions (total context length).</param>
+    /// <param name="numHeads">Number of query attention heads.</param>
+    /// <param name="numKvHeads">Number of key/value heads.</param>
+    /// <param name="headDim">Dimension per attention head.</param>
+    /// <param name="positionOffset">Position offset for causal mask. For prefill: 0. For decode: number of cached tokens.</param>
+    /// <param name="scale">Attention scale factor applied to dot-product scores.</param>
+    [SkipLocalsInit]
+    public static void Execute(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
+                                Span<float> output,
+                                int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
+                                int positionOffset, float scale)
     {
         if (headDim <= 0)
             throw new ArgumentException($"headDim must be positive, got {headDim}", nameof(headDim));
@@ -43,7 +66,6 @@ public static class Attention
                 $"numHeads ({numHeads}) must be divisible by numKvHeads ({numKvHeads})", nameof(numKvHeads));
 
         int groupSize = numHeads / numKvHeads;
-        float scale = 1.0f / MathF.Sqrt(headDim);
         int qStride = numHeads * headDim;
         int kvStride = numKvHeads * headDim;
         int scoreSize = seqQ * seqKv;
@@ -96,14 +118,25 @@ public static class Attention
     }
 
     /// <summary>
-    /// Scalar reference implementation of <see cref="Execute"/> for correctness verification.
-    /// Not for use on the inference hot path — allocates a managed scores array.
+    /// Scalar reference implementation for correctness verification.
+    /// Convenience overload that computes <c>scale = 1/sqrt(headDim)</c>.
     /// </summary>
     [SkipLocalsInit]
     internal static void ExecuteScalar(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
                                         Span<float> output,
                                         int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
                                         int positionOffset)
+        => ExecuteScalar(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                         positionOffset, 1.0f / MathF.Sqrt(headDim));
+
+    /// <summary>
+    /// Scalar reference implementation with caller-provided scale.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void ExecuteScalar(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
+                                        Span<float> output,
+                                        int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
+                                        int positionOffset, float scale)
     {
         if (headDim <= 0)
             throw new ArgumentException($"headDim must be positive, got {headDim}", nameof(headDim));
@@ -112,7 +145,6 @@ public static class Attention
                 $"numHeads ({numHeads}) must be divisible by numKvHeads ({numKvHeads})", nameof(numKvHeads));
 
         int groupSize = numHeads / numKvHeads;
-        float scale = 1.0f / MathF.Sqrt(headDim);
         int qStride = numHeads * headDim;
         int kvStride = numKvHeads * headDim;
 

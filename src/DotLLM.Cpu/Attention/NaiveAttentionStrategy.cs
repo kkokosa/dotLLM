@@ -5,11 +5,24 @@ namespace DotLLM.Cpu.Attention;
 
 /// <summary>
 /// O(N^2) reference attention strategy for CPU. Extracts pointers from <see cref="ITensor"/>
-/// inputs and delegates to <see cref="Kernels.Attention.Execute"/>.
+/// inputs and delegates to the <see cref="Kernels.Attention"/> kernel.
 /// Suitable for correctness verification and small sequence lengths.
 /// </summary>
 public sealed class NaiveAttentionStrategy : IAttentionStrategy
 {
+    private readonly int _headDim;
+
+    /// <summary>
+    /// Creates a new <see cref="NaiveAttentionStrategy"/> with the specified head dimension.
+    /// </summary>
+    /// <param name="headDim">Dimension per attention head. Used for head count computation and stride layout.</param>
+    public NaiveAttentionStrategy(int headDim)
+    {
+        if (headDim <= 0)
+            throw new ArgumentOutOfRangeException(nameof(headDim), headDim, "headDim must be positive.");
+        _headDim = headDim;
+    }
+
     /// <inheritdoc/>
     public bool SupportsPagedKvCache => false;
 
@@ -19,6 +32,11 @@ public sealed class NaiveAttentionStrategy : IAttentionStrategy
     /// <inheritdoc/>
     public ITensor ComputeAttention(ITensor q, ITensor k, ITensor v, ITensor? mask, float scale)
     {
+        if (mask is not null)
+            throw new NotSupportedException(
+                "NaiveAttentionStrategy only supports causal masking. " +
+                "Explicit attention masks require a different IAttentionStrategy implementation.");
+
         if (q.DType != DType.Float32 || k.DType != DType.Float32 || v.DType != DType.Float32)
             throw new ArgumentException("NaiveAttentionStrategy currently supports Float32 tensors only.");
 
@@ -30,9 +48,7 @@ public sealed class NaiveAttentionStrategy : IAttentionStrategy
         int seqQ = qShape[0];
         int seqKv = kShape[0];
 
-        // Determine headDim from scale: scale = 1/sqrt(headDim)
-        int headDim = (int)MathF.Round(1.0f / (scale * scale));
-
+        int headDim = _headDim;
         int numHeads = qShape[1] / headDim;
         int numKvHeads = kShape[1] / headDim;
 
@@ -60,7 +76,7 @@ public sealed class NaiveAttentionStrategy : IAttentionStrategy
 
                 Kernels.Attention.Execute(qSpan, kSpan, vSpan, outSpan,
                                           seqQ, seqKv, numHeads, numKvHeads, headDim,
-                                          positionOffset);
+                                          positionOffset, scale);
             }
 
             // Wrap output in a tensor. Caller owns disposal.

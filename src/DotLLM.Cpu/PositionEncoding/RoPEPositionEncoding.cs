@@ -16,6 +16,7 @@ public sealed class RoPEPositionEncoding : IPositionEncoding, IDisposable
     private float[]? _sinTable;
     private int _maxSeqLen;
     private int _headDim;
+    private int _ropeDim;
     private bool _disposed;
 
     /// <inheritdoc/>
@@ -26,16 +27,18 @@ public sealed class RoPEPositionEncoding : IPositionEncoding, IDisposable
         var ropeConfig = config.RoPEConfig
             ?? throw new InvalidOperationException("ModelConfig.RoPEConfig is required for RoPE position encoding.");
 
-        int headDim = ropeConfig.DimensionCount > 0 ? ropeConfig.DimensionCount : config.HeadDim;
-        int halfDim = headDim / 2;
-        int tableLen = maxSeqLen * halfDim;
+        int headDim = config.HeadDim;
+        int ropeDim = ropeConfig.DimensionCount > 0 ? ropeConfig.DimensionCount : headDim;
+        int halfRopeDim = ropeDim / 2;
+        int tableLen = maxSeqLen * halfRopeDim;
 
         _cosTable = new float[tableLen];
         _sinTable = new float[tableLen];
         _maxSeqLen = maxSeqLen;
         _headDim = headDim;
+        _ropeDim = ropeDim;
 
-        RoPE.PrecomputeFrequencyTable(maxSeqLen, headDim, ropeConfig.Theta, _cosTable, _sinTable);
+        RoPE.PrecomputeFrequencyTable(maxSeqLen, ropeDim, ropeConfig.Theta, _cosTable, _sinTable);
     }
 
     /// <inheritdoc/>
@@ -51,6 +54,7 @@ public sealed class RoPEPositionEncoding : IPositionEncoding, IDisposable
 
         // Extract dimensions from tensor shapes.
         // Expected layout: [seqLen, numHeads * headDim] for Q, [seqLen, numKvHeads * headDim] for K.
+        // Head count uses _headDim (full head dimension) for correct stride computation.
         int seqLen = positions.Length;
         int qTotalDim = (int)(q.ElementCount / seqLen);
         int kTotalDim = (int)(k.ElementCount / seqLen);
@@ -64,7 +68,7 @@ public sealed class RoPEPositionEncoding : IPositionEncoding, IDisposable
             var kSpan = new Span<float>((void*)k.DataPointer, (int)k.ElementCount);
 
             RoPE.Execute(qSpan, kSpan, positions,
-                         numHeads, numKvHeads, _headDim,
+                         numHeads, numKvHeads, _headDim, _ropeDim,
                          _cosTable, _sinTable);
         }
 

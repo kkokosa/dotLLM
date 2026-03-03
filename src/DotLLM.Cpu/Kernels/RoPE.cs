@@ -193,7 +193,7 @@ public static class RoPE
 
     /// <summary>
     /// Applies RoPE to query and key tensors. Data layout: <c>[seqLen, numHeads * headDim]</c> —
-    /// one row per token, all heads concatenated.
+    /// one row per token, all heads concatenated. Convenience overload that rotates all <paramref name="headDim"/> dimensions.
     /// </summary>
     /// <param name="q">Query tensor (modified in-place). Layout: <c>[seqLen, numHeads * headDim]</c>.</param>
     /// <param name="k">Key tensor (modified in-place). Layout: <c>[seqLen, numKvHeads * headDim]</c>.</param>
@@ -207,8 +207,29 @@ public static class RoPE
     public static void Execute(Span<float> q, Span<float> k, ReadOnlySpan<int> positions,
                                 int numHeads, int numKvHeads, int headDim,
                                 ReadOnlySpan<float> cosTable, ReadOnlySpan<float> sinTable)
+        => Execute(q, k, positions, numHeads, numKvHeads, headDim, headDim, cosTable, sinTable);
+
+    /// <summary>
+    /// Applies RoPE to query and key tensors with partial rotation support. Data layout:
+    /// <c>[seqLen, numHeads * headDim]</c> — one row per token, all heads concatenated.
+    /// When <paramref name="ropeDim"/> &lt; <paramref name="headDim"/>, only the first
+    /// <paramref name="ropeDim"/> dimensions of each head are rotated; the rest pass through unchanged.
+    /// </summary>
+    /// <param name="q">Query tensor (modified in-place). Layout: <c>[seqLen, numHeads * headDim]</c>.</param>
+    /// <param name="k">Key tensor (modified in-place). Layout: <c>[seqLen, numKvHeads * headDim]</c>.</param>
+    /// <param name="positions">Position index per token. Length must equal the sequence length.</param>
+    /// <param name="numHeads">Number of query attention heads.</param>
+    /// <param name="numKvHeads">Number of key/value heads.</param>
+    /// <param name="headDim">Full dimension per head (used for stride computation).</param>
+    /// <param name="ropeDim">Number of dimensions to rotate (must be even, &lt;= <paramref name="headDim"/>). Cos/sin tables must be sized for this value.</param>
+    /// <param name="cosTable">Pre-computed cosine table from <see cref="PrecomputeFrequencyTable"/>.</param>
+    /// <param name="sinTable">Pre-computed sine table from <see cref="PrecomputeFrequencyTable"/>.</param>
+    [SkipLocalsInit]
+    public static void Execute(Span<float> q, Span<float> k, ReadOnlySpan<int> positions,
+                                int numHeads, int numKvHeads, int headDim, int ropeDim,
+                                ReadOnlySpan<float> cosTable, ReadOnlySpan<float> sinTable)
     {
-        int halfDim = headDim / 2;
+        int halfRopeDim = ropeDim / 2;
         int qStride = numHeads * headDim;
         int kStride = numKvHeads * headDim;
         int seqLen = positions.Length;
@@ -216,34 +237,43 @@ public static class RoPE
         for (int t = 0; t < seqLen; t++)
         {
             int pos = positions[t];
-            var cos = cosTable.Slice(pos * halfDim, halfDim);
-            var sin = sinTable.Slice(pos * halfDim, halfDim);
+            var cos = cosTable.Slice(pos * halfRopeDim, halfRopeDim);
+            var sin = sinTable.Slice(pos * halfRopeDim, halfRopeDim);
 
             // Rotate all Q heads for this token.
             for (int h = 0; h < numHeads; h++)
             {
-                var headSlice = q.Slice(t * qStride + h * headDim, headDim);
-                ApplyRotation(headSlice, cos, sin, headDim);
+                var headSlice = q.Slice(t * qStride + h * headDim, ropeDim);
+                ApplyRotation(headSlice, cos, sin, ropeDim);
             }
 
             // Rotate all K heads for this token.
             for (int h = 0; h < numKvHeads; h++)
             {
-                var headSlice = k.Slice(t * kStride + h * headDim, headDim);
-                ApplyRotation(headSlice, cos, sin, headDim);
+                var headSlice = k.Slice(t * kStride + h * headDim, ropeDim);
+                ApplyRotation(headSlice, cos, sin, ropeDim);
             }
         }
     }
 
     /// <summary>
-    /// Scalar reference implementation of <see cref="Execute"/> for correctness verification.
+    /// Scalar reference implementation of <see cref="Execute(Span{float}, Span{float}, ReadOnlySpan{int}, int, int, int, ReadOnlySpan{float}, ReadOnlySpan{float})"/> for correctness verification.
     /// </summary>
     [SkipLocalsInit]
     internal static void ExecuteScalar(Span<float> q, Span<float> k, ReadOnlySpan<int> positions,
                                         int numHeads, int numKvHeads, int headDim,
                                         ReadOnlySpan<float> cosTable, ReadOnlySpan<float> sinTable)
+        => ExecuteScalar(q, k, positions, numHeads, numKvHeads, headDim, headDim, cosTable, sinTable);
+
+    /// <summary>
+    /// Scalar reference implementation of <see cref="Execute(Span{float}, Span{float}, ReadOnlySpan{int}, int, int, int, int, ReadOnlySpan{float}, ReadOnlySpan{float})"/> for correctness verification.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void ExecuteScalar(Span<float> q, Span<float> k, ReadOnlySpan<int> positions,
+                                        int numHeads, int numKvHeads, int headDim, int ropeDim,
+                                        ReadOnlySpan<float> cosTable, ReadOnlySpan<float> sinTable)
     {
-        int halfDim = headDim / 2;
+        int halfRopeDim = ropeDim / 2;
         int qStride = numHeads * headDim;
         int kStride = numKvHeads * headDim;
         int seqLen = positions.Length;
@@ -251,19 +281,19 @@ public static class RoPE
         for (int t = 0; t < seqLen; t++)
         {
             int pos = positions[t];
-            var cos = cosTable.Slice(pos * halfDim, halfDim);
-            var sin = sinTable.Slice(pos * halfDim, halfDim);
+            var cos = cosTable.Slice(pos * halfRopeDim, halfRopeDim);
+            var sin = sinTable.Slice(pos * halfRopeDim, halfRopeDim);
 
             for (int h = 0; h < numHeads; h++)
             {
-                var headSlice = q.Slice(t * qStride + h * headDim, headDim);
-                ApplyRotationScalar(headSlice, cos, sin, headDim);
+                var headSlice = q.Slice(t * qStride + h * headDim, ropeDim);
+                ApplyRotationScalar(headSlice, cos, sin, ropeDim);
             }
 
             for (int h = 0; h < numKvHeads; h++)
             {
-                var headSlice = k.Slice(t * kStride + h * headDim, headDim);
-                ApplyRotationScalar(headSlice, cos, sin, headDim);
+                var headSlice = k.Slice(t * kStride + h * headDim, ropeDim);
+                ApplyRotationScalar(headSlice, cos, sin, ropeDim);
             }
         }
     }

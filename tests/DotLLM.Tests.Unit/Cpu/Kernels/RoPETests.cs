@@ -332,6 +332,67 @@ public sealed class RoPETests
     }
 
     [Fact]
+    public void Execute_PartialRotation_OnlyFirstRopeDimRotated()
+    {
+        // headDim=8, ropeDim=4: first 4 dims rotated, last 4 unchanged.
+        const int headDim = 8;
+        const int ropeDim = 4;
+        const int numHeads = 2;
+        const int numKvHeads = 1;
+        const float theta = 10000f;
+        const int maxSeqLen = 2;
+        int halfRopeDim = ropeDim / 2;
+
+        float[] cosTable = new float[maxSeqLen * halfRopeDim];
+        float[] sinTable = new float[maxSeqLen * halfRopeDim];
+        RoPE.PrecomputeFrequencyTable(maxSeqLen, ropeDim, theta, cosTable, sinTable);
+
+        // Q: 2 heads × 8 dims = 16 floats per token, 1 token at position 1
+        float[] q = [1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f,   // head 0
+                     9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f]; // head 1
+        float[] k = [17f, 18f, 19f, 20f, 21f, 22f, 23f, 24f]; // 1 KV head
+        float[] qOrig = (float[])q.Clone();
+        float[] kOrig = (float[])k.Clone();
+        int[] positions = [1];
+
+        RoPE.Execute(q, k, positions, numHeads, numKvHeads, headDim, ropeDim, cosTable, sinTable);
+
+        var cos1 = cosTable.AsSpan(1 * halfRopeDim, halfRopeDim);
+        var sin1 = sinTable.AsSpan(1 * halfRopeDim, halfRopeDim);
+
+        // Verify first ropeDim (4) dimensions of each head ARE rotated.
+        for (int h = 0; h < numHeads; h++)
+        {
+            int offset = h * headDim;
+            float[] expected = new float[ropeDim];
+            Array.Copy(qOrig, offset, expected, 0, ropeDim);
+            RoPE.ApplyRotationScalar(expected, cos1, sin1, ropeDim);
+
+            for (int d = 0; d < ropeDim; d++)
+                Assert.Equal(expected[d], q[offset + d], 1e-5f);
+        }
+
+        // Verify last (headDim - ropeDim) dimensions of each head are UNCHANGED.
+        for (int h = 0; h < numHeads; h++)
+        {
+            int offset = h * headDim;
+            for (int d = ropeDim; d < headDim; d++)
+                Assert.Equal(qOrig[offset + d], q[offset + d], 1e-6f);
+        }
+
+        // Same for K.
+        {
+            float[] expectedK = new float[ropeDim];
+            Array.Copy(kOrig, 0, expectedK, 0, ropeDim);
+            RoPE.ApplyRotationScalar(expectedK, cos1, sin1, ropeDim);
+            for (int d = 0; d < ropeDim; d++)
+                Assert.Equal(expectedK[d], k[d], 1e-5f);
+            for (int d = ropeDim; d < headDim; d++)
+                Assert.Equal(kOrig[d], k[d], 1e-6f);
+        }
+    }
+
+    [Fact]
     public void PrecomputeFrequencyTable_MatchesReference()
     {
         // Llama-like config: headDim=128, theta=10000
