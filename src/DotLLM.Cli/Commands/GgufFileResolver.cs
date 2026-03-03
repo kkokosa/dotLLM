@@ -1,8 +1,7 @@
-#if DEBUG
 using DotLLM.HuggingFace;
 using Spectre.Console;
 
-namespace DotLLM.Cli.Commands.Debug;
+namespace DotLLM.Cli.Commands;
 
 /// <summary>
 /// Resolves a GGUF file argument to a local file path. Accepts either a direct file path
@@ -56,4 +55,3 @@ internal static class GgufFileResolver
         return null;
     }
 }
-#endif

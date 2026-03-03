@@ -32,8 +32,8 @@ app.Configure(config =>
     });
 
     config.AddCommand<RunCommand>("run")
-        .WithDescription("Run inference on a GGUF model (stub).")
-        .WithExample("run", "~/.dotllm/models/model.gguf", "--prompt", "Hello");
+        .WithDescription("Run greedy text generation on a GGUF model.")
+        .WithExample("run", "QuantFactory/SmolLM-135M-GGUF", "--prompt", "The capital of France is", "--max-tokens", "64");
 
     config.AddCommand<ServeCommand>("serve")
         .WithDescription("Launch OpenAI-compatible API server (stub).")
@@ -59,6 +59,18 @@ app.Configure(config =>
         debug.AddCommand<DebugGgufConfigCommand>("gguf-config")
             .WithDescription("Extract and display ModelConfig from GGUF metadata.")
             .WithExample("debug", "gguf-config", "model.gguf");
+
+        debug.AddCommand<DebugForwardPassCommand>("forward-pass")
+            .WithDescription("Run a single forward pass and display logit diagnostics.")
+            .WithExample("debug", "forward-pass", "model.gguf", "--prompt", "Hello");
+
+        debug.AddCommand<DebugTokenizeCommand>("tokenize")
+            .WithDescription("Tokenize text and verify round-trip decode.")
+            .WithExample("debug", "tokenize", "model.gguf", "--text", "Hello world");
+
+        debug.AddCommand<DebugEmbedLookupCommand>("embed-lookup")
+            .WithDescription("Inspect the embedding vector for a single token.")
+            .WithExample("debug", "embed-lookup", "model.gguf", "--token-id", "1");
     });
 #endif
 });

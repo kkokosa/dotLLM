@@ -1,5 +1,6 @@
 #if DEBUG
 using System.ComponentModel;
+using DotLLM.Cli.Commands;
 using DotLLM.Models.Gguf;
 using Spectre.Console;
 using Spectre.Console.Cli;
