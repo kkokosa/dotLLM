@@ -1,2 +1,134 @@
 # dotLLM
-LLM inference engine written in .NET
+
+**High-performance LLM inference engine written natively in C#/.NET**
+
+[![CI](https://github.com/kkokosa/dotLLM/actions/workflows/ci.yml/badge.svg)](https://github.com/kkokosa/dotLLM/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![.NET](https://img.shields.io/badge/.NET-10-purple.svg)](https://dotnet.microsoft.com/)
+
+[Documentation](docs/) · [Roadmap](docs/ROADMAP.md) · [Discussions](https://github.com/kkokosa/dotLLM/discussions)
+
+---
+
+## About
+
+dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around llama.cpp or Python libraries. All orchestration, model loading, tokenization, sampling, and CPU compute are implemented in pure C#, with a thin C/CUDA native library for GPU kernels. It targets transformer-based models (Llama, Mistral, Phi, Qwen, DeepSeek) with SIMD-optimized CPU and CUDA GPU backends.
+
+> **Status**: dotLLM is in early development (Phase 1 of 5). Core components — GGUF loading, dequantization, CPU tensor ops, and tokenization — are implemented. See [Roadmap](#roadmap) for what's next.
+
+## Key Features
+
+### Performance
+- **Zero-GC inference** — unmanaged memory (`NativeMemory.AlignedAlloc`, 64-byte aligned) for all tensor data; no managed heap allocations on the hot path
+- **SIMD vectorization** — `TensorPrimitives` + hand-tuned `System.Runtime.Intrinsics` for quantized matmul, RMSNorm, RoPE, softmax
+- **Memory-mapped model loading** — GGUF files loaded via `MemoryMappedFile`; OS demand-paging means multi-GB models load in milliseconds
+- **Quantized inference** — FP16, Q8_0, Q4_K_M and other GGUF quantization formats; fused scale×int dot-product kernels operating directly on quantized blocks
+
+### Architecture Support
+- **Transformer models** — Llama, Mistral, Phi, Qwen, DeepSeek via parameterized `TransformerBlock` and `ModelConfig`
+- **Attention mechanisms** — MHA, MQA, GQA, MLA through `IAttentionMechanism` + `IAttentionStrategy` separation
+- **Position encoding** — RoPE, ALiBi, absolute, none — pluggable via `IPositionEncoding`
+- **Composable sampling** — `ISamplerStep` chain: repetition penalty → temperature → top-k → top-p → min-p → categorical sample
+
+### Serving
+- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, tool calling, streaming via ASP.NET
+- **Continuous batching** — iteration-level scheduling with preemption and priority queuing
+- **Paged KV-cache** — PagedAttention with block-level allocation, prefix caching, and copy-on-write
+- **Speculative decoding** — draft-verify-accept with KV-cache rollback for higher throughput
+- **Structured output** — FSM/PDA-based constrained decoding guaranteeing valid JSON, JSON Schema, regex, and grammar
+
+### Extensibility
+- **Pluggable backends** — `IBackend` interface with separate packages per backend (CPU, CUDA, ROCm)
+- **LoRA adapters** — runtime loading, no weight merging, concurrent multi-adapter serving
+- **Diagnostic hooks** — zero-cost `IInferenceHook` points for activation capture, logit lens, SAE integration
+- **OpenTelemetry observability** — `System.Diagnostics.Metrics` + `Activity` for throughput, latency, and per-request tracing
+
+## Architecture Overview
+
+dotLLM is organized as a layered architecture where each layer depends only on the layers below it:
+
+```
+┌─────────────────────────────────────────┐
+│            DotLLM.Server                │  ASP.NET OpenAI-compatible API
+├─────────────────────────────────────────┤
+│            DotLLM.Engine                │  KV-cache, scheduler, samplers,
+│                                         │  constraints, speculative decoding
+├──────────┬──────────┬───────────────────┤
+│ DotLLM.  │ DotLLM.  │ DotLLM.Cpu/Cuda  │  GGUF/SafeTensors, BPE/SPM,
+│ Models   │Tokenizers│ (backends)        │  SIMD kernels / CUDA kernels
+├──────────┴──────────┴───────────────────┤
+│            DotLLM.Core                  │  Interfaces, tensor types, config
+└─────────────────────────────────────────┘
+```
+
+Each project ships as a separate NuGet package, so users pull in only what they need. `DotLLM.Core` defines all abstractions (`ITensor`, `IBackend`, `IModel`, `ISamplerStep`, etc.) while concrete implementations live in their respective projects.
+
+## Getting Started
+
+dotLLM requires [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
+
+**Build from source:**
+
+```bash
+git clone https://github.com/kkokosa/dotLLM.git
+cd dotLLM
+dotnet build
+```
+
+**Run tests:**
+
+```bash
+dotnet test
+```
+
+> Integration tests automatically download [SmolLM-135M](https://huggingface.co/QuantFactory/SmolLM-135M-GGUF) Q8_0 (~145 MB) to `~/.dotllm/test-cache/`.
+
+There is no NuGet package yet — the project is in early development. Follow the [Roadmap](#roadmap) for progress toward the first release.
+
+## News
+
+- **2025-05** — BPE Tokenizer with SentencePiece and tiktoken support ([#16](https://github.com/kkokosa/dotLLM/pull/16))
+
+## Roadmap
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | 🔨 In progress (4/9) |
+| **2 — Practical Local Inference** | Q4_K_M, chat templates, streaming, hooks, logit lens, more architectures | Planned |
+| **3 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Planned |
+| **4 — Production Serving** | OpenAI API, continuous batching, paged KV-cache, structured output, tool calling | Planned |
+| **5 — Expand** | LoRA, MLA, SAE, multi-GPU tensor parallelism, ROCm | Planned |
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed steps, dependencies, and milestones.
+
+## Documentation
+
+- [Architecture & data flow](docs/ARCHITECTURE.md)
+- [GGUF binary format](docs/GGUF_FORMAT.md)
+- [Quantization formats](docs/QUANTIZATION.md)
+- [Attention mechanisms](docs/ATTENTION.md)
+- [Position encoding](docs/POSITION_ENCODING.md)
+- [Tokenizers & chat templates](docs/TOKENIZERS.md)
+- [Sampling pipeline](docs/SAMPLING.md)
+- [Constrained decoding](docs/CONSTRAINED_DECODING.md)
+- [KV-cache management](docs/KV_CACHE.md)
+- [Batch scheduling](docs/SCHEDULING.md)
+- [Full roadmap](docs/ROADMAP.md)
+
+## Contributing
+
+Contributions are welcome! dotLLM uses an issue-driven workflow — every change starts with a [GitHub issue](https://github.com/kkokosa/dotLLM/issues) describing the work. Pick an existing issue or open a new one, then submit a PR targeting `main`.
+
+## Contact
+
+Questions, ideas, or feedback? Open a thread in [GitHub Discussions](https://github.com/kkokosa/dotLLM/discussions).
+
+## License
+
+dotLLM is licensed under the [GNU General Public License v3.0](LICENSE).
+
+## Acknowledgments
+
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) — reference for GGUF format, quantization kernels, and CUDA implementations
+- [Hugging Face](https://huggingface.co/) — model ecosystem, transformers reference implementations, tokenizer specs
+- [.NET team](https://github.com/dotnet/runtime) — `TensorPrimitives`, `System.Runtime.Intrinsics`, `MemoryMappedFile`, and the runtime that makes this possible

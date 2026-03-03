@@ -157,6 +157,7 @@ All development follows an issue-driven workflow.
 4. **PRs close the issue.** Use `Closes #{N}` in the PR description. PR targets `main`.
 5. **One issue, one branch, one PR.** If scope grows, split into a new issue.
 6. **Read the relevant docs first.** Before starting, read docs listed in the Documentation Index for the module being implemented.
+7. **Keep README in sync.** When a PR completes a roadmap step, update `docs/ROADMAP.md` (add `:white_check_mark:` to the step) and `README.md` (bump the step count in the Roadmap table, e.g., "4/9" → "5/9"; when a phase completes change status to "Done"; add a News entry for significant milestones).
 
 ## What Claude Should Know
 
