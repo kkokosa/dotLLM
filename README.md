@@ -54,7 +54,7 @@ dotLLM is organized as a layered architecture where each layer depends only on t
 │            DotLLM.Engine                │  KV-cache, scheduler, samplers,
 │                                         │  constraints, speculative decoding
 ├──────────┬──────────┬───────────────────┤
-│ DotLLM.  │ DotLLM.  │ DotLLM.Cpu/Cuda  │  GGUF/SafeTensors, BPE/SPM,
+│ DotLLM.  │ DotLLM.  │ DotLLM.Cpu/Cuda   │  GGUF/SafeTensors, BPE/SPM,
 │ Models   │Tokenizers│ (backends)        │  SIMD kernels / CUDA kernels
 ├──────────┴──────────┴───────────────────┤
 │            DotLLM.Core                  │  Interfaces, tensor types, config
@@ -87,7 +87,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 
 ## News
 
-- **2025-05** — BPE Tokenizer with SentencePiece and tiktoken support ([#16](https://github.com/kkokosa/dotLLM/pull/16))
+- **2026-02** — BPE Tokenizer with SentencePiece and tiktoken support ([#16](https://github.com/kkokosa/dotLLM/pull/16))
 
 ## Roadmap
 
