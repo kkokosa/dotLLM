@@ -1,5 +1,6 @@
 using DotLLM.Core.Tensors;
 using DotLLM.Cpu;
+using DotLLM.Engine.KvCache;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using DotLLM.Tests.Integration.Fixtures;
@@ -195,6 +196,153 @@ public class LlamaForwardPassTests
         {
             float* logitPtr = (float*)logits.DataPointer;
             nextTokenId = ArgMax(new ReadOnlySpan<float>(logitPtr, vocabSize));
+        }
+
+        string predicted = tokenizer.DecodeToken(nextTokenId).Trim();
+        Assert.Equal("Paris", predicted);
+    }
+
+    [Fact]
+    public void Forward_WithKvCache_PrefillMatchesUncached()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        int[] tokenIds = tokenizer.Encode("The capital of France is");
+        int[] positions = new int[tokenIds.Length];
+        for (int i = 0; i < positions.Length; i++)
+            positions[i] = i;
+
+        // Uncached forward
+        using ITensor uncachedLogits = model.Forward(tokenIds, positions, deviceId: -1);
+
+        // Cached forward (prefill)
+        using var kvCache = new SimpleKvCache(
+            model.Config.NumLayers, model.Config.NumKvHeads, model.Config.HeadDim,
+            tokenIds.Length + 10);
+        using ITensor cachedLogits = model.Forward(tokenIds, positions, deviceId: -1, kvCache);
+
+        // Compare: must be bit-identical
+        Assert.Equal(uncachedLogits.ElementCount, cachedLogits.ElementCount);
+        unsafe
+        {
+            var uncached = new ReadOnlySpan<float>((void*)uncachedLogits.DataPointer, (int)uncachedLogits.ElementCount);
+            var cached = new ReadOnlySpan<float>((void*)cachedLogits.DataPointer, (int)cachedLogits.ElementCount);
+            for (int i = 0; i < uncached.Length; i++)
+            {
+                Assert.Equal(uncached[i], cached[i]);
+            }
+        }
+    }
+
+    [Fact]
+    public void GreedyDecode_WithKvCache_ProducesSameTokens()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        int[] promptIds = tokenizer.Encode("The capital of France is");
+        int vocabSize = model.Config.VocabSize;
+        int numSteps = 5;
+
+        // --- Uncached greedy decode (existing approach: re-feed growing context) ---
+        var uncachedTokens = new List<int>();
+        int[] currentIds = promptIds;
+        int[] currentPositions = new int[promptIds.Length];
+        for (int i = 0; i < currentPositions.Length; i++)
+            currentPositions[i] = i;
+
+        for (int step = 0; step < numSteps; step++)
+        {
+            using ITensor logits = model.Forward(currentIds, currentPositions, deviceId: -1);
+            int nextId;
+            unsafe
+            {
+                nextId = ArgMax(new ReadOnlySpan<float>((void*)logits.DataPointer, vocabSize));
+            }
+            uncachedTokens.Add(nextId);
+
+            int newLen = promptIds.Length + uncachedTokens.Count;
+            currentIds = new int[newLen];
+            currentPositions = new int[newLen];
+            Array.Copy(promptIds, currentIds, promptIds.Length);
+            for (int g = 0; g < uncachedTokens.Count; g++)
+                currentIds[promptIds.Length + g] = uncachedTokens[g];
+            for (int i = 0; i < newLen; i++)
+                currentPositions[i] = i;
+        }
+
+        // --- Cached greedy decode (prefill + single-token decode) ---
+        var cachedTokens = new List<int>();
+        int cacheSize = promptIds.Length + numSteps;
+        using var kvCache = new SimpleKvCache(
+            model.Config.NumLayers, model.Config.NumKvHeads, model.Config.HeadDim, cacheSize);
+
+        int[] positions = new int[cacheSize];
+        for (int i = 0; i < cacheSize; i++)
+            positions[i] = i;
+
+        // Prefill
+        using (ITensor prefillLogits = model.Forward(
+            promptIds, positions.AsSpan(0, promptIds.Length), -1, kvCache))
+        {
+            int firstToken;
+            unsafe
+            {
+                firstToken = ArgMax(new ReadOnlySpan<float>((void*)prefillLogits.DataPointer, vocabSize));
+            }
+            cachedTokens.Add(firstToken);
+        }
+
+        // Decode
+        for (int step = 1; step < numSteps; step++)
+        {
+            int pos = promptIds.Length + step - 1;
+            int lastToken = cachedTokens[^1];
+            using ITensor logits = model.Forward([lastToken], positions.AsSpan(pos, 1), -1, kvCache);
+            int nextToken;
+            unsafe
+            {
+                nextToken = ArgMax(new ReadOnlySpan<float>((void*)logits.DataPointer, vocabSize));
+            }
+            cachedTokens.Add(nextToken);
+        }
+
+        // Must produce identical tokens
+        Assert.Equal(uncachedTokens.Count, cachedTokens.Count);
+        for (int i = 0; i < uncachedTokens.Count; i++)
+        {
+            Assert.Equal(uncachedTokens[i], cachedTokens[i]);
+        }
+    }
+
+    [Fact]
+    public void GreedyDecode_WithKvCache_MatchesExpectedOutput()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        int[] promptIds = tokenizer.Encode("The capital of France is");
+        int vocabSize = model.Config.VocabSize;
+
+        int cacheSize = promptIds.Length + 2;
+        using var kvCache = new SimpleKvCache(
+            model.Config.NumLayers, model.Config.NumKvHeads, model.Config.HeadDim, cacheSize);
+
+        int[] positions = new int[cacheSize];
+        for (int i = 0; i < cacheSize; i++)
+            positions[i] = i;
+
+        using ITensor prefillLogits = model.Forward(
+            promptIds, positions.AsSpan(0, promptIds.Length), -1, kvCache);
+
+        int nextTokenId;
+        unsafe
+        {
+            nextTokenId = ArgMax(new ReadOnlySpan<float>((void*)prefillLogits.DataPointer, vocabSize));
         }
 
         string predicted = tokenizer.DecodeToken(nextTokenId).Trim();

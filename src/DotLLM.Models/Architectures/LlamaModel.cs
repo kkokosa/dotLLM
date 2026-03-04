@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Core.Tensors;
@@ -68,6 +69,20 @@ public sealed unsafe class LlamaModel : IModel
 
     /// <inheritdoc/>
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions, int deviceId)
+        => Forward(tokenIds, positions, deviceId, kvCache: null);
+
+    /// <summary>
+    /// Runs a forward pass with optional KV-cache. When <paramref name="kvCache"/> is provided,
+    /// K/V projections are stored in the cache after RoPE, and attention reads from the full
+    /// cached context — enabling O(1) per-token decode instead of O(n) recomputation.
+    /// </summary>
+    /// <param name="tokenIds">Input token IDs for this step (all prompt tokens for prefill, single token for decode).</param>
+    /// <param name="positions">Position indices for each token.</param>
+    /// <param name="deviceId">Target device for computation.</param>
+    /// <param name="kvCache">Optional KV-cache. When null, behaves identically to the uncached forward pass.</param>
+    /// <returns>Logits tensor of shape [1, vocab_size] for the last token.</returns>
+    public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
+                           int deviceId, IKvCache? kvCache)
     {
         int maxSeq = Config.MaxSequenceLength;
         for (int i = 0; i < positions.Length; i++)
@@ -84,6 +99,7 @@ public sealed unsafe class LlamaModel : IModel
         int headDim = Config.HeadDim;
         int intermediateSize = Config.IntermediateSize;
         int vocabSize = Config.VocabSize;
+        int kvStride = numKvHeads * headDim;
         float eps = Config.NormEpsilon;
 
         _state.EnsureCapacity(seqLen);
@@ -111,15 +127,14 @@ public sealed unsafe class LlamaModel : IModel
             // a. Copy hiddenState → residual
             new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
 
-            // b-k: Process each token through the layer
+            // b-c: RMSNorm + Q/K/V projections (per token)
             for (int t = 0; t < seqLen; t++)
             {
                 float* hiddenT = hidden + t * hiddenSize;
-                float* residualT = residual + t * hiddenSize;
                 float* normOutT = normOut + t * hiddenSize;
                 float* qT = q + t * (numHeads * headDim);
-                float* kT = k + t * (numKvHeads * headDim);
-                float* vT = v + t * (numKvHeads * headDim);
+                float* kT = k + t * kvStride;
+                float* vT = v + t * kvStride;
 
                 // b. RMSNorm(hiddenState, attnNormWeight, eps) → normOutput
                 RmsNorm.Execute(
@@ -137,18 +152,42 @@ public sealed unsafe class LlamaModel : IModel
             // d. RoPE (in-place on Q and K for all tokens)
             RoPE.Execute(
                 new Span<float>(q, seqLen * numHeads * headDim),
-                new Span<float>(k, seqLen * numKvHeads * headDim),
+                new Span<float>(k, seqLen * kvStride),
                 positions,
                 numHeads, numKvHeads, headDim, _ropeDim,
                 _state.CosTable, _state.SinTable);
 
-            // e. Attention
-            Attention.Execute(
-                new ReadOnlySpan<float>(q, seqLen * numHeads * headDim),
-                new ReadOnlySpan<float>(k, seqLen * numKvHeads * headDim),
-                new ReadOnlySpan<float>(v, seqLen * numKvHeads * headDim),
-                new Span<float>(attnOut, seqLen * numHeads * headDim),
-                seqLen, seqLen, numHeads, numKvHeads, headDim, 0);
+            // e. Attention — with or without KV-cache
+            if (kvCache is not null)
+            {
+                // Store new K/V in cache, then attend over full cached context
+                using var kView = new TensorView(
+                    new TensorShape(seqLen, kvStride), DType.Float32, -1, (nint)k);
+                using var vView = new TensorView(
+                    new TensorShape(seqLen, kvStride), DType.Float32, -1, (nint)v);
+
+                kvCache.Update(kView, vView, positions, layer);
+
+                int seqKv = kvCache.CurrentLength;
+                using var cachedK = kvCache.GetKeys(layer);
+                using var cachedV = kvCache.GetValues(layer);
+
+                Attention.Execute(
+                    new ReadOnlySpan<float>(q, seqLen * numHeads * headDim),
+                    new ReadOnlySpan<float>((void*)cachedK.DataPointer, seqKv * kvStride),
+                    new ReadOnlySpan<float>((void*)cachedV.DataPointer, seqKv * kvStride),
+                    new Span<float>(attnOut, seqLen * numHeads * headDim),
+                    seqLen, seqKv, numHeads, numKvHeads, headDim, positions[0]);
+            }
+            else
+            {
+                Attention.Execute(
+                    new ReadOnlySpan<float>(q, seqLen * numHeads * headDim),
+                    new ReadOnlySpan<float>(k, seqLen * kvStride),
+                    new ReadOnlySpan<float>(v, seqLen * kvStride),
+                    new Span<float>(attnOut, seqLen * numHeads * headDim),
+                    seqLen, seqLen, numHeads, numKvHeads, headDim, 0);
+            }
 
             // f-g. Output projection + residual add (per token)
             for (int t = 0; t < seqLen; t++)

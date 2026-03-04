@@ -10,10 +10,8 @@ Each engine is measured on the same machine, same model file, same prompt, same 
 |--------|-----------------|
 | Load time | GGUF open + config + tokenizer + weight loading |
 | Prompt eval | First forward pass processing all prompt tokens |
-| Eval | Subsequent decode steps (1 token each, no KV-cache in dotLLM yet) |
+| Eval | Subsequent decode steps (1 token each, with KV-cache) |
 | Total tokens/s | End-to-end throughput (prompt + generated) / wall time |
-
-> **Note**: dotLLM currently reprocesses the full context each step (no KV-cache). This makes eval dramatically slower than llama.cpp's cached single-token decode. The comparison is useful for validating correctness and measuring kernel-level performance, not end-to-end throughput parity — that comes with KV-cache (Phase 1 Step 8).
 
 ## Test Setup
 
@@ -42,9 +40,11 @@ llama-completion.exe ^
 DotLLM.Cli.exe run QuantFactory/SmolLM-135M-GGUF -p "The capital of France is" -n 2
 ```
 
-## Results (2025-03-04)
+## Results
 
-### llama.cpp (b5291)
+### Baseline — Before KV-cache (2025-03-04)
+
+#### llama.cpp (b5291)
 
 ```
 common_perf_print:        load time =     227.69 ms
@@ -53,7 +53,7 @@ common_perf_print:        eval time =       8.27 ms /     1 runs   (    8.27 ms 
 common_perf_print:       total time =      21.27 ms /     6 tokens
 ```
 
-### dotLLM (commit 2f5616d)
+#### dotLLM — without KV-cache (commit 2f5616d)
 
 ```
                     Performance Summary
@@ -77,29 +77,69 @@ common_perf_print:       total time =      21.27 ms /     6 tokens
 ╰───────────────┴────────────────────────────╯
 ```
 
+### Current — With KV-cache (2026-03-04)
+
+#### dotLLM — with KV-cache
+
+```
+                    Performance Summary
+╭─────────────┬────────────┬────────┬──────────┬──────────╮
+│ Phase       │       Time │ Tokens │ ms/token │ tokens/s │
+├─────────────┼────────────┼────────┼──────────┼──────────┤
+│ Load        │  198.03 ms │      — │        — │        — │
+│ Prompt eval │ 1191.75 ms │      5 │   238.35 │     4.20 │
+│ Eval        │  227.12 ms │      1 │   227.12 │     4.40 │
+│ Sampling    │    0.26 ms │      2 │     0.13 │        — │
+│ Total       │ 1419.95 ms │      7 │        — │     4.93 │
+╰─────────────┴────────────┴────────┴──────────┴──────────╯
+
+               Memory Breakdown
+╭───────────────┬────────────────────────────╮
+│ Component     │                       Size │
+├───────────────┼────────────────────────────┤
+│ Model weights │ 136.4 MiB  (memory-mapped) │
+│ Compute       │                    0.9 MiB │
+│ KV-cache      │         0.3 MiB  (7 slots) │
+│ Total         │                  137.6 MiB │
+╰───────────────┴────────────────────────────╯
+```
+
 ### Analysis
+
+#### KV-cache impact (dotLLM before → after)
+
+| Metric | Before (no cache) | After (KV-cache) | Improvement |
+|--------|-------------------|-------------------|-------------|
+| Eval per token | 1091 ms | 227 ms | **4.8× faster** |
+| Total time | 2269 ms | 1420 ms | **1.6× faster** |
+| Total tokens/s | 3.08 | 4.93 | **1.6× faster** |
+
+The eval speedup is modest here because this benchmark only generates 1 decode token. The KV-cache avoids reprocessing the 5 prompt tokens during decode — a single GEMV per weight matrix instead of 6. For longer generations (N decode tokens), the speedup grows linearly: each step is O(1) instead of O(N), so total decode time drops from O(N²) to O(N).
+
+#### dotLLM vs llama.cpp (current)
 
 | Metric | llama.cpp | dotLLM | Ratio |
 |--------|-----------|--------|-------|
-| Load time | 228 ms | 203 ms | 0.89× (dotLLM faster) |
-| Prompt eval (5 tokens) | 11.3 ms | 1177 ms | ~104× slower |
-| Eval per token | 8.3 ms | 1091 ms | ~132× slower |
-| Total tokens/s | ~282 | 3.08 | ~92× slower |
+| Load time | 228 ms | 198 ms | 0.87× (dotLLM faster) |
+| Prompt eval (5 tokens) | 11.3 ms | 1192 ms | ~106× slower |
+| Eval per token | 8.3 ms | 227 ms | ~27× slower |
+| Total tokens/s | ~282 | 4.93 | ~57× slower |
 
 **Load time** is comparable — both memory-map the GGUF file. dotLLM is slightly faster here.
 
-**Prompt eval and eval** show the expected gap. Key factors:
+**Prompt eval** remains the main bottleneck. Key factors:
 
-1. **No KV-cache** — dotLLM reprocesses the full context each step. llama.cpp caches K/V and only computes the new token. This alone accounts for a large portion of the eval gap.
-2. **No GEMM batching** — dotLLM uses per-token GEMV (matrix-vector), while llama.cpp batches prompt tokens into a GEMM (matrix-matrix) call. This explains most of the prompt eval gap.
-3. **Q8_0 dequant + dot product** — llama.cpp's Q8_0 kernels are heavily SIMD-optimized with fused dequant-dot. dotLLM's current Q8_0 GEMV is functional but not yet tuned.
-4. **Thread parallelism** — llama.cpp parallelizes across cores. dotLLM is currently single-threaded.
+1. **No GEMM batching** — dotLLM uses per-token GEMV (matrix-vector), while llama.cpp batches prompt tokens into a GEMM (matrix-matrix) call. This explains most of the prompt eval gap.
+2. **Q8_0 dequant + dot product** — llama.cpp's Q8_0 kernels are heavily SIMD-optimized with fused dequant-dot. dotLLM's current Q8_0 GEMV is functional but not yet tuned.
+3. **Thread parallelism** — llama.cpp parallelizes across cores. dotLLM is currently single-threaded.
+
+**Eval per token** dropped from ~132× to ~27× slower with KV-cache. The remaining gap is kernel performance (SIMD tuning, threading).
 
 ### Roadmap to Parity
 
 | Optimization | Expected impact | Roadmap step |
 |-------------|----------------|--------------|
-| KV-cache | ~N× speedup on eval (N = seq length) | Phase 1, Step 7 |
+| ~~KV-cache~~ | ~~eval speedup~~ | ~~Phase 1, Step 7~~ :white_check_mark: |
 | SIMD-tuned Q8_0 kernels | ~2-4× kernel speedup | Phase 2, Step 10 |
 | Batched GEMM for prefill | ~5-10× prefill speedup | Phase 2, Step 11 |
 | Multi-threaded inference | ~4-8× on multi-core | Phase 2, Step 20 |

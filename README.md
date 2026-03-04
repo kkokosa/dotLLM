@@ -87,6 +87,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 
 ## News
 
+- **2026-03** — KV-cache: eval drops from 1091 ms/token to 227 ms/token (~4.8× speedup)
 - **2026-03** — Llama forward pass: first token generation from embedding to logits
 - **2026-02** — BPE Tokenizer with SentencePiece and tiktoken support ([#16](https://github.com/kkokosa/dotLLM/pull/16))
 
@@ -94,7 +95,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | 🔨 In progress (6/9) |
+| **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | 🔨 In progress (7/9) |
 | **2 — Practical Local Inference** | Q4_K_M, chat templates, streaming, hooks, logit lens, more architectures | Planned |
 | **3 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Planned |
 | **4 — Production Serving** | OpenAI API, continuous batching, paged KV-cache, structured output, tool calling | Planned |
