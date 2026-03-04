@@ -14,7 +14,7 @@
 
 dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around llama.cpp or Python libraries. All orchestration, model loading, tokenization, sampling, and CPU compute are implemented in pure C#, with a thin C/CUDA native library for GPU kernels. It targets transformer-based models (Llama, Mistral, Phi, Qwen, DeepSeek) with SIMD-optimized CPU and CUDA GPU backends.
 
-> **Status**: dotLLM is in early development (Phase 1 of 5). Core components — GGUF loading, dequantization, CPU tensor ops, tokenization, GQA attention, RoPE, and the Llama forward pass — are implemented. See [Roadmap](#roadmap) for what's next.
+> **Status**: Phase 1 complete — dotLLM can load a GGUF model, tokenize a prompt, run the full Llama forward pass with KV-cache, sample tokens, and generate coherent multi-token output on CPU. See [Roadmap](#roadmap) for Phase 2 (Q4_K_M, chat templates, streaming, hooks).
 
 ## Key Features
 
@@ -87,6 +87,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 
 ## News
 
+- **2026-03** — Phase 1 complete: sampling pipeline + stop conditions — first coherent multi-token generation ([#24](https://github.com/kkokosa/dotLLM/pull/24))
 - **2026-03** — KV-cache: eval drops from 1091 ms/token to 227 ms/token (~4.8× speedup)
 - **2026-03** — Llama forward pass: first token generation from embedding to logits
 - **2026-02** — BPE Tokenizer with SentencePiece and tiktoken support ([#16](https://github.com/kkokosa/dotLLM/pull/16))
@@ -95,7 +96,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | 🔨 In progress (7/9) |
+| **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | Done (9/9) |
 | **2 — Practical Local Inference** | Q4_K_M, chat templates, streaming, hooks, logit lens, more architectures | Planned |
 | **3 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Planned |
 | **4 — Production Serving** | OpenAI API, continuous batching, paged KV-cache, structured output, tool calling | Planned |

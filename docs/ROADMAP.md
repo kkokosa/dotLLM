@@ -19,8 +19,8 @@ Each step is designed to be a discrete unit of work suitable for a single implem
 | 5 | **GQA attention + RoPE** :white_check_mark: | Grouped-query attention with pre-computed cos/sin tables. Single implementation covering MHA/MQA/GQA via `num_kv_heads`. | `Cpu/Kernels/Attention.cs`, `Cpu/Kernels/RoPE.cs` | 3 |
 | 6 | **Llama forward pass** :white_check_mark: | Wire together: embedding lookup → N × (RMSNorm → attention → residual → RMSNorm → FFN → residual) → RMSNorm → LM head. Generate logits for one token. | `Models/Architectures/LlamaModel.cs` | 1–5 |
 | 7 | **Simple KV-cache** :white_check_mark: | Pre-allocated fixed-size KV-cache. Store K and V after each attention layer. On subsequent tokens, concatenate with cached K/V. | `Engine/KvCache/SimpleKvCache.cs` | 5, 6 |
-| 8 | **Sampling pipeline** | Composable `ISamplerStep` chain: repetition penalty → temperature → top-k → top-p → min-p → categorical sample. Greedy (argmax) as special case of temperature=0. | `Engine/Samplers/` | 6 |
-| 9 | **Stop conditions** | EOS token, max tokens, stop strings. `IStopCondition` interface. | `Engine/Samplers/StopConditions/` | 8 |
+| 8 | **Sampling pipeline** :white_check_mark: | Composable `ISamplerStep` chain: repetition penalty → temperature → top-k → top-p → min-p → categorical sample. Greedy (argmax) as special case of temperature=0. | `Engine/Samplers/` | 6 |
+| 9 | **Stop conditions** :white_check_mark: | EOS token, max tokens, stop strings. `IStopCondition` interface. | `Engine/Samplers/StopConditions/` | 8 |
 
 **Milestone**: Run `dotnet run -- --model llama-3-8b.Q8_0.gguf --prompt "Hello"` and see coherent multi-token output.
 
