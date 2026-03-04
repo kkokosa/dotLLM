@@ -60,10 +60,31 @@ public sealed class SamplerPipeline
         if (options.SamplerSteps is not null)
         {
             _greedy = false;
-            _processors = options.LogitProcessors?.ToArray() ?? [];
             _steps = options.SamplerSteps.ToArray();
-            _processorContext = new ProcessorContext(1.0f, 0, SequenceId: 0);
-            _samplerContext = default;
+
+            // Build processors: use explicit list if provided, otherwise auto-build from flat properties
+            if (options.LogitProcessors is not null)
+            {
+                _processors = options.LogitProcessors.ToArray();
+            }
+            else
+            {
+                var processors = new List<ILogitProcessor>();
+                if (options.RepetitionPenalty != 1.0f)
+                    processors.Add(new RepetitionPenaltyProcessor());
+                _processors = processors.ToArray();
+            }
+
+            _processorContext = new ProcessorContext(
+                options.RepetitionPenalty,
+                options.RepetitionPenaltyWindow,
+                SequenceId: 0);
+            _samplerContext = new SamplerContext(
+                options.Temperature,
+                options.TopK,
+                options.TopP,
+                options.MinP,
+                options.Seed);
             return;
         }
 

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Sampling;
 using DotLLM.Core.Tensors;
@@ -44,6 +45,26 @@ public sealed class TextGenerator
         int maxTokens = options.MaxTokens;
         int vocabSize = _model.Config.VocabSize;
 
+        // Guard: empty prompt — use BOS token as seed
+        if (promptLen == 0)
+        {
+            promptIds = [_tokenizer.BosTokenId];
+            promptLen = 1;
+        }
+
+        // Guard: MaxTokens=0 — return immediately, no generation
+        if (maxTokens <= 0)
+        {
+            return new InferenceResponse
+            {
+                GeneratedTokenIds = [],
+                Text = string.Empty,
+                FinishReason = FinishReason.Length,
+                PromptTokenCount = promptLen,
+                GeneratedTokenCount = 0
+            };
+        }
+
         // Build sampling pipeline
         var pipeline = new SamplerPipeline(options);
 
@@ -60,6 +81,7 @@ public sealed class TextGenerator
                 new EosStopCondition(_tokenizer.EosTokenId),
                 new MaxTokensStopCondition(maxTokens)
             };
+            // TODO: Trim matched suffix only, not entire token (see PR #24 review)
             foreach (string seq in options.StopSequences)
                 stopConditions.Add(new StopStringCondition(seq));
         }
@@ -92,7 +114,7 @@ public sealed class TextGenerator
 
         // Check stop conditions for first token
         generatedIds.Add(firstTokenId);
-        string decodedText = _tokenizer.Decode(generatedIds.ToArray().AsSpan());
+        string decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds));
 
         var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds, decodedText);
         if (stopResult != StopResult.Continue)
@@ -123,7 +145,7 @@ public sealed class TextGenerator
             }
 
             generatedIds.Add(nextTokenId);
-            decodedText = _tokenizer.Decode(generatedIds.ToArray().AsSpan());
+            decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds));
 
             stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
             if (stopResult != StopResult.Continue)
@@ -155,7 +177,7 @@ public sealed class TextGenerator
     private InferenceResponse BuildResponse(int promptLen, List<int> generatedIds, FinishReason finishReason)
     {
         string text = generatedIds.Count > 0
-            ? _tokenizer.Decode(generatedIds.ToArray().AsSpan())
+            ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds))
             : string.Empty;
 
         return new InferenceResponse

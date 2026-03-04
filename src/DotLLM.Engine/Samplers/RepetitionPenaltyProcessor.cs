@@ -1,3 +1,4 @@
+using System.Buffers;
 using DotLLM.Core.Sampling;
 
 namespace DotLLM.Engine.Samplers;
@@ -18,21 +19,38 @@ public sealed class RepetitionPenaltyProcessor : ILogitProcessor
 
         int window = context.RepetitionPenaltyWindow;
         int startIndex = window > 0 ? Math.Max(0, previousTokens.Count - window) : 0;
+        int windowLength = previousTokens.Count - startIndex;
 
-        // Collect unique token IDs in the window
-        var penalizedTokens = new HashSet<int>();
-        for (int i = startIndex; i < previousTokens.Count; i++)
-            penalizedTokens.Add(previousTokens[i]);
-
-        foreach (int tokenId in penalizedTokens)
+        // Rent array, copy window tokens, sort for dedup without HashSet allocation
+        int[] rented = ArrayPool<int>.Shared.Rent(windowLength);
+        try
         {
-            if ((uint)tokenId >= (uint)logits.Length)
-                continue;
+            for (int i = 0; i < windowLength; i++)
+                rented[i] = previousTokens[startIndex + i];
 
-            if (logits[tokenId] > 0f)
-                logits[tokenId] /= penalty;
-            else
-                logits[tokenId] *= penalty;
+            Array.Sort(rented, 0, windowLength);
+
+            // Iterate sorted array, skip duplicates
+            int prev = -1;
+            for (int i = 0; i < windowLength; i++)
+            {
+                int tokenId = rented[i];
+                if (tokenId == prev)
+                    continue;
+                prev = tokenId;
+
+                if ((uint)tokenId >= (uint)logits.Length)
+                    continue;
+
+                if (logits[tokenId] > 0f)
+                    logits[tokenId] /= penalty;
+                else
+                    logits[tokenId] *= penalty;
+            }
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(rented);
         }
     }
 }

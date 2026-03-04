@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Numerics.Tensors;
 
 namespace DotLLM.Engine.Samplers;
@@ -17,23 +18,32 @@ public static class CategoricalSampler
     public static int Sample(ReadOnlySpan<float> logits, Random rng)
     {
         int vocabSize = logits.Length;
+        float[]? rented = null;
         Span<float> probs = vocabSize <= 4096
             ? stackalloc float[vocabSize]
-            : new float[vocabSize];
+            : (rented = ArrayPool<float>.Shared.Rent(vocabSize)).AsSpan(0, vocabSize);
 
-        TensorPrimitives.SoftMax(logits, probs);
-
-        double r = rng.NextDouble();
-        double cumulative = 0.0;
-
-        for (int i = 0; i < vocabSize; i++)
+        try
         {
-            cumulative += probs[i];
-            if (r < cumulative)
-                return i;
-        }
+            TensorPrimitives.SoftMax(logits, probs);
 
-        // Fallback for floating-point edge cases (r very close to 1.0)
-        return vocabSize - 1;
+            double r = rng.NextDouble();
+            double cumulative = 0.0;
+
+            for (int i = 0; i < vocabSize; i++)
+            {
+                cumulative += probs[i];
+                if (r < cumulative)
+                    return i;
+            }
+
+            // TODO: Return last non-masked token instead of vocab end (slight bias for floating-point edge cases)
+            return vocabSize - 1;
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<float>.Shared.Return(rented);
+        }
     }
 }

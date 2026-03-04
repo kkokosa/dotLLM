@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Numerics.Tensors;
 using DotLLM.Core.Sampling;
 
@@ -6,8 +5,8 @@ namespace DotLLM.Engine.Samplers;
 
 /// <summary>
 /// Min-P sampling: masks tokens whose probability is less than minP × maxProbability.
-/// This adapts to the confidence of the distribution — more tokens survive when
-/// the model is uncertain, fewer when it's confident.
+/// Operates in logit space: logit(i) &lt; maxLogit + ln(minP) is equivalent to
+/// prob(i) &lt; minP × maxProb because softmax is monotonic.
 /// </summary>
 public sealed class MinPSampler : ISamplerStep
 {
@@ -27,25 +26,13 @@ public sealed class MinPSampler : ISamplerStep
         if (minP <= 0f)
             return;
 
-        int vocabSize = logits.Length;
-        float[] rentedProbs = ArrayPool<float>.Shared.Rent(vocabSize);
-        try
-        {
-            var probs = rentedProbs.AsSpan(0, vocabSize);
-            TensorPrimitives.SoftMax(logits, probs);
+        float maxLogit = TensorPrimitives.Max(logits);
+        float threshold = maxLogit + MathF.Log(minP);
 
-            float maxProb = TensorPrimitives.Max(probs);
-            float threshold = minP * maxProb;
-
-            for (int i = 0; i < vocabSize; i++)
-            {
-                if (probs[i] < threshold)
-                    logits[i] = float.NegativeInfinity;
-            }
-        }
-        finally
+        for (int i = 0; i < logits.Length; i++)
         {
-            ArrayPool<float>.Shared.Return(rentedProbs);
+            if (logits[i] < threshold)
+                logits[i] = float.NegativeInfinity;
         }
     }
 }
