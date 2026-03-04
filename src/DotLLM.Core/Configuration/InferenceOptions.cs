@@ -1,3 +1,5 @@
+using DotLLM.Core.Sampling;
+
 namespace DotLLM.Core.Configuration;
 
 /// <summary>
@@ -20,6 +22,9 @@ public record InferenceOptions
     /// <summary>Repetition penalty factor. 1.0 = disabled.</summary>
     public float RepetitionPenalty { get; init; } = 1.0f;
 
+    /// <summary>Number of recent tokens for repetition penalty lookback. 0 = full history.</summary>
+    public int RepetitionPenaltyWindow { get; init; }
+
     /// <summary>Maximum number of tokens to generate.</summary>
     public int MaxTokens { get; init; } = 2048;
 
@@ -28,4 +33,23 @@ public record InferenceOptions
 
     /// <summary>Stop sequences that terminate generation.</summary>
     public IReadOnlyList<string> StopSequences { get; init; } = [];
+
+    /// <summary>
+    /// Explicit sampler steps composing the sampling pipeline.
+    /// When set, these steps are used instead of building from the flat properties
+    /// (Temperature, TopK, TopP, MinP). Steps are applied in order.
+    /// </summary>
+    public IReadOnlyList<ISamplerStep>? SamplerSteps { get; init; }
+
+    /// <summary>
+    /// Explicit logit processors (e.g., repetition penalty).
+    /// When set, used instead of building from RepetitionPenalty.
+    /// </summary>
+    public IReadOnlyList<ILogitProcessor>? LogitProcessors { get; init; }
+
+    /// <summary>
+    /// Explicit stop conditions. When set, used instead of the default
+    /// (EOS + MaxTokens + StopSequences). The caller controls the full set.
+    /// </summary>
+    public IReadOnlyList<IStopCondition>? StopConditions { get; init; }
 }

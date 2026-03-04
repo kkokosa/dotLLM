@@ -1,8 +1,10 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using DotLLM.Cli.Helpers;
+using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Engine.KvCache;
+using DotLLM.Engine.Samplers;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using Spectre.Console;
@@ -11,7 +13,8 @@ using Spectre.Console.Cli;
 namespace DotLLM.Cli.Commands;
 
 /// <summary>
-/// Runs greedy text generation on a GGUF model: load → encode prompt → decode loop → stream tokens.
+/// Runs text generation on a GGUF model: load → encode prompt → decode loop → stream tokens.
+/// Supports greedy (default) and sampled decoding via composable sampling pipeline.
 /// </summary>
 internal sealed class RunCommand : Command<RunCommand.Settings>
 {
@@ -29,6 +32,40 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
         [Description("Maximum number of tokens to generate.")]
         [DefaultValue(128)]
         public int MaxTokens { get; set; } = 128;
+
+        [CommandOption("--temp|-t")]
+        [Description("Sampling temperature. 0 = greedy (default).")]
+        [DefaultValue(0f)]
+        public float Temperature { get; set; }
+
+        [CommandOption("--top-k")]
+        [Description("Top-K sampling. 0 = disabled.")]
+        [DefaultValue(0)]
+        public int TopK { get; set; }
+
+        [CommandOption("--top-p")]
+        [Description("Top-P (nucleus) sampling threshold.")]
+        [DefaultValue(1.0f)]
+        public float TopP { get; set; } = 1.0f;
+
+        [CommandOption("--min-p")]
+        [Description("Min-P sampling threshold. 0 = disabled.")]
+        [DefaultValue(0f)]
+        public float MinP { get; set; }
+
+        [CommandOption("--repeat-penalty")]
+        [Description("Repetition penalty factor. 1.0 = disabled.")]
+        [DefaultValue(1.0f)]
+        public float RepeatPenalty { get; set; } = 1.0f;
+
+        [CommandOption("--repeat-last-n")]
+        [Description("Number of recent tokens for repetition penalty lookback. 0 = full history.")]
+        [DefaultValue(0)]
+        public int RepeatLastN { get; set; }
+
+        [CommandOption("--seed|-s")]
+        [Description("Random seed for reproducible sampling. Omit for non-deterministic.")]
+        public int? Seed { get; set; }
     }
 
     public override int Execute(CommandContext context, Settings settings)
@@ -68,6 +105,36 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
         loadSw.Stop();
 
         AnsiConsole.MarkupLine($"[grey]Model: {config.Architecture}, {config.NumLayers} layers, {config.HiddenSize} hidden, {config.VocabSize:N0} vocab[/]");
+
+        // Build sampling pipeline from CLI options
+        var inferenceOptions = new InferenceOptions
+        {
+            Temperature = settings.Temperature,
+            TopK = settings.TopK,
+            TopP = settings.TopP,
+            MinP = settings.MinP,
+            RepetitionPenalty = settings.RepeatPenalty,
+            RepetitionPenaltyWindow = settings.RepeatLastN,
+            MaxTokens = settings.MaxTokens,
+            Seed = settings.Seed
+        };
+        var pipeline = new SamplerPipeline(inferenceOptions);
+
+        if (settings.Temperature > 0)
+        {
+            var parts = new List<string> { $"temp={settings.Temperature:F2}" };
+            if (settings.TopK > 0) parts.Add($"top-k={settings.TopK}");
+            if (settings.TopP < 1.0f) parts.Add($"top-p={settings.TopP:F2}");
+            if (settings.MinP > 0f) parts.Add($"min-p={settings.MinP:F2}");
+            if (settings.RepeatPenalty != 1.0f) parts.Add($"repeat-penalty={settings.RepeatPenalty:F2}");
+            if (settings.Seed.HasValue) parts.Add($"seed={settings.Seed.Value}");
+            AnsiConsole.MarkupLine($"[grey]Sampling: {string.Join(", ", parts)}[/]");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("[grey]Sampling: greedy[/]");
+        }
+
         AnsiConsole.WriteLine();
 
         try
@@ -105,19 +172,22 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             // Generate tokens only when max-tokens > 0
             if (settings.MaxTokens > 0)
             {
+                var generatedTokens = new List<int>();
+
                 // First generated token from prefill logits
                 int lastToken;
                 unsafe
                 {
                     long samplerStart = Stopwatch.GetTimestamp();
-                    float* logitPtr = (float*)prefillLogits.DataPointer;
-                    lastToken = ArgMax(logitPtr, vocabSize);
+                    var logitSpan = new Span<float>((float*)prefillLogits.DataPointer, vocabSize);
+                    lastToken = pipeline.Sample(logitSpan, generatedTokens);
                     samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                 }
 
                 if (lastToken != tokenizer.EosTokenId)
                 {
                     generated++;
+                    generatedTokens.Add(lastToken);
                     Console.Write(tokenizer.DecodeToken(lastToken));
 
                     // Decode loop: single token per step
@@ -133,8 +203,8 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
                         unsafe
                         {
                             long samplerStart = Stopwatch.GetTimestamp();
-                            float* logitPtr = (float*)logitsTensor.DataPointer;
-                            lastToken = ArgMax(logitPtr, vocabSize);
+                            var logitSpan = new Span<float>((float*)logitsTensor.DataPointer, vocabSize);
+                            lastToken = pipeline.Sample(logitSpan, generatedTokens);
                             samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                         }
 
@@ -142,6 +212,7 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
                             break;
 
                         generated++;
+                        generatedTokens.Add(lastToken);
                         Console.Write(tokenizer.DecodeToken(lastToken));
                     }
                 }
@@ -278,7 +349,4 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
 
         return 0;
     }
-
-    private static unsafe int ArgMax(float* logits, int count)
-        => System.Numerics.Tensors.TensorPrimitives.IndexOfMax(new ReadOnlySpan<float>(logits, count));
 }
