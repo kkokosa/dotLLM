@@ -28,6 +28,9 @@ public sealed unsafe class LlamaModel : IModel
     /// <inheritdoc/>
     public ModelConfig Config { get; }
 
+    /// <summary>Total bytes allocated for inference scratch buffers.</summary>
+    public long ComputeMemoryBytes => _state.AllocatedBytes;
+
     private LlamaModel(ModelConfig config, LlamaWeights weights, LlamaForwardState state, GgufFile gguf, int ropeDim)
     {
         Config = config;

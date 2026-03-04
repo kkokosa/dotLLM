@@ -1,3 +1,4 @@
+using DotLLM.Cli.Helpers;
 using DotLLM.HuggingFace;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -34,7 +35,7 @@ internal sealed class ModelListCommand : Command<ModelListCommand.Settings>
             table.AddRow(
                 $"[bold]{model.RepoId.EscapeMarkup()}[/]",
                 model.Filename.EscapeMarkup(),
-                FormatSize(model.SizeBytes),
+                FormatHelpers.FormatSize(model.SizeBytes),
                 model.DownloadedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"));
         }
 
@@ -42,11 +43,4 @@ internal sealed class ModelListCommand : Command<ModelListCommand.Settings>
         return 0;
     }
 
-    private static string FormatSize(long bytes) => bytes switch
-    {
-        >= 1L << 30 => $"{bytes / (double)(1L << 30):F1} GB",
-        >= 1L << 20 => $"{bytes / (double)(1L << 20):F1} MB",
-        >= 1L << 10 => $"{bytes / (double)(1L << 10):F1} KB",
-        _ => $"{bytes} B"
-    };
 }

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using DotLLM.Cli.Helpers;
 using DotLLM.HuggingFace;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -55,7 +56,7 @@ internal sealed class ModelInfoCommand : AsyncCommand<ModelInfoCommand.Settings>
             fileTable.AddColumn(new TableColumn("Size").RightAligned());
 
             foreach (var file in ggufFiles.OrderBy(f => f.Path))
-                fileTable.AddRow(file.Path.EscapeMarkup(), FormatSize(file.Size));
+                fileTable.AddRow(file.Path.EscapeMarkup(), FormatHelpers.FormatSize(file.Size));
 
             AnsiConsole.Write(fileTable);
         }
@@ -63,11 +64,4 @@ internal sealed class ModelInfoCommand : AsyncCommand<ModelInfoCommand.Settings>
         return 0;
     }
 
-    private static string FormatSize(long bytes) => bytes switch
-    {
-        >= 1L << 30 => $"{bytes / (double)(1L << 30):F1} GB",
-        >= 1L << 20 => $"{bytes / (double)(1L << 20):F1} MB",
-        >= 1L << 10 => $"{bytes / (double)(1L << 10):F1} KB",
-        _ => $"{bytes} B"
-    };
 }

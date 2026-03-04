@@ -19,6 +19,27 @@ internal sealed unsafe class LlamaForwardState : IDisposable
 
     private int _currentSeqLen;
 
+    /// <summary>Total bytes currently allocated for inference scratch buffers.</summary>
+    public long AllocatedBytes
+    {
+        get
+        {
+            long s = _currentSeqLen;
+            if (s == 0) return 0;
+
+            long bytes = 0;
+            bytes += s * _hiddenSize * 3;                    // HiddenState + Residual + NormOutput
+            bytes += s * _numHeads * _headDim * 2;           // Q + AttnOutput
+            bytes += s * _numKvHeads * _headDim * 2;         // K + V
+            bytes += s * _intermediateSize * 3;              // FfnGate + FfnUp + SiluOutput
+            bytes += _vocabSize;                             // Logits (only last token)
+            bytes *= sizeof(float);
+            // RoPE tables (managed, but still part of compute memory)
+            bytes += (CosTable.Length + SinTable.Length) * sizeof(float);
+            return bytes;
+        }
+    }
+
     // All pointers are 64-byte-aligned via NativeMemory.AlignedAlloc.
     public nint HiddenState;
     public nint Residual;

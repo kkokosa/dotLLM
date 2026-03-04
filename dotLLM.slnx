@@ -5,6 +5,7 @@
   <Folder Name="/docs/">
     <File Path="docs/ARCHITECTURE.md" />
     <File Path="docs/ATTENTION.md" />
+    <File Path="docs/BENCHMARKS.md" />
     <File Path="docs/CONSTRAINED_DECODING.md" />
     <File Path="docs/DIAGNOSTICS.md" />
     <File Path="docs/GGUF_FORMAT.md" />

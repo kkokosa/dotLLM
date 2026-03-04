@@ -32,14 +32,17 @@ Each step is designed to be a discrete unit of work suitable for a single implem
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
-| 10 | **Q4_K_M dequantization** | K-quant with super-blocks, double quantization. See `docs/QUANTIZATION.md` for block layout. | 2 |
-| 11 | **Mixed quantization** | Handle heterogeneous per-tensor quantization types (common in Q4_K_M files: attention Q6_K, FFN Q4_K). Dispatch correct kernel per tensor. | 10 |
-| 12 | **Chat template engine** | Jinja2-subset interpreter. Parse `chat_template` from GGUF metadata or `tokenizer_config.json`. Compile to `IChatTemplate`. | 4 |
-| 13 | **Streaming generation** | `IAsyncEnumerable<string>` token-by-token output. Yield each decoded token as it's generated. | 8 |
-| 14 | **Hook system** | `IInferenceHook` interface, `HookPoint` enum, hook registry on `InferenceEngine`. Fire at 8 pipeline locations. Zero-cost when no hooks registered. | 6 |
-| 15 | **Logit lens** | Built on hook system. Capture `PostLayer(i)` hidden states, project through LM head, produce per-layer token probabilities. | 14 |
-| 16 | **Additional architectures** | Mistral (add sliding window attention mask), Phi, Qwen. Should be mostly `ModelConfig` parameterization, minimal new code. | 6 |
-| 17 | **Logit bias** | Per-request `logit_bias` map applied as `ISamplerStep` at the start of the sampling pipeline. | 8 |
+| 10 | **SIMD kernel tuning** | Benchmark-driven optimization of Q8_0/Q4_K GEMV kernels. Fused dequant-dot (no intermediate f32 buffer), `Fma.MultiplyAdd` accumulation, AVX-512 specialization with AVX2 fallback. Scalar reference as correctness oracle. Target: ~2-4× over current functional kernels. | 3 |
+| 11 | **CPU batched GEMM** | Batched matrix-matrix multiply for prefill: process all prompt tokens in one GEMM call instead of per-token GEMV. Tiled loop with cache-friendly access patterns. Falls back to GEMV for single-token decode. Target: ~5-10× prefill speedup. | 3 |
+| 12 | **Q4_K_M dequantization** | K-quant with super-blocks, double quantization. See `docs/QUANTIZATION.md` for block layout. | 2 |
+| 13 | **Mixed quantization** | Handle heterogeneous per-tensor quantization types (common in Q4_K_M files: attention Q6_K, FFN Q4_K). Dispatch correct kernel per tensor. | 12 |
+| 14 | **Chat template engine** | Jinja2-subset interpreter. Parse `chat_template` from GGUF metadata or `tokenizer_config.json`. Compile to `IChatTemplate`. | 4 |
+| 15 | **Streaming generation** | `IAsyncEnumerable<string>` token-by-token output. Yield each decoded token as it's generated. | 8 |
+| 16 | **Hook system** | `IInferenceHook` interface, `HookPoint` enum, hook registry on `InferenceEngine`. Fire at 8 pipeline locations. Zero-cost when no hooks registered. | 6 |
+| 17 | **Logit lens** | Built on hook system. Capture `PostLayer(i)` hidden states, project through LM head, produce per-layer token probabilities. | 16 |
+| 18 | **Additional architectures** | Mistral (add sliding window attention mask), Phi, Qwen. Should be mostly `ModelConfig` parameterization, minimal new code. | 6 |
+| 19 | **Logit bias** | Per-request `logit_bias` map applied as `ISamplerStep` at the start of the sampling pipeline. | 8 |
+| 20 | **Multi-threaded CPU inference** | Parallelize GEMV/GEMM, attention, and FFN across cores. `Parallel.For` or custom thread pool for compute-bound loops in `MatMul`, `Attention`, per-layer token processing. Thread count configurable via `InferenceOptions`. Target: ~4-8× speedup on multi-core CPUs. | 6 |
 
 **Milestone**: Chat interactively with Q4_K_M models, stream responses, inspect layer activations via logit lens.
 
@@ -49,9 +52,9 @@ Each step is designed to be a discrete unit of work suitable for a single implem
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
-| 18 | **CUDA backend** | Native C/CUDA library: cuBLAS GEMM for matmul, custom kernels for flash attention, RMSNorm+SiLU fused, RoPE, quantized matmul (Q4_K_M, Q8_0). `CudaBackend` implementing `IBackend`. | Phase 1–2 |
-| 19 | **CPU/GPU hybrid** | Layer offloading: specify N layers on GPU, remainder on CPU. Automatic tensor transfer at layer boundaries. Useful when model doesn't fully fit in VRAM. | 18 |
-| 20 | **KV-cache quantization** | FP8 (E4M3) and INT8 KV-cache compression. Configurable per-model via `KvCacheConfig`. Extends effective context length. | 18 |
+| 21 | **CUDA backend** | Native C/CUDA library: cuBLAS GEMM for matmul, custom kernels for flash attention, RMSNorm+SiLU fused, RoPE, quantized matmul (Q4_K_M, Q8_0). `CudaBackend` implementing `IBackend`. | Phase 1–2 |
+| 22 | **CPU/GPU hybrid** | Layer offloading: specify N layers on GPU, remainder on CPU. Automatic tensor transfer at layer boundaries. Useful when model doesn't fully fit in VRAM. | 21 |
+| 23 | **KV-cache quantization** | FP8 (E4M3) and INT8 KV-cache compression. Configurable per-model via `KvCacheConfig`. Extends effective context length. | 21 |
 
 **Milestone**: Run Llama 3 8B at >50 tokens/sec decode on a single consumer GPU.
 
@@ -61,19 +64,19 @@ Each step is designed to be a discrete unit of work suitable for a single implem
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
-| 21 | **ASP.NET server** | Minimal API endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`, `/v1/tokenize`, `/v1/detokenize`. Health + readiness probes. | 12, 13 |
-| 22 | **Continuous batching** | `IScheduler` with iteration-level scheduling. Prefill/decode separation. Request admission based on KV-cache capacity. Sequence eviction on completion. | 7, 21 |
-| 23 | **Paged KV-cache** | PagedAttention: block-based allocation, block tables, free pool, reference counting, copy-on-write. Replace simple KV-cache. | 22 |
-| 24 | **Prompt caching** | Automatic prefix sharing via trie of computed KV blocks. Reference-counted shared blocks. LRU eviction. Optional explicit `prefix_id` API. | 23 |
-| 25 | **Rate limiting** | Per-API-key token-bucket rate limiter via `System.Threading.RateLimiting`. Requests/min, tokens/min, concurrent limits. Priority levels. HTTP 429 responses. | 21 |
-| 26 | **JSON mode** | `JsonConstraint` — FSM-based constrained decoding guaranteeing syntactically valid JSON. `response_format: {"type": "json_object"}`. | 8 |
-| 27 | **JSON Schema** | `JsonSchemaConstraint` — Schema-compiled automaton. `response_format: {"type": "json_schema", ...}`. Token mask precomputation. | 26 |
-| 28 | **Regex + CFG** | `RegexConstraint` (DFA-based) and `GrammarConstraint` (PDA, GBNF-style). | 26 |
-| 29 | **Tool calling** | `IToolCallParser`, chat template tool integration, structured output for function arguments. `finish_reason: "tool_calls"`. Parallel tool calls. | 12, 27 |
-| 30 | **Speculative decoding** | `ISpeculativeDecoder`. Draft-verify-accept loop with modified rejection sampling. KV-cache rollback. Constraint state rollback via `IDecodingConstraint.Clone()`. | 22, 23 |
-| 31 | **Beam search** | N-best decoding with length normalization. COW KV-cache for beam prefix sharing. Per-beam constraint state. | 23 |
-| 32 | **Metrics & tracing** | `System.Diagnostics.Metrics` for throughput/latency/utilization. `System.Diagnostics.Activity` for per-request tracing. OpenTelemetry exporters. | 22 |
-| 33 | **Warm-up** | JIT pre-compilation pass at startup. CUDA kernel pre-loading. Configurable `WarmupOptions`. Readiness probe gates on warm-up completion. | 21 |
+| 24 | **ASP.NET server** | Minimal API endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`, `/v1/tokenize`, `/v1/detokenize`. Health + readiness probes. | 14, 15 |
+| 25 | **Continuous batching** | `IScheduler` with iteration-level scheduling. Prefill/decode separation. Request admission based on KV-cache capacity. Sequence eviction on completion. | 7, 24 |
+| 26 | **Paged KV-cache** | PagedAttention: block-based allocation, block tables, free pool, reference counting, copy-on-write. Replace simple KV-cache. | 25 |
+| 27 | **Prompt caching** | Automatic prefix sharing via trie of computed KV blocks. Reference-counted shared blocks. LRU eviction. Optional explicit `prefix_id` API. | 26 |
+| 28 | **Rate limiting** | Per-API-key token-bucket rate limiter via `System.Threading.RateLimiting`. Requests/min, tokens/min, concurrent limits. Priority levels. HTTP 429 responses. | 24 |
+| 29 | **JSON mode** | `JsonConstraint` — FSM-based constrained decoding guaranteeing syntactically valid JSON. `response_format: {"type": "json_object"}`. | 8 |
+| 30 | **JSON Schema** | `JsonSchemaConstraint` — Schema-compiled automaton. `response_format: {"type": "json_schema", ...}`. Token mask precomputation. | 29 |
+| 31 | **Regex + CFG** | `RegexConstraint` (DFA-based) and `GrammarConstraint` (PDA, GBNF-style). | 29 |
+| 32 | **Tool calling** | `IToolCallParser`, chat template tool integration, structured output for function arguments. `finish_reason: "tool_calls"`. Parallel tool calls. | 14, 30 |
+| 33 | **Speculative decoding** | `ISpeculativeDecoder`. Draft-verify-accept loop with modified rejection sampling. KV-cache rollback. Constraint state rollback via `IDecodingConstraint.Clone()`. | 25, 26 |
+| 34 | **Beam search** | N-best decoding with length normalization. COW KV-cache for beam prefix sharing. Per-beam constraint state. | 26 |
+| 35 | **Metrics & tracing** | `System.Diagnostics.Metrics` for throughput/latency/utilization. `System.Diagnostics.Activity` for per-request tracing. OpenTelemetry exporters. | 25 |
+| 36 | **Warm-up** | JIT pre-compilation pass at startup. CUDA kernel pre-loading. Configurable `WarmupOptions`. Readiness probe gates on warm-up completion. | 24 |
 
 **Milestone**: Serve concurrent API requests with structured output, tool calling, continuous batching, and full observability.
 
@@ -83,12 +86,12 @@ Each step is designed to be a discrete unit of work suitable for a single implem
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
-| 34 | **LoRA adapters** | `IAdapterManager`. Runtime adapter loading from SafeTensors. Multi-adapter batching (group sequences by adapter). Per-request `lora_adapter` parameter. No weight merging. | 22 |
-| 35 | **MLA attention** | DeepSeek-V2/V3 Multi-head Latent Attention. Down-project KV to latent, up-project during attention. `LatentKvCache`. | Phase 1 |
-| 36 | **ALiBi position encoding** | Additive linear bias to attention scores. `AlibiPositionEncoding` implementing `IPositionEncoding`. | Phase 1 |
-| 37 | **SAE integration** | Sparse autoencoder hooks. Load pre-trained SAEs from SafeTensors. Feature analysis, steering, ablation. Sample project: `DotLLM.Sample.Interpretability`. | 14 |
-| 38 | **Multi-GPU tensor parallelism** | NCCL-based TP. Split attention heads and FFN columns. All-reduce after attention and FFN. `ParallelismConfig`. See `docs/MULTI_GPU.md`. | 18 |
-| 39 | **ROCm backend** | HIP conditional compilation of CUDA kernels. `#ifdef __HIP_PLATFORM_AMD__`. Separate `DotLLM.Backend.ROCm` NuGet package. Same C# code, different native binary. | 18 |
+| 37 | **LoRA adapters** | `IAdapterManager`. Runtime adapter loading from SafeTensors. Multi-adapter batching (group sequences by adapter). Per-request `lora_adapter` parameter. No weight merging. | 25 |
+| 38 | **MLA attention** | DeepSeek-V2/V3 Multi-head Latent Attention. Down-project KV to latent, up-project during attention. `LatentKvCache`. | Phase 1 |
+| 39 | **ALiBi position encoding** | Additive linear bias to attention scores. `AlibiPositionEncoding` implementing `IPositionEncoding`. | Phase 1 |
+| 40 | **SAE integration** | Sparse autoencoder hooks. Load pre-trained SAEs from SafeTensors. Feature analysis, steering, ablation. Sample project: `DotLLM.Sample.Interpretability`. | 16 |
+| 41 | **Multi-GPU tensor parallelism** | NCCL-based TP. Split attention heads and FFN columns. All-reduce after attention and FFN. `ParallelismConfig`. See `docs/MULTI_GPU.md`. | 21 |
+| 42 | **ROCm backend** | HIP conditional compilation of CUDA kernels. `#ifdef __HIP_PLATFORM_AMD__`. Separate `DotLLM.Backend.ROCm` NuGet package. Same C# code, different native binary. | 21 |
 
 **Milestone**: Multi-tenant LoRA serving, DeepSeek support, multi-GPU 70B inference, mechanistic interpretability workflows in .NET.
 

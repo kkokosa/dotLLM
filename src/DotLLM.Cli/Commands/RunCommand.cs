@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using DotLLM.Cli.Helpers;
 using DotLLM.Core.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
@@ -47,6 +48,7 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
         Tokenizers.Bpe.BpeTokenizer tokenizer = null!;
         LlamaModel model = null!;
 
+        var loadSw = Stopwatch.StartNew();
         AnsiConsole.Status()
             .Spinner(Spinner.Known.Dots)
             .Start("Loading model...", ctx =>
@@ -63,6 +65,7 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
                 ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden)...");
                 model = LlamaModel.LoadFromGguf(gguf, config);
             });
+        loadSw.Stop();
 
         AnsiConsole.MarkupLine($"[grey]Model: {config.Architecture}, {config.NumLayers} layers, {config.HiddenSize} hidden, {config.VocabSize:N0} vocab[/]");
         AnsiConsole.MarkupLine("[grey]Warning: No KV-cache — full context reprocessed each step (slow)[/]");
@@ -88,6 +91,9 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             Console.Write(settings.Prompt);
 
             var totalSw = Stopwatch.StartNew();
+            long promptEvalTicks = 0;
+            long evalTicks = 0;
+            long samplerTicks = 0;
             int generated = 0;
 
             for (int step = 0; step < settings.MaxTokens; step++)
@@ -96,10 +102,18 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
                 var tokenSpan = CollectionsMarshal.AsSpan(tokens);
 
                 // Forward pass — returns [1, vocabSize] logits (last token only)
+                long fwdStart = Stopwatch.GetTimestamp();
                 using var logitsTensor = model.Forward(tokenSpan, positions.AsSpan(0, seqLen), -1);
+                long fwdEnd = Stopwatch.GetTimestamp();
+
+                if (step == 0)
+                    promptEvalTicks = fwdEnd - fwdStart;
+                else
+                    evalTicks += fwdEnd - fwdStart;
 
                 // Greedy argmax on logits
                 int vocabSize = config.VocabSize;
+                long samplerStart = Stopwatch.GetTimestamp();
                 unsafe
                 {
                     float* logits = (float*)logitsTensor.DataPointer;
@@ -114,6 +128,8 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
                             bestId = i;
                         }
                     }
+                    long samplerEnd = Stopwatch.GetTimestamp();
+                    samplerTicks += samplerEnd - samplerStart;
 
                     // Check EOS
                     if (bestId == tokenizer.EosTokenId)
@@ -132,18 +148,122 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             Console.WriteLine();
             AnsiConsole.WriteLine();
 
-            // Timing stats
-            double totalSec = totalSw.Elapsed.TotalSeconds;
-            double tokPerSec = generated > 0 ? generated / totalSec : 0;
+            // Convert ticks to milliseconds
+            double tickFreq = Stopwatch.Frequency;
+            double loadMs = loadSw.Elapsed.TotalMilliseconds;
+            double promptEvalMs = promptEvalTicks / tickFreq * 1000.0;
+            double evalMs = evalTicks / tickFreq * 1000.0;
+            double samplerMs = samplerTicks / tickFreq * 1000.0;
+            double totalMs = totalSw.Elapsed.TotalMilliseconds;
 
-            var statsTable = new Table().Border(TableBorder.Rounded).Title("[bold]Generation Stats[/]");
-            statsTable.AddColumn("Metric");
-            statsTable.AddColumn("Value");
-            statsTable.AddRow("Prompt tokens", promptLen.ToString());
-            statsTable.AddRow("Generated tokens", generated.ToString());
-            statsTable.AddRow("Total time", $"{totalSec:F2}s");
-            statsTable.AddRow("Tokens/sec", $"{tokPerSec:F2}");
-            AnsiConsole.Write(statsTable);
+            int evalSteps = generated > 0 ? generated - 1 : 0; // first generated token comes from prompt eval step
+
+            // Performance summary table
+            var perfTable = new Table()
+                .Border(TableBorder.Rounded)
+                .Title("[bold]Performance Summary[/]");
+
+            perfTable.AddColumn(new TableColumn("Phase").LeftAligned());
+            perfTable.AddColumn(new TableColumn("Time").RightAligned());
+            perfTable.AddColumn(new TableColumn("Tokens").RightAligned());
+            perfTable.AddColumn(new TableColumn("ms/token").RightAligned());
+            perfTable.AddColumn(new TableColumn("tokens/s").RightAligned());
+
+            // Load
+            perfTable.AddRow(
+                "Load",
+                $"{loadMs:F2} ms",
+                Markup.Escape("—"),
+                Markup.Escape("—"),
+                Markup.Escape("—"));
+
+            // Prompt eval
+            if (promptLen > 0)
+            {
+                double promptMsPerToken = promptEvalMs / promptLen;
+                double promptTokPerSec = promptLen / (promptEvalMs / 1000.0);
+                perfTable.AddRow(
+                    "Prompt eval",
+                    $"{promptEvalMs:F2} ms",
+                    promptLen.ToString(),
+                    $"{promptMsPerToken:F2}",
+                    $"{promptTokPerSec:F2}");
+            }
+
+            // Eval (decode steps after the first)
+            if (evalSteps > 0)
+            {
+                double evalMsPerToken = evalMs / evalSteps;
+                double evalTokPerSec = evalSteps / (evalMs / 1000.0);
+                perfTable.AddRow(
+                    "Eval",
+                    $"{evalMs:F2} ms",
+                    $"{evalSteps}",
+                    $"{evalMsPerToken:F2}",
+                    $"{evalTokPerSec:F2}");
+            }
+            else
+            {
+                perfTable.AddRow(
+                    "Eval",
+                    $"{evalMs:F2} ms",
+                    "0",
+                    Markup.Escape("—"),
+                    Markup.Escape("—"));
+            }
+
+            // Sampling
+            if (generated > 0)
+            {
+                double samplerMsPerToken = samplerMs / generated;
+                perfTable.AddRow(
+                    "Sampling",
+                    $"{samplerMs:F2} ms",
+                    generated.ToString(),
+                    $"{samplerMsPerToken:F2}",
+                    Markup.Escape("—"));
+            }
+            else
+            {
+                perfTable.AddRow(
+                    "Sampling",
+                    $"{samplerMs:F2} ms",
+                    "0",
+                    Markup.Escape("—"),
+                    Markup.Escape("—"));
+            }
+
+            // Total
+            int totalTokens = promptLen + generated;
+            double totalTokPerSec = totalTokens > 0 ? totalTokens / (totalMs / 1000.0) : 0;
+            perfTable.AddRow(
+                "[bold]Total[/]",
+                $"[bold]{totalMs:F2} ms[/]",
+                $"[bold]{totalTokens}[/]",
+                Markup.Escape("—"),
+                $"[bold]{totalTokPerSec:F2}[/]");
+
+            AnsiConsole.Write(perfTable);
+            AnsiConsole.WriteLine();
+
+            // Memory breakdown table
+            long fileSize = new FileInfo(resolvedPath).Length;
+            long modelWeightsBytes = fileSize - gguf.DataSectionOffset;
+            long computeBytes = model.ComputeMemoryBytes;
+            long totalMemory = modelWeightsBytes + computeBytes;
+
+            var memTable = new Table()
+                .Border(TableBorder.Rounded)
+                .Title("[bold]Memory Breakdown[/]");
+
+            memTable.AddColumn(new TableColumn("Component").LeftAligned());
+            memTable.AddColumn(new TableColumn("Size").RightAligned());
+
+            memTable.AddRow("Model weights", $"{FormatHelpers.FormatMiB(modelWeightsBytes)}  [dim](memory-mapped)[/]");
+            memTable.AddRow("Compute", FormatHelpers.FormatMiB(computeBytes));
+            memTable.AddRow("[bold]Total[/]", $"[bold]{FormatHelpers.FormatMiB(totalMemory)}[/]");
+
+            AnsiConsole.Write(memTable);
         }
         finally
         {
