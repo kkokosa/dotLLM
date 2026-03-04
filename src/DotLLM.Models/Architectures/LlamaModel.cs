@@ -160,17 +160,15 @@ public sealed unsafe class LlamaModel : IModel
             // e. Attention — with or without KV-cache
             if (kvCache is not null)
             {
-                // Store new K/V in cache, then attend over full cached context
-                using var kView = new TensorView(
-                    new TensorShape(seqLen, kvStride), DType.Float32, -1, (nint)k);
-                using var vView = new TensorView(
-                    new TensorShape(seqLen, kvStride), DType.Float32, -1, (nint)v);
+                // Store new K/V in cache, then attend over full cached context (zero allocations)
+                var kRef = new TensorRef(seqLen, kvStride, DType.Float32, -1, (nint)k);
+                var vRef = new TensorRef(seqLen, kvStride, DType.Float32, -1, (nint)v);
 
-                kvCache.Update(kView, vView, positions, layer);
+                kvCache.Update(kRef, vRef, positions, layer);
 
                 int seqKv = kvCache.CurrentLength;
-                using var cachedK = kvCache.GetKeys(layer);
-                using var cachedV = kvCache.GetValues(layer);
+                var cachedK = kvCache.GetKeysRef(layer);
+                var cachedV = kvCache.GetValuesRef(layer);
 
                 Attention.Execute(
                     new ReadOnlySpan<float>(q, seqLen * numHeads * headDim),

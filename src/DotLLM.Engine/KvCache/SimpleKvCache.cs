@@ -56,8 +56,11 @@ public sealed unsafe class SimpleKvCache : IKvCache
         }
     }
 
+    /// <summary>Releases unmanaged buffers if <see cref="Dispose()"/> was not called.</summary>
+    ~SimpleKvCache() => Dispose(disposing: false);
+
     /// <inheritdoc/>
-    public void Update(ITensor keys, ITensor values, ReadOnlySpan<int> positions, int layerIndex)
+    public void Update(TensorRef keys, TensorRef values, ReadOnlySpan<int> positions, int layerIndex)
     {
         int seqLen = positions.Length;
         int maxPos = -1;
@@ -78,7 +81,6 @@ public sealed unsafe class SimpleKvCache : IKvCache
 
             if (pos > maxPos) maxPos = pos;
 
-            // Copy one row: [numKvHeads * headDim] floats
             Buffer.MemoryCopy(
                 kSrc + i * _kvStride,
                 kDst + pos * _kvStride,
@@ -90,11 +92,28 @@ public sealed unsafe class SimpleKvCache : IKvCache
                 rowBytes, rowBytes);
         }
 
-        // Advance current length to cover all stored positions
         int newLength = maxPos + 1;
         if (newLength > _currentLength)
             _currentLength = newLength;
     }
+
+    /// <inheritdoc/>
+    public void Update(ITensor keys, ITensor values, ReadOnlySpan<int> positions, int layerIndex)
+    {
+        var kRef = new TensorRef(positions.Length, _kvStride, keys.DType, keys.DeviceId, keys.DataPointer);
+        var vRef = new TensorRef(positions.Length, _kvStride, values.DType, values.DeviceId, values.DataPointer);
+        Update(kRef, vRef, positions, layerIndex);
+    }
+
+    /// <inheritdoc/>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public TensorRef GetKeysRef(int layerIndex)
+        => new(_currentLength, _kvStride, DType.Float32, -1, _keys[layerIndex]);
+
+    /// <inheritdoc/>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public TensorRef GetValuesRef(int layerIndex)
+        => new(_currentLength, _kvStride, DType.Float32, -1, _values[layerIndex]);
 
     /// <inheritdoc/>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -114,6 +133,12 @@ public sealed unsafe class SimpleKvCache : IKvCache
 
     /// <inheritdoc/>
     public void Dispose()
+    {
+        Dispose(disposing: true);
+        GC.SuppressFinalize(this);
+    }
+
+    private void Dispose(bool disposing)
     {
         if (_disposed) return;
         _disposed = true;

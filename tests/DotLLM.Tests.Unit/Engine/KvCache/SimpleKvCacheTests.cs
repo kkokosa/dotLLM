@@ -23,46 +23,62 @@ public sealed unsafe class SimpleKvCacheTests
     }
 
     [Fact]
-    public void Update_StoresDataAtPositions()
+    public void Update_TensorRef_StoresDataAtPositions()
     {
         using var cache = new SimpleKvCache(NumLayers, NumKvHeads, HeadDim, MaxSeqLen);
 
-        // Create K/V tensors for 3 tokens
         int seqLen = 3;
-        using var kTensor = AllocAndFill(seqLen, 1.0f);
-        using var vTensor = AllocAndFill(seqLen, 2.0f);
-
-        int[] positions = [0, 1, 2];
-        cache.Update(kTensor, vTensor, positions, layerIndex: 0);
-
-        // Read back and verify
-        using var cachedK = cache.GetKeys(0);
-        using var cachedV = cache.GetValues(0);
-
-        Assert.Equal(3, cachedK.Shape[0]);
-
-        var kSpan = new ReadOnlySpan<float>((void*)cachedK.DataPointer, 3 * KvStride);
-        var vSpan = new ReadOnlySpan<float>((void*)cachedV.DataPointer, 3 * KvStride);
-
-        for (int i = 0; i < 3 * KvStride; i++)
+        nint kPtr = AllocAndFillNative(seqLen, 1.0f);
+        nint vPtr = AllocAndFillNative(seqLen, 2.0f);
+        try
         {
-            Assert.Equal(1.0f, kSpan[i]);
-            Assert.Equal(2.0f, vSpan[i]);
+            var kRef = new TensorRef(seqLen, KvStride, DType.Float32, -1, kPtr);
+            var vRef = new TensorRef(seqLen, KvStride, DType.Float32, -1, vPtr);
+
+            cache.Update(kRef, vRef, [0, 1, 2], layerIndex: 0);
+
+            var cachedK = cache.GetKeysRef(0);
+            var cachedV = cache.GetValuesRef(0);
+
+            Assert.Equal(3, cachedK.Dim0);
+
+            var kSpan = new ReadOnlySpan<float>((void*)cachedK.DataPointer, 3 * KvStride);
+            var vSpan = new ReadOnlySpan<float>((void*)cachedV.DataPointer, 3 * KvStride);
+
+            for (int i = 0; i < 3 * KvStride; i++)
+            {
+                Assert.Equal(1.0f, kSpan[i]);
+                Assert.Equal(2.0f, vSpan[i]);
+            }
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)kPtr);
+            NativeMemory.AlignedFree((void*)vPtr);
         }
     }
 
     [Fact]
-    public void Update_AdvancesCurrentLength()
+    public void Update_TensorRef_AdvancesCurrentLength()
     {
         using var cache = new SimpleKvCache(NumLayers, NumKvHeads, HeadDim, MaxSeqLen);
 
-        using var kTensor = AllocAndFill(5, 1.0f);
-        using var vTensor = AllocAndFill(5, 2.0f);
+        nint kPtr = AllocAndFillNative(5, 1.0f);
+        nint vPtr = AllocAndFillNative(5, 2.0f);
+        try
+        {
+            var kRef = new TensorRef(5, KvStride, DType.Float32, -1, kPtr);
+            var vRef = new TensorRef(5, KvStride, DType.Float32, -1, vPtr);
 
-        int[] positions = [0, 1, 2, 3, 4];
-        cache.Update(kTensor, vTensor, positions, layerIndex: 0);
+            cache.Update(kRef, vRef, [0, 1, 2, 3, 4], layerIndex: 0);
 
-        Assert.Equal(5, cache.CurrentLength);
+            Assert.Equal(5, cache.CurrentLength);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)kPtr);
+            NativeMemory.AlignedFree((void*)vPtr);
+        }
     }
 
     [Fact]
@@ -74,9 +90,19 @@ public sealed unsafe class SimpleKvCacheTests
         for (int pos = 0; pos < 5; pos++)
         {
             float fillVal = pos + 1.0f;
-            using var kT = AllocAndFill(1, fillVal);
-            using var vT = AllocAndFill(1, fillVal * 10);
-            cache.Update(kT, vT, [pos], layerIndex: 0);
+            nint kPtr = AllocAndFillNative(1, fillVal);
+            nint vPtr = AllocAndFillNative(1, fillVal * 10);
+            try
+            {
+                var kRef = new TensorRef(1, KvStride, DType.Float32, -1, kPtr);
+                var vRef = new TensorRef(1, KvStride, DType.Float32, -1, vPtr);
+                cache.Update(kRef, vRef, [pos], layerIndex: 0);
+            }
+            finally
+            {
+                NativeMemory.AlignedFree((void*)kPtr);
+                NativeMemory.AlignedFree((void*)vPtr);
+            }
         }
         Assert.Equal(5, cache.CurrentLength);
 
@@ -85,15 +111,25 @@ public sealed unsafe class SimpleKvCacheTests
         {
             int pos = 5 + step;
             float fillVal = pos + 1.0f;
-            using var kT = AllocAndFill(1, fillVal);
-            using var vT = AllocAndFill(1, fillVal * 10);
-            cache.Update(kT, vT, [pos], layerIndex: 0);
+            nint kPtr = AllocAndFillNative(1, fillVal);
+            nint vPtr = AllocAndFillNative(1, fillVal * 10);
+            try
+            {
+                var kRef = new TensorRef(1, KvStride, DType.Float32, -1, kPtr);
+                var vRef = new TensorRef(1, KvStride, DType.Float32, -1, vPtr);
+                cache.Update(kRef, vRef, [pos], layerIndex: 0);
+            }
+            finally
+            {
+                NativeMemory.AlignedFree((void*)kPtr);
+                NativeMemory.AlignedFree((void*)vPtr);
+            }
         }
         Assert.Equal(8, cache.CurrentLength);
 
         // Verify all 8 positions
-        using var cachedK = cache.GetKeys(0);
-        using var cachedV = cache.GetValues(0);
+        var cachedK = cache.GetKeysRef(0);
+        var cachedV = cache.GetValuesRef(0);
         var kSpan = new ReadOnlySpan<float>((void*)cachedK.DataPointer, 8 * KvStride);
         var vSpan = new ReadOnlySpan<float>((void*)cachedV.DataPointer, 8 * KvStride);
 
@@ -122,11 +158,21 @@ public sealed unsafe class SimpleKvCacheTests
     {
         using var cache = new SimpleKvCache(NumLayers, NumKvHeads, HeadDim, MaxSeqLen);
 
-        using var kTensor = AllocAndFill(1, 1.0f);
-        using var vTensor = AllocAndFill(1, 2.0f);
+        nint kPtr = AllocAndFillNative(1, 1.0f);
+        nint vPtr = AllocAndFillNative(1, 2.0f);
+        try
+        {
+            var kRef = new TensorRef(1, KvStride, DType.Float32, -1, kPtr);
+            var vRef = new TensorRef(1, KvStride, DType.Float32, -1, vPtr);
 
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            cache.Update(kTensor, vTensor, [MaxSeqLen], layerIndex: 0));
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                cache.Update(kRef, vRef, [MaxSeqLen], layerIndex: 0));
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)kPtr);
+            NativeMemory.AlignedFree((void*)vPtr);
+        }
     }
 
     [Fact]
@@ -134,22 +180,34 @@ public sealed unsafe class SimpleKvCacheTests
     {
         using var cache = new SimpleKvCache(NumLayers, NumKvHeads, HeadDim, MaxSeqLen);
 
-        using var k0 = AllocAndFill(1, 1.0f);
-        using var v0 = AllocAndFill(1, 10.0f);
-        using var k1 = AllocAndFill(1, 2.0f);
-        using var v1 = AllocAndFill(1, 20.0f);
+        nint k0Ptr = AllocAndFillNative(1, 1.0f);
+        nint v0Ptr = AllocAndFillNative(1, 10.0f);
+        nint k1Ptr = AllocAndFillNative(1, 2.0f);
+        nint v1Ptr = AllocAndFillNative(1, 20.0f);
+        try
+        {
+            cache.Update(
+                new TensorRef(1, KvStride, DType.Float32, -1, k0Ptr),
+                new TensorRef(1, KvStride, DType.Float32, -1, v0Ptr),
+                [0], layerIndex: 0);
+            cache.Update(
+                new TensorRef(1, KvStride, DType.Float32, -1, k1Ptr),
+                new TensorRef(1, KvStride, DType.Float32, -1, v1Ptr),
+                [0], layerIndex: 1);
 
-        cache.Update(k0, v0, [0], layerIndex: 0);
-        cache.Update(k1, v1, [0], layerIndex: 1);
+            var cachedK0 = cache.GetKeysRef(0);
+            var cachedK1 = cache.GetKeysRef(1);
 
-        using var cachedK0 = cache.GetKeys(0);
-        using var cachedK1 = cache.GetKeys(1);
-
-        float firstK0 = *(float*)cachedK0.DataPointer;
-        float firstK1 = *(float*)cachedK1.DataPointer;
-
-        Assert.Equal(1.0f, firstK0);
-        Assert.Equal(2.0f, firstK1);
+            Assert.Equal(1.0f, *(float*)cachedK0.DataPointer);
+            Assert.Equal(2.0f, *(float*)cachedK1.DataPointer);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)k0Ptr);
+            NativeMemory.AlignedFree((void*)v0Ptr);
+            NativeMemory.AlignedFree((void*)k1Ptr);
+            NativeMemory.AlignedFree((void*)v1Ptr);
+        }
     }
 
     [Fact]
@@ -167,13 +225,11 @@ public sealed unsafe class SimpleKvCacheTests
     {
         using var cache = new SimpleKvCache(NumLayers, NumKvHeads, HeadDim, MaxSeqLen);
 
-        // Prefill 4 tokens at once
         int seqLen = 4;
         nint kPtr = (nint)NativeMemory.AlignedAlloc((nuint)(seqLen * KvStride * sizeof(float)), 64);
         nint vPtr = (nint)NativeMemory.AlignedAlloc((nuint)(seqLen * KvStride * sizeof(float)), 64);
         try
         {
-            // Fill each token's row with its position index
             for (int t = 0; t < seqLen; t++)
             {
                 for (int d = 0; d < KvStride; d++)
@@ -183,14 +239,14 @@ public sealed unsafe class SimpleKvCacheTests
                 }
             }
 
-            var kView = new TensorView(new TensorShape(seqLen, KvStride), DType.Float32, -1, kPtr);
-            var vView = new TensorView(new TensorShape(seqLen, KvStride), DType.Float32, -1, vPtr);
+            var kRef = new TensorRef(seqLen, KvStride, DType.Float32, -1, kPtr);
+            var vRef = new TensorRef(seqLen, KvStride, DType.Float32, -1, vPtr);
 
-            cache.Update(kView, vView, [0, 1, 2, 3], layerIndex: 0);
+            cache.Update(kRef, vRef, [0, 1, 2, 3], layerIndex: 0);
 
             Assert.Equal(4, cache.CurrentLength);
 
-            using var cachedK = cache.GetKeys(0);
+            var cachedK = cache.GetKeysRef(0);
             var kSpan = new ReadOnlySpan<float>((void*)cachedK.DataPointer, 4 * KvStride);
 
             for (int t = 0; t < seqLen; t++)
@@ -206,7 +262,55 @@ public sealed unsafe class SimpleKvCacheTests
     }
 
     /// <summary>
-    /// Allocates a tensor of shape [seqLen, KvStride] filled with a constant value.
+    /// Verifies that <see cref="IKvCache.Update(Core.Tensors.ITensor,Core.Tensors.ITensor,ReadOnlySpan{int},int)"/>
+    /// correctly delegates to the <see cref="TensorRef"/>-based implementation.
+    /// </summary>
+    [Fact]
+    public void Update_ITensorPath_DelegatesToTensorRef()
+    {
+        using var cache = new SimpleKvCache(NumLayers, NumKvHeads, HeadDim, MaxSeqLen);
+
+        using var kTensor = AllocAndFill(2, 5.0f);
+        using var vTensor = AllocAndFill(2, 6.0f);
+
+        cache.Update(kTensor, vTensor, [0, 1], layerIndex: 0);
+
+        Assert.Equal(2, cache.CurrentLength);
+
+        // Verify via ITensor path
+        using var cachedK = cache.GetKeys(0);
+        Assert.Equal(2, cachedK.Shape[0]);
+        Assert.Equal(5.0f, *(float*)cachedK.DataPointer);
+    }
+
+    [Fact]
+    public void Finalizer_FreesMemory_WhenDisposeNotCalled()
+    {
+        // We can't directly test the finalizer frees memory without tooling,
+        // but we can verify creating and abandoning a cache doesn't crash.
+        var cache = new SimpleKvCache(1, 2, 4, 8);
+        // Intentionally NOT calling Dispose — finalizer should handle cleanup.
+        // ReSharper disable once RedundantAssignment
+        cache = null;
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        // If we get here without crash, the finalizer worked.
+    }
+
+    /// <summary>
+    /// Allocates a native buffer of shape [seqLen, KvStride] filled with a constant value.
+    /// Caller must free via <see cref="NativeMemory.AlignedFree"/>.
+    /// </summary>
+    private static nint AllocAndFillNative(int seqLen, float value)
+    {
+        nuint bytes = (nuint)(seqLen * KvStride * sizeof(float));
+        nint ptr = (nint)NativeMemory.AlignedAlloc(bytes, 64);
+        new Span<float>((void*)ptr, seqLen * KvStride).Fill(value);
+        return ptr;
+    }
+
+    /// <summary>
+    /// Allocates an <see cref="UnmanagedTensor"/> of shape [seqLen, KvStride] filled with a constant value.
     /// </summary>
     private static UnmanagedTensor AllocAndFill(int seqLen, float value)
     {

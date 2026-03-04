@@ -350,17 +350,5 @@ public class LlamaForwardPassTests
     }
 
     private static int ArgMax(ReadOnlySpan<float> span)
-    {
-        int maxIdx = 0;
-        float maxVal = span[0];
-        for (int i = 1; i < span.Length; i++)
-        {
-            if (span[i] > maxVal)
-            {
-                maxVal = span[i];
-                maxIdx = i;
-            }
-        }
-        return maxIdx;
-    }
+        => System.Numerics.Tensors.TensorPrimitives.IndexOfMax(span);
 }

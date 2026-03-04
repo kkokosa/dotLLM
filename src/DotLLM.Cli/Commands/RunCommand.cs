@@ -76,8 +76,8 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             int[] promptTokens = tokenizer.Encode(settings.Prompt);
             int promptLen = promptTokens.Length;
 
-            // Pre-allocate positions array and KV-cache
-            int cacheSize = promptLen + settings.MaxTokens;
+            // Pre-allocate positions array and KV-cache (capped at model's max sequence length)
+            int cacheSize = Math.Min(promptLen + settings.MaxTokens, config.MaxSequenceLength);
             int[] positions = new int[cacheSize];
             for (int i = 0; i < cacheSize; i++)
                 positions[i] = i;
@@ -102,44 +102,48 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             long fwdEnd = Stopwatch.GetTimestamp();
             promptEvalTicks = fwdEnd - fwdStart;
 
-            // First generated token from prefill logits
-            int lastToken;
-            unsafe
+            // Generate tokens only when max-tokens > 0
+            if (settings.MaxTokens > 0)
             {
-                long samplerStart = Stopwatch.GetTimestamp();
-                float* logitPtr = (float*)prefillLogits.DataPointer;
-                lastToken = ArgMax(logitPtr, vocabSize);
-                samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
-            }
-
-            if (lastToken != tokenizer.EosTokenId)
-            {
-                generated++;
-                Console.Write(tokenizer.DecodeToken(lastToken));
-
-                // Decode loop: single token per step
-                for (int step = 1; step < settings.MaxTokens; step++)
+                // First generated token from prefill logits
+                int lastToken;
+                unsafe
                 {
-                    int pos = promptLen + step - 1;
-                    fwdStart = Stopwatch.GetTimestamp();
-                    using var logitsTensor = model.Forward(
-                        [lastToken], positions.AsSpan(pos, 1), -1, kvCache);
-                    fwdEnd = Stopwatch.GetTimestamp();
-                    evalTicks += fwdEnd - fwdStart;
+                    long samplerStart = Stopwatch.GetTimestamp();
+                    float* logitPtr = (float*)prefillLogits.DataPointer;
+                    lastToken = ArgMax(logitPtr, vocabSize);
+                    samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                }
 
-                    unsafe
-                    {
-                        long samplerStart = Stopwatch.GetTimestamp();
-                        float* logitPtr = (float*)logitsTensor.DataPointer;
-                        lastToken = ArgMax(logitPtr, vocabSize);
-                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
-                    }
-
-                    if (lastToken == tokenizer.EosTokenId)
-                        break;
-
+                if (lastToken != tokenizer.EosTokenId)
+                {
                     generated++;
                     Console.Write(tokenizer.DecodeToken(lastToken));
+
+                    // Decode loop: single token per step
+                    for (int step = 1; step < settings.MaxTokens; step++)
+                    {
+                        int pos = promptLen + step - 1;
+                        fwdStart = Stopwatch.GetTimestamp();
+                        using var logitsTensor = model.Forward(
+                            [lastToken], positions.AsSpan(pos, 1), -1, kvCache);
+                        fwdEnd = Stopwatch.GetTimestamp();
+                        evalTicks += fwdEnd - fwdStart;
+
+                        unsafe
+                        {
+                            long samplerStart = Stopwatch.GetTimestamp();
+                            float* logitPtr = (float*)logitsTensor.DataPointer;
+                            lastToken = ArgMax(logitPtr, vocabSize);
+                            samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                        }
+
+                        if (lastToken == tokenizer.EosTokenId)
+                            break;
+
+                        generated++;
+                        Console.Write(tokenizer.DecodeToken(lastToken));
+                    }
                 }
             }
 
@@ -276,17 +280,5 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
     }
 
     private static unsafe int ArgMax(float* logits, int count)
-    {
-        int bestId = 0;
-        float bestVal = logits[0];
-        for (int i = 1; i < count; i++)
-        {
-            if (logits[i] > bestVal)
-            {
-                bestVal = logits[i];
-                bestId = i;
-            }
-        }
-        return bestId;
-    }
+        => System.Numerics.Tensors.TensorPrimitives.IndexOfMax(new ReadOnlySpan<float>(logits, count));
 }
