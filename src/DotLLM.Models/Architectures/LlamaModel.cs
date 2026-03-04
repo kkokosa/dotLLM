@@ -66,6 +66,14 @@ public sealed unsafe class LlamaModel : IModel
     /// <inheritdoc/>
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions, int deviceId)
     {
+        int maxSeq = Config.MaxSequenceLength;
+        for (int i = 0; i < positions.Length; i++)
+        {
+            if ((uint)positions[i] >= (uint)maxSeq)
+                throw new ArgumentOutOfRangeException(nameof(positions),
+                    $"Position {positions[i]} at index {i} exceeds max sequence length {maxSeq}.");
+        }
+
         int seqLen = tokenIds.Length;
         int hiddenSize = Config.HiddenSize;
         int numHeads = Config.NumAttentionHeads;
@@ -217,21 +225,16 @@ public sealed unsafe class LlamaModel : IModel
             new Span<float>(normOutT, hiddenSize).CopyTo(new Span<float>(hiddenT, hiddenSize));
         }
 
-        // 4. LM HEAD (per token GEMV)
-        for (int t = 0; t < seqLen; t++)
-        {
-            float* hiddenT = hidden + t * hiddenSize;
-            float* logitsT = logits + t * vocabSize;
+        // 4. LM HEAD — only last token
+        float* lastHidden = hidden + (seqLen - 1) * hiddenSize;
+        Gemv(_weights.OutputWeight, _weights.OutputQuantType,
+             lastHidden, logits, _weights.OutputOutputDim, _weights.OutputInputDim);
 
-            Gemv(_weights.OutputWeight, _weights.OutputQuantType,
-                 hiddenT, logitsT, _weights.OutputOutputDim, _weights.OutputInputDim);
-        }
-
-        // 5. RETURN — copy logits to new tensor (caller owns disposal)
-        var shape = new TensorShape(seqLen, vocabSize);
+        // 5. RETURN [1, vocabSize] — copy logits to new tensor (caller owns disposal)
+        var shape = new TensorShape(1, vocabSize);
         var result = UnmanagedTensor.Allocate(shape, DType.Float32, deviceId);
-        new Span<float>(logits, seqLen * vocabSize).CopyTo(
-            new Span<float>((void*)result.DataPointer, seqLen * vocabSize));
+        new Span<float>(logits, vocabSize).CopyTo(
+            new Span<float>((void*)result.DataPointer, vocabSize));
 
         return result;
     }
@@ -303,6 +306,10 @@ public sealed unsafe class LlamaModel : IModel
         for (int t = 0; t < tokenIds.Length; t++)
         {
             int tokenId = tokenIds[t];
+            if ((uint)tokenId >= (uint)Config.VocabSize)
+                throw new ArgumentOutOfRangeException(nameof(tokenIds),
+                    $"Token ID {tokenId} at position {t} is out of range [0, {Config.VocabSize}).");
+
             float* dest = hidden + t * hiddenSize;
             var destSpan = new Span<float>(dest, hiddenSize);
 

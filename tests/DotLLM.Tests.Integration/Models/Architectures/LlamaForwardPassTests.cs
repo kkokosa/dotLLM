@@ -109,7 +109,7 @@ public class LlamaForwardPassTests
         using ITensor logits = model.Forward(tokenIds, positions, deviceId: -1);
 
         Assert.Equal(2, logits.Shape.Rank);
-        Assert.Equal(tokenIds.Length, logits.Shape[0]);
+        Assert.Equal(1, logits.Shape[0]); // Only last token's logits returned
         Assert.Equal(model.Config.VocabSize, logits.Shape[1]);
     }
 
@@ -140,12 +140,11 @@ public class LlamaForwardPassTests
         {
             using ITensor logits = model.Forward(currentIds, currentPositions, deviceId: -1);
 
-            // Take argmax of the last token's logits
-            int lastTokenIdx = currentIds.Length - 1;
+            // Take argmax of logits (already last-token-only: [1, vocabSize])
             int nextTokenId;
             unsafe
             {
-                float* logitPtr = (float*)logits.DataPointer + lastTokenIdx * vocabSize;
+                float* logitPtr = (float*)logits.DataPointer;
                 nextTokenId = ArgMax(new ReadOnlySpan<float>(logitPtr, vocabSize));
             }
 
@@ -174,6 +173,32 @@ public class LlamaForwardPassTests
             generatedIds.TrueForAll(id => id == generatedIds[0]),
             "All 5 generated tokens are identical — likely degenerate output.");
         Assert.Equal(5, generatedIds.Count);
+    }
+
+    [Fact]
+    public void GreedyDecode_PredictsParis()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        int[] tokenIds = tokenizer.Encode("The capital of France is");
+        int[] positions = new int[tokenIds.Length];
+        for (int i = 0; i < positions.Length; i++)
+            positions[i] = i;
+
+        using ITensor logits = model.Forward(tokenIds, positions, deviceId: -1);
+
+        int vocabSize = model.Config.VocabSize;
+        int nextTokenId;
+        unsafe
+        {
+            float* logitPtr = (float*)logits.DataPointer;
+            nextTokenId = ArgMax(new ReadOnlySpan<float>(logitPtr, vocabSize));
+        }
+
+        string predicted = tokenizer.DecodeToken(nextTokenId).Trim();
+        Assert.Equal("Paris", predicted);
     }
 
     private static int ArgMax(ReadOnlySpan<float> span)

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using DotLLM.Core.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
@@ -74,8 +75,14 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             int promptLen = promptTokens.Length;
 
             // Build the full token sequence (prompt + generated)
-            var tokens = new List<int>(promptLen + settings.MaxTokens);
+            int maxSeqLen = promptLen + settings.MaxTokens;
+            var tokens = new List<int>(maxSeqLen);
             tokens.AddRange(promptTokens);
+
+            // Pre-allocate positions array for the entire generation run
+            int[] positions = new int[maxSeqLen];
+            for (int i = 0; i < maxSeqLen; i++)
+                positions[i] = i;
 
             // Print prompt echo
             Console.Write(settings.Prompt);
@@ -86,28 +93,24 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             for (int step = 0; step < settings.MaxTokens; step++)
             {
                 int seqLen = tokens.Count;
-                int[] tokenArray = tokens.ToArray();
-                int[] positions = new int[seqLen];
-                for (int i = 0; i < seqLen; i++)
-                    positions[i] = i;
+                var tokenSpan = CollectionsMarshal.AsSpan(tokens);
 
-                // Forward pass — returns [seqLen, vocabSize] logits
-                using var logitsTensor = model.Forward(tokenArray, positions, -1);
+                // Forward pass — returns [1, vocabSize] logits (last token only)
+                using var logitsTensor = model.Forward(tokenSpan, positions.AsSpan(0, seqLen), -1);
 
-                // Greedy argmax on last token's logits
+                // Greedy argmax on logits
                 int vocabSize = config.VocabSize;
                 unsafe
                 {
                     float* logits = (float*)logitsTensor.DataPointer;
-                    float* lastLogits = logits + (seqLen - 1) * (long)vocabSize;
 
                     int bestId = 0;
-                    float bestVal = lastLogits[0];
+                    float bestVal = logits[0];
                     for (int i = 1; i < vocabSize; i++)
                     {
-                        if (lastLogits[i] > bestVal)
+                        if (logits[i] > bestVal)
                         {
-                            bestVal = lastLogits[i];
+                            bestVal = logits[i];
                             bestId = i;
                         }
                     }

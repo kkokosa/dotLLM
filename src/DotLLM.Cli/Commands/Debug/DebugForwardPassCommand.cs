@@ -104,14 +104,12 @@ internal sealed class DebugForwardPassCommand : Command<DebugForwardPassCommand.
         AnsiConsole.MarkupLine($"Logit tensor shape: [bold]{logitsTensor.Shape.ToString().EscapeMarkup()}[/]");
         AnsiConsole.WriteLine();
 
-        // Analyze last token's logits
+        // Analyze logits (already last-token-only: [1, vocabSize])
         int vocabSize = config.VocabSize;
-        int seqLen = tokenIds.Length;
 
         unsafe
         {
-            float* allLogits = (float*)logitsTensor.DataPointer;
-            float* lastLogits = allLogits + (seqLen - 1) * (long)vocabSize;
+            float* lastLogits = (float*)logitsTensor.DataPointer;
 
             // Compute stats
             float min = lastLogits[0], max = lastLogits[0];

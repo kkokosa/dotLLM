@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.InteropServices;
 
 namespace DotLLM.Models.Architectures;
@@ -62,28 +63,29 @@ internal sealed unsafe class LlamaForwardState : IDisposable
 
     /// <summary>
     /// Ensures all scratch buffers are large enough for <paramref name="seqLen"/> tokens.
-    /// Reallocates if the current capacity is insufficient.
+    /// Uses power-of-2 growth to amortize reallocation cost.
     /// </summary>
     public void EnsureCapacity(int seqLen)
     {
         if (seqLen <= _currentSeqLen)
             return;
 
+        int newCapacity = (int)BitOperations.RoundUpToPowerOf2((uint)seqLen);
         FreeBuffers();
 
-        HiddenState = AllocFloats(seqLen * _hiddenSize);
-        Residual = AllocFloats(seqLen * _hiddenSize);
-        NormOutput = AllocFloats(seqLen * _hiddenSize);
-        Q = AllocFloats(seqLen * _numHeads * _headDim);
-        K = AllocFloats(seqLen * _numKvHeads * _headDim);
-        V = AllocFloats(seqLen * _numKvHeads * _headDim);
-        AttnOutput = AllocFloats(seqLen * _numHeads * _headDim);
-        FfnGate = AllocFloats(seqLen * _intermediateSize);
-        FfnUp = AllocFloats(seqLen * _intermediateSize);
-        SiluOutput = AllocFloats(seqLen * _intermediateSize);
-        Logits = AllocFloats(seqLen * _vocabSize);
+        HiddenState = AllocFloats(newCapacity * _hiddenSize);
+        Residual = AllocFloats(newCapacity * _hiddenSize);
+        NormOutput = AllocFloats(newCapacity * _hiddenSize);
+        Q = AllocFloats(newCapacity * _numHeads * _headDim);
+        K = AllocFloats(newCapacity * _numKvHeads * _headDim);
+        V = AllocFloats(newCapacity * _numKvHeads * _headDim);
+        AttnOutput = AllocFloats(newCapacity * _numHeads * _headDim);
+        FfnGate = AllocFloats(newCapacity * _intermediateSize);
+        FfnUp = AllocFloats(newCapacity * _intermediateSize);
+        SiluOutput = AllocFloats(newCapacity * _intermediateSize);
+        Logits = AllocFloats(_vocabSize); // Only last token's logits needed
 
-        _currentSeqLen = seqLen;
+        _currentSeqLen = newCapacity;
     }
 
     private static nint AllocFloats(long count)
