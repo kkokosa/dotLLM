@@ -127,27 +127,24 @@ public sealed unsafe class LlamaModel : IModel
             // a. Copy hiddenState → residual
             new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
 
-            // b-c: RMSNorm + Q/K/V projections (per token)
+            // b. RMSNorm all tokens
             for (int t = 0; t < seqLen; t++)
             {
-                float* hiddenT = hidden + t * hiddenSize;
-                float* normOutT = normOut + t * hiddenSize;
-                float* qT = q + t * (numHeads * headDim);
-                float* kT = k + t * kvStride;
-                float* vT = v + t * kvStride;
-
-                // b. RMSNorm(hiddenState, attnNormWeight, eps) → normOutput
                 RmsNorm.Execute(
-                    new ReadOnlySpan<float>(hiddenT, hiddenSize),
+                    new ReadOnlySpan<float>(hidden + t * hiddenSize, hiddenSize),
                     lw.AttnNormWeight,
                     eps,
-                    new Span<float>(normOutT, hiddenSize));
-
-                // c. Q/K/V projections (GEMV per token)
-                Gemv(lw.QWeight, lw.QQuantType, normOutT, qT, lw.QOutputDim, lw.QInputDim);
-                Gemv(lw.KWeight, lw.KQuantType, normOutT, kT, lw.KOutputDim, lw.KInputDim);
-                Gemv(lw.VWeight, lw.VQuantType, normOutT, vT, lw.VOutputDim, lw.VInputDim);
+                    new Span<float>(normOut + t * hiddenSize, hiddenSize));
             }
+
+            // c. Pre-quantize normOutput once, reuse across Q/K/V projections
+            byte* inputQ8Scratch = (byte*)_state.InputQ8Scratch;
+            byte* preQuantNorm = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, lw.QQuantType);
+
+            // Batched Q/K/V projections (GEMM)
+            Gemm(lw.QWeight, lw.QQuantType, normOut, q, lw.QOutputDim, lw.QInputDim, seqLen, preQuantNorm);
+            Gemm(lw.KWeight, lw.KQuantType, normOut, k, lw.KOutputDim, lw.KInputDim, seqLen, preQuantNorm);
+            Gemm(lw.VWeight, lw.VQuantType, normOut, v, lw.VOutputDim, lw.VInputDim, seqLen, preQuantNorm);
 
             // d. RoPE (in-place on Q and K for all tokens)
             RoPE.Execute(
@@ -187,47 +184,45 @@ public sealed unsafe class LlamaModel : IModel
                     seqLen, seqLen, numHeads, numKvHeads, headDim, 0);
             }
 
-            // f-g. Output projection + residual add (per token)
+            // f. Batched O projection
+            byte* preQuantAttn = QuantizeInput(attnOut, inputQ8Scratch, numHeads * headDim, seqLen, lw.OQuantType);
+            Gemm(lw.OWeight, lw.OQuantType, attnOut, normOut, lw.OOutputDim, lw.OInputDim, seqLen, preQuantAttn);
+
+            // g. Residual add (per token)
             for (int t = 0; t < seqLen; t++)
             {
-                float* attnOutT = attnOut + t * (numHeads * headDim);
-                float* normOutT = normOut + t * hiddenSize;
-                float* hiddenT = hidden + t * hiddenSize;
-                float* residualT = residual + t * hiddenSize;
-
-                // f. normOutput = Wo @ attnOutput
-                Gemv(lw.OWeight, lw.OQuantType, attnOutT, normOutT, lw.OOutputDim, lw.OInputDim);
-
-                // g. hiddenState = residual + normOutput (residual add)
                 Add.Execute(
-                    new ReadOnlySpan<float>(residualT, hiddenSize),
-                    new ReadOnlySpan<float>(normOutT, hiddenSize),
-                    new Span<float>(hiddenT, hiddenSize));
+                    new ReadOnlySpan<float>(residual + t * hiddenSize, hiddenSize),
+                    new ReadOnlySpan<float>(normOut + t * hiddenSize, hiddenSize),
+                    new Span<float>(hidden + t * hiddenSize, hiddenSize));
             }
 
             // h. Copy hiddenState → residual
             new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
 
-            // i-k. FFN (per token)
+            // i. FFN RMSNorm all tokens
             for (int t = 0; t < seqLen; t++)
             {
-                float* hiddenT = hidden + t * hiddenSize;
-                float* residualT = residual + t * hiddenSize;
-                float* normOutT = normOut + t * hiddenSize;
+                RmsNorm.Execute(
+                    new ReadOnlySpan<float>(hidden + t * hiddenSize, hiddenSize),
+                    lw.FfnNormWeight,
+                    eps,
+                    new Span<float>(normOut + t * hiddenSize, hiddenSize));
+            }
+
+            // j. Pre-quantize normOutput once, reuse across Gate/Up projections
+            byte* preQuantFfn = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, lw.GateQuantType);
+
+            // Batched Gate + Up projections
+            Gemm(lw.GateWeight, lw.GateQuantType, normOut, ffnGate, lw.GateOutputDim, lw.GateInputDim, seqLen, preQuantFfn);
+            Gemm(lw.UpWeight, lw.UpQuantType, normOut, ffnUp, lw.UpOutputDim, lw.UpInputDim, seqLen, preQuantFfn);
+
+            // SiLU + Multiply (element-wise, per token)
+            for (int t = 0; t < seqLen; t++)
+            {
                 float* gateT = ffnGate + t * intermediateSize;
                 float* upT = ffnUp + t * intermediateSize;
                 float* siluT = siluOut + t * intermediateSize;
-
-                // i. RMSNorm(hiddenState, ffnNormWeight, eps) → normOutput
-                RmsNorm.Execute(
-                    new ReadOnlySpan<float>(hiddenT, hiddenSize),
-                    lw.FfnNormWeight,
-                    eps,
-                    new Span<float>(normOutT, hiddenSize));
-
-                // j. SwiGLU FFN
-                Gemv(lw.GateWeight, lw.GateQuantType, normOutT, gateT, lw.GateOutputDim, lw.GateInputDim);
-                Gemv(lw.UpWeight, lw.UpQuantType, normOutT, upT, lw.UpOutputDim, lw.UpInputDim);
 
                 SiLu.Execute(
                     new ReadOnlySpan<float>(gateT, intermediateSize),
@@ -237,15 +232,21 @@ public sealed unsafe class LlamaModel : IModel
                     new ReadOnlySpan<float>(siluT, intermediateSize),
                     new ReadOnlySpan<float>(upT, intermediateSize),
                     new Span<float>(siluT, intermediateSize));
+            }
 
-                // Use normOutT as scratch for down projection result (hiddenSize fits)
-                Gemv(lw.DownWeight, lw.DownQuantType, siluT, normOutT, lw.DownOutputDim, lw.DownInputDim);
+            // Pre-quantize siluOutput for Down projection (different input dim = intermediateSize)
+            byte* preQuantSilu = QuantizeInput(siluOut, inputQ8Scratch, intermediateSize, seqLen, lw.DownQuantType);
 
-                // k. hiddenState = residual + normOutput (residual add)
+            // Batched Down projection (output into normOut as scratch)
+            Gemm(lw.DownWeight, lw.DownQuantType, siluOut, normOut, lw.DownOutputDim, lw.DownInputDim, seqLen, preQuantSilu);
+
+            // k. Residual add (per token)
+            for (int t = 0; t < seqLen; t++)
+            {
                 Add.Execute(
-                    new ReadOnlySpan<float>(residualT, hiddenSize),
-                    new ReadOnlySpan<float>(normOutT, hiddenSize),
-                    new Span<float>(hiddenT, hiddenSize));
+                    new ReadOnlySpan<float>(residual + t * hiddenSize, hiddenSize),
+                    new ReadOnlySpan<float>(normOut + t * hiddenSize, hiddenSize),
+                    new Span<float>(hidden + t * hiddenSize, hiddenSize));
             }
         }
 
@@ -281,6 +282,7 @@ public sealed unsafe class LlamaModel : IModel
 
     /// <summary>
     /// Dispatches to the appropriate GEMV kernel based on quantization type.
+    /// Used only for single-token operations (LM head).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void Gemv(nint weights, QuantizationType qt, float* x, float* y, int m, int k)
@@ -290,49 +292,46 @@ public sealed unsafe class LlamaModel : IModel
         else if (qt == QuantizationType.F32)
             MatMul.GemvF32((float*)weights, x, y, m, k);
         else if (qt == QuantizationType.F16)
-            GemvF16(weights, x, y, m, k);
+            MatMul.GemvF16(weights, x, y, m, k);
         else
             throw new NotSupportedException($"Unsupported quantization type for GEMV: {qt}");
     }
 
     /// <summary>
-    /// F16 GEMV: dequantize each row to scratch, then dot product. Uses stackalloc for small rows.
+    /// Dispatches to the appropriate GEMM kernel based on quantization type.
+    /// C[N,M] = B[N,K] × A[M,K]^T. When seqLen==1, delegates to GEMV.
     /// </summary>
-    [SkipLocalsInit]
-    private static void GemvF16(nint weights, float* x, float* y, int m, int k)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Gemm(nint weights, QuantizationType qt, float* b, float* c,
+                             int m, int k, int n, byte* preQuantizedInput = null)
     {
-        const int stackThreshold = 2048; // 8KB of floats
-        Half* weightsHalf = (Half*)weights;
-
-        if (k <= stackThreshold)
-        {
-            float* rowBuf = stackalloc float[k];
-            for (int row = 0; row < m; row++)
-            {
-                var srcRow = new ReadOnlySpan<Half>(weightsHalf + row * k, k);
-                var destRow = new Span<float>(rowBuf, k);
-                System.Numerics.Tensors.TensorPrimitives.ConvertToSingle(srcRow, destRow);
-                y[row] = System.Numerics.Tensors.TensorPrimitives.Dot(destRow, new ReadOnlySpan<float>(x, k));
-            }
-        }
+        if (qt == QuantizationType.Q8_0)
+            MatMul.GemmQ8_0((byte*)weights, b, c, m, k, n, preQuantizedInput);
+        else if (qt == QuantizationType.F32)
+            MatMul.GemmF32((float*)weights, b, c, m, k, n);
+        else if (qt == QuantizationType.F16)
+            MatMul.GemmF16(weights, b, c, m, k, n);
         else
-        {
-            float[] rented = System.Buffers.ArrayPool<float>.Shared.Rent(k);
-            try
-            {
-                for (int row = 0; row < m; row++)
-                {
-                    var srcRow = new ReadOnlySpan<Half>(weightsHalf + row * k, k);
-                    var destRow = rented.AsSpan(0, k);
-                    System.Numerics.Tensors.TensorPrimitives.ConvertToSingle(srcRow, destRow);
-                    y[row] = System.Numerics.Tensors.TensorPrimitives.Dot(destRow, new ReadOnlySpan<float>(x, k));
-                }
-            }
-            finally
-            {
-                System.Buffers.ArrayPool<float>.Shared.Return(rented);
-            }
-        }
+            throw new NotSupportedException($"Unsupported quantization type for GEMM: {qt}");
+    }
+
+    /// <summary>
+    /// Pre-quantizes [seqLen, dim] f32 input to Q8_0 into <see cref="LlamaForwardState.InputQ8Scratch"/>.
+    /// Returns the scratch pointer if Q8_0 and seqLen &gt; 1, otherwise null (no benefit).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static byte* QuantizeInput(float* input, byte* scratch, int dim, int seqLen,
+                                       QuantizationType qt)
+    {
+        if (qt != QuantizationType.Q8_0 || seqLen <= 1)
+            return null;
+
+        int blockCount = dim / 32; // Q8_0GroupSize
+        int q8RowBytes = blockCount * 34; // Q8_0BlockBytes
+        for (int t = 0; t < seqLen; t++)
+            MatMul.QuantizeF32ToQ8_0(input + t * dim, scratch + t * q8RowBytes, dim);
+
+        return scratch;
     }
 
     /// <summary>

@@ -742,6 +742,256 @@ public sealed unsafe class MatMulTests
         }
     }
 
+    // ──────────────────── GEMM ────────────────────
+
+    [Fact]
+    public void GemmF32Scalar_2x2x2_KnownValues()
+    {
+        // A (weights) = [[1,2],[3,4]]  (2×2, M=2, K=2)
+        // B (inputs)  = [[5,6],[7,8]]  (2×2, N=2, K=2)
+        // C[t,r] = dot(A[r,:], B[t,:])
+        // C[0,0] = 1*5+2*6 = 17, C[0,1] = 3*5+4*6 = 39
+        // C[1,0] = 1*7+2*8 = 23, C[1,1] = 3*7+4*8 = 53
+        float[] a = [1, 2, 3, 4];
+        float[] b = [5, 6, 7, 8];
+        float[] c = new float[4];
+
+        fixed (float* ap = a, bp = b, cp = c)
+            MatMul.GemmF32Scalar(ap, bp, cp, 2, 2, 2);
+
+        Assert.Equal(17f, c[0], 1e-5f);
+        Assert.Equal(39f, c[1], 1e-5f);
+        Assert.Equal(23f, c[2], 1e-5f);
+        Assert.Equal(53f, c[3], 1e-5f);
+    }
+
+    [Fact]
+    public void GemmF32_MatchesSequentialGemv()
+    {
+        var rng = new Random(42);
+        const int m = 16, k = 64, n = 8;
+        float[] a = new float[m * k];
+        float[] b = new float[n * k];
+        for (int i = 0; i < a.Length; i++) a[i] = rng.NextSingle() * 2f - 1f;
+        for (int i = 0; i < b.Length; i++) b[i] = rng.NextSingle() * 2f - 1f;
+
+        // Sequential GEMV per token
+        float[] seqResult = new float[n * m];
+        fixed (float* ap = a, bp = b, sp = seqResult)
+        {
+            for (int t = 0; t < n; t++)
+                MatMul.GemvF32(ap, bp + t * k, sp + t * m, m, k);
+        }
+
+        // Batched GEMM
+        float[] gemmResult = new float[n * m];
+        fixed (float* ap = a, bp = b, gp = gemmResult)
+            MatMul.GemmF32(ap, bp, gp, m, k, n);
+
+        for (int i = 0; i < n * m; i++)
+            Assert.Equal(seqResult[i], gemmResult[i], 1e-3f);
+    }
+
+    [Fact]
+    public void GemmF32_N1_MatchesGemv()
+    {
+        var rng = new Random(42);
+        const int m = 16, k = 64;
+        float[] a = new float[m * k];
+        float[] x = new float[k];
+        for (int i = 0; i < a.Length; i++) a[i] = rng.NextSingle() * 2f - 1f;
+        for (int i = 0; i < k; i++) x[i] = rng.NextSingle() * 2f - 1f;
+
+        float[] gemvResult = new float[m];
+        float[] gemmResult = new float[m];
+
+        fixed (float* ap = a, xp = x, gr = gemvResult, gm = gemmResult)
+        {
+            MatMul.GemvF32(ap, xp, gr, m, k);
+            MatMul.GemmF32(ap, xp, gm, m, k, 1);
+        }
+
+        for (int i = 0; i < m; i++)
+            Assert.Equal(gemvResult[i], gemmResult[i], 1e-5f);
+    }
+
+    [Fact]
+    public void GemmQ8_0_MatchesSequentialGemvQ8_0()
+    {
+        var rng = new Random(42);
+        const int m = 16, k = 256, n = 8;
+        int blockCount = k / Q8_0GroupSize;
+        int rowBytes = blockCount * Q8_0BlockBytes;
+
+        nint weightsPtr = (nint)NativeMemory.AlignedAlloc((nuint)(m * rowBytes), 64);
+        try
+        {
+            for (int row = 0; row < m; row++)
+                FillRandomQ8_0Blocks((byte*)weightsPtr + row * rowBytes, blockCount, rng);
+
+            float[] b = new float[n * k];
+            for (int i = 0; i < b.Length; i++) b[i] = rng.NextSingle() * 2f - 1f;
+
+            // Sequential GEMV per token
+            float[] seqResult = new float[n * m];
+            fixed (float* bp = b, sp = seqResult)
+            {
+                for (int t = 0; t < n; t++)
+                    MatMul.GemvQ8_0((byte*)weightsPtr, bp + t * k, sp + t * m, m, k);
+            }
+
+            // Batched GEMM
+            float[] gemmResult = new float[n * m];
+            fixed (float* bp = b, gp = gemmResult)
+                MatMul.GemmQ8_0((byte*)weightsPtr, bp, gp, m, k, n);
+
+            for (int i = 0; i < n * m; i++)
+                Assert.Equal(seqResult[i], gemmResult[i], 1e-2f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)weightsPtr);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(7)]
+    [InlineData(16)]
+    [InlineData(128)]
+    public void GemmQ8_0_VaryingN_MatchesSequentialGemv(int n)
+    {
+        var rng = new Random(42);
+        const int m = 8, k = 256;
+        int blockCount = k / Q8_0GroupSize;
+        int rowBytes = blockCount * Q8_0BlockBytes;
+
+        nint weightsPtr = (nint)NativeMemory.AlignedAlloc((nuint)(m * rowBytes), 64);
+        try
+        {
+            for (int row = 0; row < m; row++)
+                FillRandomQ8_0Blocks((byte*)weightsPtr + row * rowBytes, blockCount, rng);
+
+            float[] b = new float[n * k];
+            for (int i = 0; i < b.Length; i++) b[i] = rng.NextSingle() * 2f - 1f;
+
+            // Sequential GEMV
+            float[] seqResult = new float[n * m];
+            fixed (float* bp = b, sp = seqResult)
+            {
+                for (int t = 0; t < n; t++)
+                    MatMul.GemvQ8_0((byte*)weightsPtr, bp + t * k, sp + t * m, m, k);
+            }
+
+            // Batched GEMM
+            float[] gemmResult = new float[n * m];
+            fixed (float* bp = b, gp = gemmResult)
+                MatMul.GemmQ8_0((byte*)weightsPtr, bp, gp, m, k, n);
+
+            for (int i = 0; i < n * m; i++)
+                Assert.Equal(seqResult[i], gemmResult[i], 1e-2f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)weightsPtr);
+        }
+    }
+
+    [Fact]
+    public void GemmQ8_0_WithPreQuantized_MatchesWithout()
+    {
+        var rng = new Random(42);
+        const int m = 8, k = 256, n = 4;
+        int blockCount = k / Q8_0GroupSize;
+        int rowBytes = blockCount * Q8_0BlockBytes;
+        int q8RowBytes = blockCount * Q8_0BlockBytes;
+
+        nint weightsPtr = (nint)NativeMemory.AlignedAlloc((nuint)(m * rowBytes), 64);
+        nint scratchPtr = (nint)NativeMemory.AlignedAlloc((nuint)(n * q8RowBytes), 64);
+        try
+        {
+            for (int row = 0; row < m; row++)
+                FillRandomQ8_0Blocks((byte*)weightsPtr + row * rowBytes, blockCount, rng);
+
+            float[] b = new float[n * k];
+            for (int i = 0; i < b.Length; i++) b[i] = rng.NextSingle() * 2f - 1f;
+
+            // Pre-quantize input
+            fixed (float* bp = b)
+            {
+                for (int t = 0; t < n; t++)
+                    MatMul.QuantizeF32ToQ8_0(bp + t * k, (byte*)scratchPtr + t * q8RowBytes, k);
+            }
+
+            // GEMM without pre-quantized
+            float[] resultNoPq = new float[n * m];
+            fixed (float* bp = b, rp = resultNoPq)
+                MatMul.GemmQ8_0((byte*)weightsPtr, bp, rp, m, k, n);
+
+            // GEMM with pre-quantized
+            float[] resultPq = new float[n * m];
+            fixed (float* bp = b, rp = resultPq)
+                MatMul.GemmQ8_0((byte*)weightsPtr, bp, rp, m, k, n, (byte*)scratchPtr);
+
+            for (int i = 0; i < n * m; i++)
+                Assert.Equal(resultNoPq[i], resultPq[i], 1e-5f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)weightsPtr);
+            NativeMemory.AlignedFree((void*)scratchPtr);
+        }
+    }
+
+    [Fact]
+    public void GemmF16_MatchesSequentialGemvF16()
+    {
+        var rng = new Random(42);
+        const int m = 8, k = 64, n = 4;
+
+        nint weightsPtr = (nint)NativeMemory.AlignedAlloc((nuint)(m * k * sizeof(ushort)), 64);
+        try
+        {
+            Half* wh = (Half*)weightsPtr;
+            for (int i = 0; i < m * k; i++)
+                wh[i] = (Half)(rng.NextSingle() * 2f - 1f);
+
+            float[] b = new float[n * k];
+            for (int i = 0; i < b.Length; i++) b[i] = rng.NextSingle() * 2f - 1f;
+
+            // Sequential GEMV
+            float[] seqResult = new float[n * m];
+            fixed (float* bp = b, sp = seqResult)
+            {
+                for (int t = 0; t < n; t++)
+                    MatMul.GemvF16(weightsPtr, bp + t * k, sp + t * m, m, k);
+            }
+
+            // Batched GEMM
+            float[] gemmResult = new float[n * m];
+            fixed (float* bp = b, gp = gemmResult)
+                MatMul.GemmF16(weightsPtr, bp, gp, m, k, n);
+
+            for (int i = 0; i < n * m; i++)
+                Assert.Equal(seqResult[i], gemmResult[i], 1e-3f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)weightsPtr);
+        }
+    }
+
+    [Fact]
+    public void GemmQ8_0_NonAlignedK_Throws()
+    {
+        Assert.Throws<ArgumentException>(() =>
+        {
+            fixed (float* dummy = new float[33])
+                MatMul.GemmQ8_0(null, dummy, dummy, 1, 33, 1);
+        });
+    }
+
     // ──────────────────── Q4_K stub ────────────────────
 
     [Fact]

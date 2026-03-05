@@ -227,3 +227,120 @@ public unsafe class GemvScalingBenchmarks
             MatMul.GemvQ8_0((byte*)_weightsQ8, xp, rp, M, FixedK);
     }
 }
+
+/// <summary>
+/// Benchmarks for batched GEMM vs sequential GEMV, measuring prefill acceleration.
+/// The key metric is the ratio of SequentialGemvQ8_0 to GemmQ8_0 as N grows.
+/// </summary>
+[MemoryDiagnoser]
+[SimpleJob(warmupCount: 3, iterationCount: 10)]
+public unsafe class GemmBenchmarks
+{
+    private const int Q8_0BlockBytes = 34;
+    private const int Q8_0GroupSize = 32;
+    private const int M = 4096;
+    private const int K = 4096;
+
+    private nint _weightsQ8;
+    private nint _weightsF32;
+    private float[] _input = null!;
+    private float[] _result = null!;
+    private nint _inputQ8Scratch;
+
+    /// <summary>Batch size (number of tokens).</summary>
+    [Params(1, 4, 16, 64, 256, 512)]
+    public int N { get; set; }
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        var rng = new Random(42);
+        int blocksPerRow = K / Q8_0GroupSize;
+        int rowBytes = blocksPerRow * Q8_0BlockBytes;
+
+        // Q8_0 weights: M rows
+        _weightsQ8 = (nint)NativeMemory.AlignedAlloc((nuint)((long)M * rowBytes), 64);
+        byte* p = (byte*)_weightsQ8;
+        for (int row = 0; row < M; row++)
+        {
+            for (int b = 0; b < blocksPerRow; b++)
+            {
+                *(Half*)p = (Half)(rng.NextSingle() * 0.1f);
+                for (int i = 0; i < Q8_0GroupSize; i++)
+                    ((sbyte*)(p + 2))[i] = (sbyte)rng.Next(-127, 128);
+                p += Q8_0BlockBytes;
+            }
+        }
+
+        // F32 weights: M × K
+        _weightsF32 = (nint)NativeMemory.AlignedAlloc((nuint)((long)M * K * sizeof(float)), 64);
+        float* fp = (float*)_weightsF32;
+        for (long i = 0; i < (long)M * K; i++)
+            fp[i] = rng.NextSingle() * 2f - 1f;
+
+        // Input: N × K
+        _input = new float[N * K];
+        for (int i = 0; i < _input.Length; i++)
+            _input[i] = rng.NextSingle() * 2f - 1f;
+
+        _result = new float[N * M];
+
+        // Pre-quantize input for scratch-provided benchmark
+        int q8RowBytes = blocksPerRow * Q8_0BlockBytes;
+        _inputQ8Scratch = (nint)NativeMemory.AlignedAlloc((nuint)((long)N * q8RowBytes), 64);
+        fixed (float* inp = _input)
+        {
+            for (int t = 0; t < N; t++)
+                MatMul.QuantizeF32ToQ8_0(inp + t * K, (byte*)_inputQ8Scratch + t * q8RowBytes, K);
+        }
+    }
+
+    [GlobalCleanup]
+    public void Cleanup()
+    {
+        NativeMemory.AlignedFree((void*)_weightsQ8);
+        NativeMemory.AlignedFree((void*)_weightsF32);
+        NativeMemory.AlignedFree((void*)_inputQ8Scratch);
+    }
+
+    [Benchmark(Baseline = true)]
+    public void SequentialGemvQ8_0()
+    {
+        fixed (float* inp = _input, res = _result)
+        {
+            for (int t = 0; t < N; t++)
+                MatMul.GemvQ8_0((byte*)_weightsQ8, inp + t * K, res + t * M, M, K);
+        }
+    }
+
+    [Benchmark]
+    public void GemmQ8_0()
+    {
+        fixed (float* inp = _input, res = _result)
+            MatMul.GemmQ8_0((byte*)_weightsQ8, inp, res, M, K, N);
+    }
+
+    [Benchmark]
+    public void GemmQ8_0_WithScratch()
+    {
+        fixed (float* inp = _input, res = _result)
+            MatMul.GemmQ8_0((byte*)_weightsQ8, inp, res, M, K, N, (byte*)_inputQ8Scratch);
+    }
+
+    [Benchmark]
+    public void SequentialGemvF32()
+    {
+        fixed (float* inp = _input, res = _result)
+        {
+            for (int t = 0; t < N; t++)
+                MatMul.GemvF32((float*)_weightsF32, inp + t * K, res + t * M, M, K);
+        }
+    }
+
+    [Benchmark]
+    public void GemmF32()
+    {
+        fixed (float* inp = _input, res = _result)
+            MatMul.GemmF32((float*)_weightsF32, inp, res, M, K, N);
+    }
+}

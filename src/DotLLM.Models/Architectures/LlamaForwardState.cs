@@ -34,6 +34,10 @@ internal sealed unsafe class LlamaForwardState : IDisposable
             bytes += s * _intermediateSize * 3;              // FfnGate + FfnUp + SiluOutput
             bytes += _vocabSize;                             // Logits (only last token)
             bytes *= sizeof(float);
+            // InputQ8Scratch: seqLen × q8RowBytes (max of hidden/intermediate dim)
+            int maxInputDim = Math.Max(_hiddenSize, _intermediateSize);
+            int q8RowBytes = (maxInputDim / 32) * 34;
+            bytes += s * q8RowBytes;
             // RoPE tables (managed, but still part of compute memory)
             bytes += (CosTable.Length + SinTable.Length) * sizeof(float);
             return bytes;
@@ -52,6 +56,12 @@ internal sealed unsafe class LlamaForwardState : IDisposable
     public nint FfnUp;
     public nint SiluOutput;
     public nint Logits;
+
+    /// <summary>
+    /// Scratch buffer for pre-quantized Q8_0 input rows [seqLen × q8RowBytes].
+    /// Used to quantize the input once and reuse across Q/K/V and Gate/Up projections.
+    /// </summary>
+    public nint InputQ8Scratch;
 
     /// <summary>Pre-computed RoPE cosine table [maxSeqLen * halfDim].</summary>
     public float[] CosTable { get; }
@@ -106,12 +116,22 @@ internal sealed unsafe class LlamaForwardState : IDisposable
         SiluOutput = AllocFloats(newCapacity * _intermediateSize);
         Logits = AllocFloats(_vocabSize); // Only last token's logits needed
 
+        // InputQ8Scratch: seqLen × q8RowBytes for pre-quantized GEMM input reuse.
+        int maxInputDim = Math.Max(_hiddenSize, _intermediateSize);
+        int q8RowBytes = (maxInputDim / 32) * 34; // Q8_0: 34 bytes per 32-element block
+        InputQ8Scratch = AllocBytes(newCapacity * q8RowBytes);
+
         _currentSeqLen = newCapacity;
     }
 
     private static nint AllocFloats(long count)
     {
         return (nint)NativeMemory.AlignedAlloc((nuint)(count * sizeof(float)), 64);
+    }
+
+    private static nint AllocBytes(long count)
+    {
+        return (nint)NativeMemory.AlignedAlloc((nuint)count, 64);
     }
 
     private void FreeBuffers()
@@ -127,6 +147,7 @@ internal sealed unsafe class LlamaForwardState : IDisposable
         FreeIfNonZero(ref FfnUp);
         FreeIfNonZero(ref SiluOutput);
         FreeIfNonZero(ref Logits);
+        FreeIfNonZero(ref InputQ8Scratch);
     }
 
     private static void FreeIfNonZero(ref nint ptr)
