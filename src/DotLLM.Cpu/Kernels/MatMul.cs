@@ -536,6 +536,11 @@ public static unsafe class MatMul
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static void QuantizeF32ToQ8_0(float* src, byte* dest, int elementCount)
     {
+        if (elementCount % Q8_0GroupSize != 0)
+            throw new ArgumentException(
+                $"elementCount must be a multiple of {Q8_0GroupSize}, got {elementCount}",
+                nameof(elementCount));
+
         if (Avx512BW.IsSupported)
             QuantizeF32ToQ8_0Avx512(src, dest, elementCount);
         else if (Avx2.IsSupported)
@@ -877,20 +882,45 @@ public static unsafe class MatMul
     /// <summary>
     /// F16 GEMM: <c>C[N,M] = B[N,K] × A[M,K]^T</c> where A is F16 weights.
     /// Uses cache-tiled traversal: weight-tile-first so tiles stay in L2 across tokens.
+    /// Rents one scratch buffer for dequantization, avoiding per-call ArrayPool churn.
     /// </summary>
     [SkipLocalsInit]
     public static void GemmF16(nint weights, float* b, float* c, int m, int k, int n)
     {
         int rowBytes = k * sizeof(Half);
         int tileM = ComputeTileM(rowBytes);
+        Half* weightsHalf = (Half*)weights;
 
-        for (int mStart = 0; mStart < m; mStart += tileM)
+        float[] rented = ArrayPool<float>.Shared.Rent(k);
+        try
         {
-            int tileRows = Math.Min(tileM, m - mStart);
-            nint tileWeights = weights + (nint)((long)mStart * k * sizeof(Half));
+            fixed (float* rowBuf = rented)
+            {
+                for (int mStart = 0; mStart < m; mStart += tileM)
+                {
+                    int tileRows = Math.Min(tileM, m - mStart);
+                    Half* tileWeightsHalf = weightsHalf + (long)mStart * k;
 
-            for (int t = 0; t < n; t++)
-                GemvF16(tileWeights, b + t * k, c + t * m + mStart, tileRows, k);
+                    for (int t = 0; t < n; t++)
+                    {
+                        float* xPtr = b + t * k;
+                        float* outPtr = c + t * m + mStart;
+                        var xSpan = new ReadOnlySpan<float>(xPtr, k);
+                        var destRow = new Span<float>(rowBuf, k);
+
+                        for (int row = 0; row < tileRows; row++)
+                        {
+                            var srcRow = new ReadOnlySpan<Half>(tileWeightsHalf + row * k, k);
+                            TensorPrimitives.ConvertToSingle(srcRow, destRow);
+                            outPtr[row] = TensorPrimitives.Dot(destRow, xSpan);
+                        }
+                    }
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(rented);
         }
     }
 
