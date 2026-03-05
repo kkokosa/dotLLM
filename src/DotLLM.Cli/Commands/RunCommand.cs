@@ -66,6 +66,11 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
         [CommandOption("--seed|-s")]
         [Description("Random seed for reproducible sampling. Omit for non-deterministic.")]
         public int? Seed { get; set; }
+
+        [CommandOption("--threads")]
+        [Description("Number of CPU threads for inference. 1 = single-threaded (default), 0 = auto (all cores).")]
+        [DefaultValue(1)]
+        public int Threads { get; set; } = 1;
     }
 
     public override int Execute(CommandContext context, Settings settings)
@@ -99,12 +104,14 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
                 ctx.Status("Loading tokenizer...");
                 tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
-                ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden)...");
-                model = LlamaModel.LoadFromGguf(gguf, config);
+                var threading = new DotLLM.Core.Configuration.ThreadingConfig(settings.Threads);
+                ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden, {threading.EffectiveThreadCount} threads)...");
+                model = LlamaModel.LoadFromGguf(gguf, config, threading);
             });
         loadSw.Stop();
 
-        AnsiConsole.MarkupLine($"[grey]Model: {config.Architecture}, {config.NumLayers} layers, {config.HiddenSize} hidden, {config.VocabSize:N0} vocab[/]");
+        var threadingInfo = new DotLLM.Core.Configuration.ThreadingConfig(settings.Threads);
+        AnsiConsole.MarkupLine($"[grey]Model: {config.Architecture}, {config.NumLayers} layers, {config.HiddenSize} hidden, {config.VocabSize:N0} vocab, {threadingInfo.EffectiveThreadCount} thread(s)[/]");
 
         // Build sampling pipeline from CLI options
         var inferenceOptions = new InferenceOptions

@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using DotLLM.Cpu.Threading;
 
 namespace DotLLM.Cpu.Kernels;
 
@@ -778,8 +779,8 @@ public static unsafe class MatMul
 
     /// <summary>
     /// Q8_0 GEMM: <c>C[N,M] = B[N,K] × A[M,K]^T</c> where A is Q8_0 weights, B is f32 inputs.
-    /// Quantizes all N input rows to Q8_0 once, then calls <see cref="ComputeRows"/> per token.
-    /// When N==1, delegates to <see cref="GemvQ8_0"/>.
+    /// Quantizes all N input rows to Q8_0 once, then calls ComputeRows per token.
+    /// When N==1, delegates to GemvQ8_0.
     /// </summary>
     /// <param name="weightsQ8">Q8_0 weight matrix [M,K]. Each row is K/32 blocks of 34 bytes.</param>
     /// <param name="b">f32 input matrix [N,K], row-major.</param>
@@ -922,6 +923,445 @@ public static unsafe class MatMul
         {
             ArrayPool<float>.Shared.Return(rented);
         }
+    }
+
+    // ──────────────────── Parallel overloads ────────────────────
+
+    /// <summary>Minimum M rows before parallelizing GEMV.</summary>
+    private const int ParallelMinRows = 32;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void PartitionRows(int totalRows, int threadIdx, int threadCount,
+                                      out int start, out int count)
+    {
+        int chunk = ((totalRows + threadCount - 1) / threadCount + 3) & ~3;
+        start = threadIdx * chunk;
+        if (start >= totalRows) { start = 0; count = 0; return; }
+        count = Math.Min(chunk, totalRows - start);
+    }
+
+    // ── Context structs ──
+
+    private struct ComputeRowsCtx
+    {
+        public byte* WeightsQ8;
+        public byte* XQ8;
+        public float* Result;
+        public int M;
+        public int BlockCount;
+    }
+
+    private struct GemvF32Ctx
+    {
+        public float* A;
+        public float* X;
+        public float* Result;
+        public int M;
+        public int K;
+    }
+
+    private struct GemvF16Ctx
+    {
+        public nint Weights;
+        public float* X;
+        public float* Y;
+        public int M;
+        public int K;
+        public nint* ScratchPtrs;
+    }
+
+    private struct GemmTiledQ8Ctx
+    {
+        public byte* WeightsQ8;
+        public byte* InputQ8;
+        public float* C;
+        public int M;
+        public int N;
+        public int BlockCount;
+        public int TileM;
+        public int Q8RowBytes;
+    }
+
+    private struct GemmTiledF32Ctx
+    {
+        public float* A;
+        public float* B;
+        public float* C;
+        public int M;
+        public int K;
+        public int N;
+        public int TileM;
+    }
+
+    private struct GemmTiledF16Ctx
+    {
+        public nint Weights;
+        public float* B;
+        public float* C;
+        public int M;
+        public int K;
+        public int N;
+        public int TileM;
+        public nint* ScratchPtrs;
+    }
+
+    // ── Worker methods ──
+
+    private static void ComputeRowsWorker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<ComputeRowsCtx>((void*)ctxPtr);
+        PartitionRows(ctx.M, threadIdx, threadCount, out int start, out int count);
+        if (count == 0) return;
+        int rowBytes = ctx.BlockCount * Q8_0BlockBytes;
+        ComputeRows(ctx.WeightsQ8 + (long)start * rowBytes, ctx.XQ8,
+                    ctx.Result + start, count, ctx.BlockCount);
+    }
+
+    private static void GemvF32Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<GemvF32Ctx>((void*)ctxPtr);
+        PartitionRows(ctx.M, threadIdx, threadCount, out int start, out int count);
+        if (count == 0) return;
+        GemvF32(ctx.A + (long)start * ctx.K, ctx.X, ctx.Result + start, count, ctx.K);
+    }
+
+    private static void GemvF16Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<GemvF16Ctx>((void*)ctxPtr);
+        PartitionRows(ctx.M, threadIdx, threadCount, out int start, out int count);
+        if (count == 0) return;
+        Half* weightsHalf = (Half*)ctx.Weights;
+        float* scratch = (float*)ctx.ScratchPtrs[threadIdx];
+        var xSpan = new ReadOnlySpan<float>(ctx.X, ctx.K);
+        var destRow = new Span<float>(scratch, ctx.K);
+        for (int row = start; row < start + count; row++)
+        {
+            var srcRow = new ReadOnlySpan<Half>(weightsHalf + (long)row * ctx.K, ctx.K);
+            TensorPrimitives.ConvertToSingle(srcRow, destRow);
+            ctx.Y[row] = TensorPrimitives.Dot(destRow, xSpan);
+        }
+    }
+
+    private static void GemmTiledQ8Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<GemmTiledQ8Ctx>((void*)ctxPtr);
+        int totalTiles = (ctx.M + ctx.TileM - 1) / ctx.TileM;
+        int tilesPerThread = (totalTiles + threadCount - 1) / threadCount;
+        int startTile = threadIdx * tilesPerThread;
+        int endTile = Math.Min(startTile + tilesPerThread, totalTiles);
+
+        for (int tile = startTile; tile < endTile; tile++)
+        {
+            int mStart = tile * ctx.TileM;
+            int tileRows = Math.Min(ctx.TileM, ctx.M - mStart);
+            byte* tileWeights = ctx.WeightsQ8 + (long)mStart * ctx.Q8RowBytes;
+            for (int t = 0; t < ctx.N; t++)
+                ComputeRows(tileWeights, ctx.InputQ8 + t * ctx.Q8RowBytes,
+                            ctx.C + t * ctx.M + mStart, tileRows, ctx.BlockCount);
+        }
+    }
+
+    private static void GemmTiledF32Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<GemmTiledF32Ctx>((void*)ctxPtr);
+        int totalTiles = (ctx.M + ctx.TileM - 1) / ctx.TileM;
+        int tilesPerThread = (totalTiles + threadCount - 1) / threadCount;
+        int startTile = threadIdx * tilesPerThread;
+        int endTile = Math.Min(startTile + tilesPerThread, totalTiles);
+
+        for (int tile = startTile; tile < endTile; tile++)
+        {
+            int mStart = tile * ctx.TileM;
+            int tileRows = Math.Min(ctx.TileM, ctx.M - mStart);
+            float* tileWeights = ctx.A + (long)mStart * ctx.K;
+            for (int t = 0; t < ctx.N; t++)
+                GemvF32(tileWeights, ctx.B + t * ctx.K, ctx.C + t * ctx.M + mStart, tileRows, ctx.K);
+        }
+    }
+
+    private static void GemmTiledF16Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<GemmTiledF16Ctx>((void*)ctxPtr);
+        int totalTiles = (ctx.M + ctx.TileM - 1) / ctx.TileM;
+        int tilesPerThread = (totalTiles + threadCount - 1) / threadCount;
+        int startTile = threadIdx * tilesPerThread;
+        int endTile = Math.Min(startTile + tilesPerThread, totalTiles);
+
+        Half* weightsHalf = (Half*)ctx.Weights;
+        float* rowBuf = (float*)ctx.ScratchPtrs[threadIdx];
+        var destRow = new Span<float>(rowBuf, ctx.K);
+
+        for (int tile = startTile; tile < endTile; tile++)
+        {
+            int mStart = tile * ctx.TileM;
+            int tileRows = Math.Min(ctx.TileM, ctx.M - mStart);
+            Half* tileWeightsHalf = weightsHalf + (long)mStart * ctx.K;
+            for (int t = 0; t < ctx.N; t++)
+            {
+                float* xPtr = ctx.B + t * ctx.K;
+                float* outPtr = ctx.C + t * ctx.M + mStart;
+                var xSpan = new ReadOnlySpan<float>(xPtr, ctx.K);
+                for (int row = 0; row < tileRows; row++)
+                {
+                    var srcRow = new ReadOnlySpan<Half>(tileWeightsHalf + row * ctx.K, ctx.K);
+                    TensorPrimitives.ConvertToSingle(srcRow, destRow);
+                    outPtr[row] = TensorPrimitives.Dot(destRow, xSpan);
+                }
+            }
+        }
+    }
+
+    // ── Parallel public API ──
+
+    /// <summary>
+    /// Q8_0 GEMV with optional parallelism. Falls back to single-threaded when pool is null or M &lt; 32.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static void GemvQ8_0(byte* weightsQ8, float* x, float* result, int m, int k,
+                                ComputeThreadPool? pool)
+    {
+        if (pool is null || m < ParallelMinRows)
+        {
+            GemvQ8_0(weightsQ8, x, result, m, k);
+            return;
+        }
+
+        if (k % Q8_0GroupSize != 0)
+            throw new ArgumentException($"k must be a multiple of {Q8_0GroupSize}, got {k}", nameof(k));
+
+        int blockCount = k / Q8_0GroupSize;
+        int xQ8Bytes = blockCount * Q8_0BlockBytes;
+
+        // Quantize x once (single-threaded) into pool scratch for thread 0
+        byte* xQ8 = (byte*)pool.GetWorkerScratch(0, xQ8Bytes);
+        QuantizeF32ToQ8_0(x, xQ8, k);
+
+        var ctx = new ComputeRowsCtx
+        {
+            WeightsQ8 = weightsQ8, XQ8 = xQ8, Result = result,
+            M = m, BlockCount = blockCount
+        };
+        pool.Dispatch((nint)(&ctx), &ComputeRowsWorker);
+    }
+
+    /// <summary>
+    /// f32 GEMV with optional parallelism.
+    /// </summary>
+    [SkipLocalsInit]
+    public static void GemvF32(float* a, float* x, float* result, int m, int k,
+                               ComputeThreadPool? pool)
+    {
+        if (pool is null || m < ParallelMinRows)
+        {
+            GemvF32(a, x, result, m, k);
+            return;
+        }
+
+        var ctx = new GemvF32Ctx { A = a, X = x, Result = result, M = m, K = k };
+        pool.Dispatch((nint)(&ctx), &GemvF32Worker);
+    }
+
+    /// <summary>
+    /// F16 GEMV with optional parallelism. Uses per-worker scratch for dequantization.
+    /// </summary>
+    [SkipLocalsInit]
+    public static void GemvF16(nint weights, float* x, float* y, int m, int k,
+                               ComputeThreadPool? pool)
+    {
+        if (pool is null || m < ParallelMinRows)
+        {
+            GemvF16(weights, x, y, m, k);
+            return;
+        }
+
+        int threadCount = pool.ThreadCount;
+        nint* scratchPtrs = stackalloc nint[threadCount];
+        int scratchBytes = k * sizeof(float);
+        for (int i = 0; i < threadCount; i++)
+            scratchPtrs[i] = pool.GetWorkerScratch(i, scratchBytes);
+
+        var ctx = new GemvF16Ctx
+        {
+            Weights = weights, X = x, Y = y,
+            M = m, K = k, ScratchPtrs = scratchPtrs
+        };
+        pool.Dispatch((nint)(&ctx), &GemvF16Worker);
+    }
+
+    /// <summary>
+    /// Q8_0 ComputeRows with optional parallelism.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void ComputeRows(byte* weightsQ8, byte* xQ8, float* result, int m, int blockCount,
+                                     ComputeThreadPool? pool)
+    {
+        if (pool is null || m < ParallelMinRows)
+        {
+            ComputeRows(weightsQ8, xQ8, result, m, blockCount);
+            return;
+        }
+
+        var ctx = new ComputeRowsCtx
+        {
+            WeightsQ8 = weightsQ8, XQ8 = xQ8, Result = result,
+            M = m, BlockCount = blockCount
+        };
+        pool.Dispatch((nint)(&ctx), &ComputeRowsWorker);
+    }
+
+    /// <summary>
+    /// Q8_0 GEMM with optional parallelism. Quantizes inputs single-threaded, then parallelizes tiled compute.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static void GemmQ8_0(byte* weightsQ8, float* b, float* c, int m, int k, int n,
+                                ComputeThreadPool? pool, byte* preQuantizedInput = null)
+    {
+        if (pool is null)
+        {
+            GemmQ8_0(weightsQ8, b, c, m, k, n, preQuantizedInput);
+            return;
+        }
+
+        if (k % Q8_0GroupSize != 0)
+            throw new ArgumentException($"k must be a multiple of {Q8_0GroupSize}, got {k}", nameof(k));
+
+        if (n == 1)
+        {
+            if (preQuantizedInput != null)
+            {
+                int blockCount = k / Q8_0GroupSize;
+                ComputeRows(weightsQ8, preQuantizedInput, c, m, blockCount, pool);
+            }
+            else
+            {
+                GemvQ8_0(weightsQ8, b, c, m, k, pool);
+            }
+            return;
+        }
+
+        int blockCount2 = k / Q8_0GroupSize;
+        int q8RowBytes = blockCount2 * Q8_0BlockBytes;
+        int tileM = ComputeTileM(q8RowBytes);
+        int totalTiles = (m + tileM - 1) / tileM;
+
+        if (preQuantizedInput != null)
+        {
+            if (totalTiles < 2)
+            {
+                ComputeGemmTiled(weightsQ8, preQuantizedInput, c, m, n, blockCount2);
+                return;
+            }
+            var ctx = new GemmTiledQ8Ctx
+            {
+                WeightsQ8 = weightsQ8, InputQ8 = preQuantizedInput, C = c,
+                M = m, N = n, BlockCount = blockCount2, TileM = tileM, Q8RowBytes = q8RowBytes
+            };
+            pool.Dispatch((nint)(&ctx), &GemmTiledQ8Worker);
+            return;
+        }
+
+        // Quantize all input rows (single-threaded), then parallel tiled compute
+        int totalQ8Bytes = n * q8RowBytes;
+        byte[] rented = ArrayPool<byte>.Shared.Rent(totalQ8Bytes);
+        fixed (byte* rentedPtr = rented)
+        {
+            for (int t = 0; t < n; t++)
+                QuantizeF32ToQ8_0(b + t * k, rentedPtr + t * q8RowBytes, k);
+
+            if (totalTiles < 2)
+            {
+                ComputeGemmTiled(weightsQ8, rentedPtr, c, m, n, blockCount2);
+            }
+            else
+            {
+                var ctx = new GemmTiledQ8Ctx
+                {
+                    WeightsQ8 = weightsQ8, InputQ8 = rentedPtr, C = c,
+                    M = m, N = n, BlockCount = blockCount2, TileM = tileM, Q8RowBytes = q8RowBytes
+                };
+                pool.Dispatch((nint)(&ctx), &GemmTiledQ8Worker);
+            }
+        }
+        ArrayPool<byte>.Shared.Return(rented);
+    }
+
+    /// <summary>
+    /// f32 GEMM with optional parallelism.
+    /// </summary>
+    [SkipLocalsInit]
+    public static void GemmF32(float* a, float* b, float* c, int m, int k, int n,
+                               ComputeThreadPool? pool)
+    {
+        if (pool is null)
+        {
+            GemmF32(a, b, c, m, k, n);
+            return;
+        }
+
+        if (n == 1)
+        {
+            GemvF32(a, b, c, m, k, pool);
+            return;
+        }
+
+        int rowBytes = k * sizeof(float);
+        int tileM = ComputeTileM(rowBytes);
+        int totalTiles = (m + tileM - 1) / tileM;
+
+        if (totalTiles < 2)
+        {
+            GemmF32(a, b, c, m, k, n);
+            return;
+        }
+
+        var ctx = new GemmTiledF32Ctx { A = a, B = b, C = c, M = m, K = k, N = n, TileM = tileM };
+        pool.Dispatch((nint)(&ctx), &GemmTiledF32Worker);
+    }
+
+    /// <summary>
+    /// F16 GEMM with optional parallelism. Uses per-worker scratch for dequantization.
+    /// </summary>
+    [SkipLocalsInit]
+    public static void GemmF16(nint weights, float* b, float* c, int m, int k, int n,
+                               ComputeThreadPool? pool)
+    {
+        if (pool is null)
+        {
+            GemmF16(weights, b, c, m, k, n);
+            return;
+        }
+
+        if (n == 1)
+        {
+            GemvF16(weights, b, c, m, k, pool);
+            return;
+        }
+
+        int rowBytes = k * sizeof(Half);
+        int tileM = ComputeTileM(rowBytes);
+        int totalTiles = (m + tileM - 1) / tileM;
+
+        if (totalTiles < 2)
+        {
+            GemmF16(weights, b, c, m, k, n);
+            return;
+        }
+
+        int threadCount = pool.ThreadCount;
+        nint* scratchPtrs = stackalloc nint[threadCount];
+        int scratchBytes = k * sizeof(float);
+        for (int i = 0; i < threadCount; i++)
+            scratchPtrs[i] = pool.GetWorkerScratch(i, scratchBytes);
+
+        var ctx = new GemmTiledF16Ctx
+        {
+            Weights = weights, B = b, C = c,
+            M = m, K = k, N = n, TileM = tileM, ScratchPtrs = scratchPtrs
+        };
+        pool.Dispatch((nint)(&ctx), &GemmTiledF16Worker);
     }
 
     // ──────────────────── Q4_K stubs ────────────────────

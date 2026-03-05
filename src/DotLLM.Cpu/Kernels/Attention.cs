@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
+using DotLLM.Cpu.Threading;
 
 namespace DotLLM.Cpu.Kernels;
 
@@ -114,6 +115,127 @@ public static class Attention
             // 4. Weighted sum: weights @ V_kvH → output_h
             WeightedValues(scores, v, output, seqQ, seqKv, headDim,
                            h, kvH, qStride, kvStride);
+        }
+    }
+
+    // ──────────────────── Parallel overloads ────────────────────
+
+    /// <summary>
+    /// Pointer-based attention with optional head-parallel execution via <paramref name="pool"/>.
+    /// When pool is null or numHeads &lt; 2, falls back to the single-threaded span-based path.
+    /// </summary>
+    [SkipLocalsInit]
+    public static unsafe void Execute(float* q, float* k, float* v, float* output,
+                                      int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
+                                      int positionOffset, ComputeThreadPool? pool)
+        => Execute(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                   positionOffset, 1.0f / MathF.Sqrt(headDim), pool);
+
+    /// <summary>
+    /// Pointer-based attention with caller-provided scale and optional head-parallel execution.
+    /// </summary>
+    [SkipLocalsInit]
+    public static unsafe void Execute(float* q, float* k, float* v, float* output,
+                                      int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
+                                      int positionOffset, float scale, ComputeThreadPool? pool)
+    {
+        if (headDim <= 0)
+            throw new ArgumentException($"headDim must be positive, got {headDim}", nameof(headDim));
+        if (numHeads % numKvHeads != 0)
+            throw new ArgumentException(
+                $"numHeads ({numHeads}) must be divisible by numKvHeads ({numKvHeads})", nameof(numKvHeads));
+
+        if (pool is null || numHeads < 2)
+        {
+            // Fall back to span-based single-threaded path
+            int qLen = seqQ * numHeads * headDim;
+            int kvLen = seqKv * numKvHeads * headDim;
+            Execute(
+                new ReadOnlySpan<float>(q, qLen),
+                new ReadOnlySpan<float>(k, kvLen),
+                new ReadOnlySpan<float>(v, kvLen),
+                new Span<float>(output, qLen),
+                seqQ, seqKv, numHeads, numKvHeads, headDim, positionOffset, scale);
+            return;
+        }
+
+        // Pre-allocate per-worker scores buffers via pool scratch
+        int scoreSize = seqQ * seqKv;
+        int scratchBytes = scoreSize * sizeof(float);
+        int threadCount = pool.ThreadCount;
+        nint* scratchPtrs = stackalloc nint[threadCount];
+        for (int i = 0; i < threadCount; i++)
+            scratchPtrs[i] = pool.GetWorkerScratch(i, scratchBytes);
+
+        var ctx = new AttentionCtx
+        {
+            Q = q, K = k, V = v, Output = output,
+            SeqQ = seqQ, SeqKv = seqKv, NumHeads = numHeads, NumKvHeads = numKvHeads,
+            HeadDim = headDim, Scale = scale, PositionOffset = positionOffset,
+            GroupSize = numHeads / numKvHeads,
+            QStride = numHeads * headDim,
+            KvStride = numKvHeads * headDim,
+            ScoreSize = scoreSize,
+            ScratchPtrs = scratchPtrs
+        };
+        pool.Dispatch((nint)(&ctx), &AttentionWorker);
+    }
+
+    private unsafe struct AttentionCtx
+    {
+        public float* Q;
+        public float* K;
+        public float* V;
+        public float* Output;
+        public int SeqQ;
+        public int SeqKv;
+        public int NumHeads;
+        public int NumKvHeads;
+        public int HeadDim;
+        public float Scale;
+        public int PositionOffset;
+        public int GroupSize;
+        public int QStride;
+        public int KvStride;
+        public int ScoreSize;
+        public nint* ScratchPtrs;
+    }
+
+    private static unsafe void AttentionWorker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<AttentionCtx>((void*)ctxPtr);
+
+        // Partition heads across threads
+        int headsPerThread = (ctx.NumHeads + threadCount - 1) / threadCount;
+        int startHead = threadIdx * headsPerThread;
+        int endHead = Math.Min(startHead + headsPerThread, ctx.NumHeads);
+        if (startHead >= ctx.NumHeads) return;
+
+        float* scores = (float*)ctx.ScratchPtrs[threadIdx];
+        var scoresSpan = new Span<float>(scores, ctx.ScoreSize);
+
+        var qSpan = new ReadOnlySpan<float>(ctx.Q, ctx.SeqQ * ctx.QStride);
+        var kSpan = new ReadOnlySpan<float>(ctx.K, ctx.SeqKv * ctx.KvStride);
+        var vSpan = new ReadOnlySpan<float>(ctx.V, ctx.SeqKv * ctx.KvStride);
+        var outSpan = new Span<float>(ctx.Output, ctx.SeqQ * ctx.QStride);
+
+        for (int h = startHead; h < endHead; h++)
+        {
+            int kvH = h / ctx.GroupSize;
+
+            ScaledDotProductScores(qSpan, kSpan, scoresSpan, ctx.SeqQ, ctx.SeqKv, ctx.HeadDim, ctx.Scale,
+                                   h, kvH, ctx.QStride, ctx.KvStride);
+
+            ApplyCausalMask(scoresSpan, ctx.SeqQ, ctx.SeqKv, ctx.PositionOffset);
+
+            for (int i = 0; i < ctx.SeqQ; i++)
+            {
+                var row = scoresSpan.Slice(i * ctx.SeqKv, ctx.SeqKv);
+                Softmax.Execute(row, row);
+            }
+
+            WeightedValues(scoresSpan, vSpan, outSpan, ctx.SeqQ, ctx.SeqKv, ctx.HeadDim,
+                           h, kvH, ctx.QStride, ctx.KvStride);
         }
     }
 

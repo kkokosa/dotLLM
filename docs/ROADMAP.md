@@ -42,7 +42,7 @@ Each step is designed to be a discrete unit of work suitable for a single implem
 | 17 | **Logit lens** | Built on hook system. Capture `PostLayer(i)` hidden states, project through LM head, produce per-layer token probabilities. | 16 |
 | 18 | **Additional architectures** | Mistral (add sliding window attention mask), Phi, Qwen. Should be mostly `ModelConfig` parameterization, minimal new code. | 6 |
 | 19 | **Logit bias** | Per-request `logit_bias` map applied as `ISamplerStep` at the start of the sampling pipeline. | 8 |
-| 20 | **Multi-threaded CPU inference** | Parallelize GEMV/GEMM, attention, and FFN across cores. `Parallel.For` or custom thread pool for compute-bound loops in `MatMul`, `Attention`, per-layer token processing. Thread count configurable via `InferenceOptions`. Target: ~4-8× speedup on multi-core CPUs. | 6 |
+| 20 | **Multi-threaded CPU inference** :white_check_mark: | Parallelize GEMV/GEMM, attention, and FFN across cores. Custom zero-alloc `ComputeThreadPool` with `delegate*` dispatch for compute-bound loops in `MatMul`, `Attention`, per-layer token processing. Thread count configurable via `--threads` CLI option and `ThreadingConfig`. Target: ~4-8× speedup on multi-core CPUs. | 6 |
 
 **Milestone**: Chat interactively with Q4_K_M models, stream responses, inspect layer activations via logit lens.
 

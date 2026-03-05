@@ -5,6 +5,7 @@ using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Core.Tensors;
 using DotLLM.Cpu.Kernels;
+using DotLLM.Cpu.Threading;
 using DotLLM.Models.Gguf;
 
 namespace DotLLM.Models.Architectures;
@@ -25,6 +26,8 @@ public sealed unsafe class LlamaModel : IModel
     private readonly LlamaForwardState _state;
     private readonly GgufFile _gguf; // prevent premature GC of mmap
     private readonly int _ropeDim;
+    private readonly ComputeThreadPool? _threadPool;
+    private readonly bool _ownsThreadPool;
 
     /// <inheritdoc/>
     public ModelConfig Config { get; }
@@ -32,20 +35,31 @@ public sealed unsafe class LlamaModel : IModel
     /// <summary>Total bytes allocated for inference scratch buffers.</summary>
     public long ComputeMemoryBytes => _state.AllocatedBytes;
 
-    private LlamaModel(ModelConfig config, LlamaWeights weights, LlamaForwardState state, GgufFile gguf, int ropeDim)
+    private LlamaModel(ModelConfig config, LlamaWeights weights, LlamaForwardState state,
+                       GgufFile gguf, int ropeDim, ComputeThreadPool? threadPool, bool ownsPool)
     {
         Config = config;
         _weights = weights;
         _state = state;
         _gguf = gguf;
         _ropeDim = ropeDim;
+        _threadPool = threadPool;
+        _ownsThreadPool = ownsPool;
     }
 
     /// <summary>
-    /// Loads a Llama model from an opened GGUF file. The <paramref name="gguf"/> must remain
-    /// alive for the lifetime of the returned model (the model stores a reference).
+    /// Loads a Llama model from an opened GGUF file (single-threaded).
+    /// The <paramref name="gguf"/> must remain alive for the lifetime of the returned model.
     /// </summary>
     public static LlamaModel LoadFromGguf(GgufFile gguf, ModelConfig config)
+        => LoadFromGguf(gguf, config, ThreadingConfig.SingleThreaded);
+
+    /// <summary>
+    /// Loads a Llama model from an opened GGUF file with threading configuration.
+    /// When <paramref name="threading"/> is parallel, creates a <see cref="ComputeThreadPool"/>
+    /// owned by this model (disposed with the model).
+    /// </summary>
+    public static LlamaModel LoadFromGguf(GgufFile gguf, ModelConfig config, ThreadingConfig threading)
     {
         var weights = LlamaWeights.LoadFromGguf(gguf, config);
 
@@ -64,7 +78,11 @@ public sealed unsafe class LlamaModel : IModel
             ropeDim,
             ropeTheta);
 
-        return new LlamaModel(config, weights, state, gguf, ropeDim);
+        ComputeThreadPool? pool = threading.IsParallel
+            ? new ComputeThreadPool(threading.EffectiveThreadCount)
+            : null;
+
+        return new LlamaModel(config, weights, state, gguf, ropeDim, pool, ownsPool: pool is not null);
     }
 
     /// <inheritdoc/>
@@ -167,21 +185,13 @@ public sealed unsafe class LlamaModel : IModel
                 var cachedK = kvCache.GetKeysRef(layer);
                 var cachedV = kvCache.GetValuesRef(layer);
 
-                Attention.Execute(
-                    new ReadOnlySpan<float>(q, seqLen * numHeads * headDim),
-                    new ReadOnlySpan<float>((void*)cachedK.DataPointer, seqKv * kvStride),
-                    new ReadOnlySpan<float>((void*)cachedV.DataPointer, seqKv * kvStride),
-                    new Span<float>(attnOut, seqLen * numHeads * headDim),
-                    seqLen, seqKv, numHeads, numKvHeads, headDim, positions[0]);
+                Attention.Execute(q, (float*)cachedK.DataPointer, (float*)cachedV.DataPointer, attnOut,
+                    seqLen, seqKv, numHeads, numKvHeads, headDim, positions[0], _threadPool);
             }
             else
             {
-                Attention.Execute(
-                    new ReadOnlySpan<float>(q, seqLen * numHeads * headDim),
-                    new ReadOnlySpan<float>(k, seqLen * kvStride),
-                    new ReadOnlySpan<float>(v, seqLen * kvStride),
-                    new Span<float>(attnOut, seqLen * numHeads * headDim),
-                    seqLen, seqLen, numHeads, numKvHeads, headDim, 0);
+                Attention.Execute(q, k, v, attnOut,
+                    seqLen, seqLen, numHeads, numKvHeads, headDim, 0, _threadPool);
             }
 
             // f. Batched O projection
@@ -282,35 +292,35 @@ public sealed unsafe class LlamaModel : IModel
 
     /// <summary>
     /// Dispatches to the appropriate GEMV kernel based on quantization type.
-    /// Used only for single-token operations (LM head).
+    /// Passes <see cref="_threadPool"/> for parallel execution.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Gemv(nint weights, QuantizationType qt, float* x, float* y, int m, int k)
+    private void Gemv(nint weights, QuantizationType qt, float* x, float* y, int m, int k)
     {
         if (qt == QuantizationType.Q8_0)
-            MatMul.GemvQ8_0((byte*)weights, x, y, m, k);
+            MatMul.GemvQ8_0((byte*)weights, x, y, m, k, _threadPool);
         else if (qt == QuantizationType.F32)
-            MatMul.GemvF32((float*)weights, x, y, m, k);
+            MatMul.GemvF32((float*)weights, x, y, m, k, _threadPool);
         else if (qt == QuantizationType.F16)
-            MatMul.GemvF16(weights, x, y, m, k);
+            MatMul.GemvF16(weights, x, y, m, k, _threadPool);
         else
             throw new NotSupportedException($"Unsupported quantization type for GEMV: {qt}");
     }
 
     /// <summary>
     /// Dispatches to the appropriate GEMM kernel based on quantization type.
-    /// C[N,M] = B[N,K] × A[M,K]^T. When seqLen==1, delegates to GEMV.
+    /// Passes <see cref="_threadPool"/> for parallel execution.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Gemm(nint weights, QuantizationType qt, float* b, float* c,
-                             int m, int k, int n, byte* preQuantizedInput = null)
+    private void Gemm(nint weights, QuantizationType qt, float* b, float* c,
+                      int m, int k, int n, byte* preQuantizedInput = null)
     {
         if (qt == QuantizationType.Q8_0)
-            MatMul.GemmQ8_0((byte*)weights, b, c, m, k, n, preQuantizedInput);
+            MatMul.GemmQ8_0((byte*)weights, b, c, m, k, n, _threadPool, preQuantizedInput);
         else if (qt == QuantizationType.F32)
-            MatMul.GemmF32((float*)weights, b, c, m, k, n);
+            MatMul.GemmF32((float*)weights, b, c, m, k, n, _threadPool);
         else if (qt == QuantizationType.F16)
-            MatMul.GemmF16(weights, b, c, m, k, n);
+            MatMul.GemmF16(weights, b, c, m, k, n, _threadPool);
         else
             throw new NotSupportedException($"Unsupported quantization type for GEMM: {qt}");
     }
@@ -382,6 +392,8 @@ public sealed unsafe class LlamaModel : IModel
     /// <inheritdoc/>
     public void Dispose()
     {
+        if (_ownsThreadPool)
+            _threadPool?.Dispose();
         _state.Dispose();
         // _weights and _gguf are not owned by us — caller manages GgufFile lifetime.
     }

@@ -52,4 +52,7 @@ public record InferenceOptions
     /// (EOS + MaxTokens + StopSequences). The caller controls the full set.
     /// </summary>
     public IReadOnlyList<IStopCondition>? StopConditions { get; init; }
+
+    /// <summary>CPU threading configuration for parallel inference.</summary>
+    public ThreadingConfig Threading { get; init; } = ThreadingConfig.SingleThreaded;
 }

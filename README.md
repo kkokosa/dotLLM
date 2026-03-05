@@ -87,6 +87,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 
 ## News
 
+- **2026-03** — Multi-threaded CPU inference: zero-alloc `ComputeThreadPool` with `delegate*` dispatch, parallel GEMV/GEMM and head-parallel attention ([#36](https://github.com/kkokosa/dotLLM/issues/36))
 - **2026-03** — SIMD kernel tuning: FMA float accumulation, 4-row batched GEMV, AVX-512 paths, SIMD quantization ([#26](https://github.com/kkokosa/dotLLM/issues/26))
 - **2026-03** — Phase 1 complete: sampling pipeline + stop conditions — first coherent multi-token generation ([#24](https://github.com/kkokosa/dotLLM/pull/24))
 - **2026-03** — KV-cache: eval drops from 1091 ms/token to 227 ms/token (~4.8× speedup)
@@ -98,7 +99,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 | Phase | Description | Status |
 |-------|-------------|--------|
 | **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | Done (9/9) |
-| **2 — Practical Local Inference** | Q4_K_M, chat templates, streaming, hooks, logit lens, more architectures | In Progress (1/11) |
+| **2 — Practical Local Inference** | Q4_K_M, chat templates, streaming, hooks, logit lens, more architectures | In Progress (2/11) |
 | **3 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Planned |
 | **4 — Production Serving** | OpenAI API, continuous batching, paged KV-cache, structured output, tool calling | Planned |
 | **5 — Expand** | LoRA, MLA, SAE, multi-GPU tensor parallelism, ROCm | Planned |
