@@ -82,7 +82,7 @@ public sealed unsafe class MatMulTests
             Assert.Equal(scalarResult[i], simdResult[i], 1e-3f);
     }
 
-    // ──────────────────── Q8_0 VecDot ────────────────────
+    // ──────────────────── Q8_0 VecDot (scalar) ────────────────────
 
     [Fact]
     public void VecDotQ8_0Scalar_HandCalculated()
@@ -127,6 +127,251 @@ public sealed unsafe class MatMulTests
             float avx2 = MatMul.VecDotQ8_0Avx2((byte*)aPtr, (byte*)bPtr, blockCount);
 
             Assert.Equal(scalar, avx2, 1e-2f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)aPtr);
+            NativeMemory.AlignedFree((void*)bPtr);
+        }
+    }
+
+    // ──────────────────── VecDot optimized AVX2 accuracy ────────────────────
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(7)]
+    [InlineData(16)]
+    [InlineData(128)]
+    [InlineData(344)]
+    public void VecDotQ8_0_OptimizedAvx2_MatchesScalar(int blockCount)
+    {
+        if (!Avx2.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        nuint totalBytes = (nuint)(blockCount * Q8_0BlockBytes);
+
+        nint aPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        nint bPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        try
+        {
+            FillRandomQ8_0Blocks((byte*)aPtr, blockCount, rng);
+            FillRandomQ8_0Blocks((byte*)bPtr, blockCount, rng);
+
+            float scalar = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
+            float avx2 = MatMul.VecDotQ8_0Avx2((byte*)aPtr, (byte*)bPtr, blockCount);
+
+            Assert.Equal(scalar, avx2, 1e-2f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)aPtr);
+            NativeMemory.AlignedFree((void*)bPtr);
+        }
+    }
+
+    // ──────────────────── VecDot AVX-512 accuracy ────────────────────
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(7)]
+    [InlineData(16)]
+    [InlineData(128)]
+    [InlineData(344)]
+    public void VecDotQ8_0_Avx512_MatchesScalar(int blockCount)
+    {
+        if (!Avx512BW.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        nuint totalBytes = (nuint)(blockCount * Q8_0BlockBytes);
+
+        nint aPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        nint bPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        try
+        {
+            FillRandomQ8_0Blocks((byte*)aPtr, blockCount, rng);
+            FillRandomQ8_0Blocks((byte*)bPtr, blockCount, rng);
+
+            float scalar = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
+            float avx512 = MatMul.VecDotQ8_0Avx512((byte*)aPtr, (byte*)bPtr, blockCount);
+
+            Assert.Equal(scalar, avx512, 1e-2f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)aPtr);
+            NativeMemory.AlignedFree((void*)bPtr);
+        }
+    }
+
+    // ──────────────────── Multi-row (4-row) accuracy ────────────────────
+
+    [Theory]
+    [InlineData(16)]
+    [InlineData(128)]
+    [InlineData(344)]
+    public void VecDotQ8_0_4Row_MatchesSingleRow(int blockCount)
+    {
+        if (!Avx2.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        nuint rowBytes = (nuint)(blockCount * Q8_0BlockBytes);
+
+        nint w0 = (nint)NativeMemory.AlignedAlloc(rowBytes, 64);
+        nint w1 = (nint)NativeMemory.AlignedAlloc(rowBytes, 64);
+        nint w2 = (nint)NativeMemory.AlignedAlloc(rowBytes, 64);
+        nint w3 = (nint)NativeMemory.AlignedAlloc(rowBytes, 64);
+        nint x = (nint)NativeMemory.AlignedAlloc(rowBytes, 64);
+        try
+        {
+            FillRandomQ8_0Blocks((byte*)w0, blockCount, rng);
+            FillRandomQ8_0Blocks((byte*)w1, blockCount, rng);
+            FillRandomQ8_0Blocks((byte*)w2, blockCount, rng);
+            FillRandomQ8_0Blocks((byte*)w3, blockCount, rng);
+            FillRandomQ8_0Blocks((byte*)x, blockCount, rng);
+
+            // Single-row reference.
+            float r0 = MatMul.VecDotQ8_0Avx2((byte*)w0, (byte*)x, blockCount);
+            float r1 = MatMul.VecDotQ8_0Avx2((byte*)w1, (byte*)x, blockCount);
+            float r2 = MatMul.VecDotQ8_0Avx2((byte*)w2, (byte*)x, blockCount);
+            float r3 = MatMul.VecDotQ8_0Avx2((byte*)w3, (byte*)x, blockCount);
+
+            // Multi-row batched.
+            float* results = stackalloc float[4];
+            MatMul.VecDotQ8_0Avx2_4Rows((byte*)w0, (byte*)w1, (byte*)w2, (byte*)w3,
+                (byte*)x, blockCount, results);
+
+            Assert.Equal(r0, results[0], 1e-2f);
+            Assert.Equal(r1, results[1], 1e-2f);
+            Assert.Equal(r2, results[2], 1e-2f);
+            Assert.Equal(r3, results[3], 1e-2f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)w0);
+            NativeMemory.AlignedFree((void*)w1);
+            NativeMemory.AlignedFree((void*)w2);
+            NativeMemory.AlignedFree((void*)w3);
+            NativeMemory.AlignedFree((void*)x);
+        }
+    }
+
+    // ──────────────────── VecDot edge cases ────────────────────
+
+    [Fact]
+    public void VecDotQ8_0_AllZeroScales()
+    {
+        if (!Avx2.IsSupported)
+            return;
+
+        const int blockCount = 4;
+        nuint totalBytes = (nuint)(blockCount * Q8_0BlockBytes);
+
+        nint aPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        nint bPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        try
+        {
+            // Fill with non-zero qs but zero scales.
+            for (int b = 0; b < blockCount; b++)
+            {
+                byte* aBlock = (byte*)aPtr + b * Q8_0BlockBytes;
+                byte* bBlock = (byte*)bPtr + b * Q8_0BlockBytes;
+                *(Half*)aBlock = (Half)0.0f;
+                *(Half*)bBlock = (Half)0.0f;
+                for (int i = 0; i < Q8_0GroupSize; i++)
+                {
+                    ((sbyte*)(aBlock + 2))[i] = 127;
+                    ((sbyte*)(bBlock + 2))[i] = -127;
+                }
+            }
+
+            float scalar = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
+            float avx2 = MatMul.VecDotQ8_0Avx2((byte*)aPtr, (byte*)bPtr, blockCount);
+
+            Assert.Equal(0f, scalar);
+            Assert.Equal(0f, avx2);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)aPtr);
+            NativeMemory.AlignedFree((void*)bPtr);
+        }
+    }
+
+    [Fact]
+    public void VecDotQ8_0_MaxValues()
+    {
+        if (!Avx2.IsSupported)
+            return;
+
+        const int blockCount = 4;
+        nuint totalBytes = (nuint)(blockCount * Q8_0BlockBytes);
+
+        nint aPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        nint bPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        try
+        {
+            for (int b = 0; b < blockCount; b++)
+            {
+                byte* aBlock = (byte*)aPtr + b * Q8_0BlockBytes;
+                byte* bBlock = (byte*)bPtr + b * Q8_0BlockBytes;
+                *(Half*)aBlock = (Half)1.0f;
+                *(Half*)bBlock = (Half)1.0f;
+                for (int i = 0; i < Q8_0GroupSize; i++)
+                {
+                    ((sbyte*)(aBlock + 2))[i] = 127;
+                    ((sbyte*)(bBlock + 2))[i] = (sbyte)(i % 2 == 0 ? 127 : -127);
+                }
+            }
+
+            float scalar = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
+            float avx2 = MatMul.VecDotQ8_0Avx2((byte*)aPtr, (byte*)bPtr, blockCount);
+
+            Assert.True(float.IsFinite(scalar));
+            Assert.Equal(scalar, avx2, 1e-2f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)aPtr);
+            NativeMemory.AlignedFree((void*)bPtr);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(5)]
+    [InlineData(7)]
+    public void VecDotQ8_0_OddBlockCount(int blockCount)
+    {
+        if (!Avx2.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        nuint totalBytes = (nuint)(blockCount * Q8_0BlockBytes);
+
+        nint aPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        nint bPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        try
+        {
+            FillRandomQ8_0Blocks((byte*)aPtr, blockCount, rng);
+            FillRandomQ8_0Blocks((byte*)bPtr, blockCount, rng);
+
+            float scalar = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
+            float avx2 = MatMul.VecDotQ8_0Avx2((byte*)aPtr, (byte*)bPtr, blockCount);
+
+            Assert.Equal(scalar, avx2, 1e-2f);
+
+            if (Avx512BW.IsSupported)
+            {
+                float avx512 = MatMul.VecDotQ8_0Avx512((byte*)aPtr, (byte*)bPtr, blockCount);
+                Assert.Equal(scalar, avx512, 1e-2f);
+            }
         }
         finally
         {
@@ -195,6 +440,110 @@ public sealed unsafe class MatMulTests
             MatMul.QuantizeF32ToQ8_0(srcPtr, destPtr, k);
             float scale = (float)Unsafe.ReadUnaligned<Half>(destPtr);
             Assert.Equal(0f, scale);
+        }
+    }
+
+    [Fact]
+    public void QuantizeF32ToQ8_0_Avx2_MatchesScalar()
+    {
+        if (!Avx2.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        const int k = 1024; // 32 blocks
+        float[] src = new float[k];
+        for (int i = 0; i < k; i++)
+            src[i] = rng.NextSingle() * 2f - 1f;
+
+        int q8Bytes = (k / Q8_0GroupSize) * Q8_0BlockBytes;
+        nint scalarPtr = (nint)NativeMemory.AlignedAlloc((nuint)q8Bytes, 64);
+        nint avx2Ptr = (nint)NativeMemory.AlignedAlloc((nuint)q8Bytes, 64);
+        try
+        {
+            fixed (float* srcPtr = src)
+            {
+                MatMul.QuantizeF32ToQ8_0Scalar(srcPtr, (byte*)scalarPtr, k);
+                MatMul.QuantizeF32ToQ8_0Avx2(srcPtr, (byte*)avx2Ptr, k);
+            }
+
+            // Byte-for-byte comparison.
+            var scalarSpan = new ReadOnlySpan<byte>((void*)scalarPtr, q8Bytes);
+            var avx2Span = new ReadOnlySpan<byte>((void*)avx2Ptr, q8Bytes);
+
+            Assert.True(scalarSpan.SequenceEqual(avx2Span),
+                "AVX2 quantization output differs from scalar reference");
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)scalarPtr);
+            NativeMemory.AlignedFree((void*)avx2Ptr);
+        }
+    }
+
+    [Fact]
+    public void QuantizeF32ToQ8_0_LargeValues()
+    {
+        const int k = 32;
+        float[] src = new float[k];
+        // Values at the edge of practical range but within Half precision.
+        // Half max is ~65504, scale = max/127 ≈ 515 which fits in Half.
+        for (int i = 0; i < k; i++)
+            src[i] = (i % 2 == 0 ? 500.0f : -500.0f);
+
+        int q8Bytes = Q8_0BlockBytes;
+        nint q8Ptr = (nint)NativeMemory.AlignedAlloc((nuint)q8Bytes, 64);
+        try
+        {
+            fixed (float* srcPtr = src)
+                MatMul.QuantizeF32ToQ8_0(srcPtr, (byte*)q8Ptr, k);
+
+            byte* block = (byte*)q8Ptr;
+            float scale = (float)Unsafe.ReadUnaligned<Half>(block);
+            Assert.True(float.IsFinite(scale), $"Scale should be finite, got {scale}");
+
+            // All values have the same absolute magnitude → all qs should be ±127.
+            sbyte* qs = (sbyte*)(block + 2);
+            for (int i = 0; i < k; i++)
+            {
+                sbyte expected = (sbyte)(i % 2 == 0 ? 127 : -127);
+                Assert.Equal(expected, qs[i]);
+            }
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)q8Ptr);
+        }
+    }
+
+    [Fact]
+    public void QuantizeF32ToQ8_0_AllSameSign()
+    {
+        const int k = 32;
+        float[] src = new float[k];
+        for (int i = 0; i < k; i++)
+            src[i] = (i + 1) * 0.1f; // all positive
+
+        int q8Bytes = Q8_0BlockBytes;
+        nint scalarPtr = (nint)NativeMemory.AlignedAlloc((nuint)q8Bytes, 64);
+        nint simdPtr = (nint)NativeMemory.AlignedAlloc((nuint)q8Bytes, 64);
+        try
+        {
+            fixed (float* srcPtr = src)
+            {
+                MatMul.QuantizeF32ToQ8_0Scalar(srcPtr, (byte*)scalarPtr, k);
+                MatMul.QuantizeF32ToQ8_0(srcPtr, (byte*)simdPtr, k);
+            }
+
+            var scalarSpan = new ReadOnlySpan<byte>((void*)scalarPtr, q8Bytes);
+            var simdSpan = new ReadOnlySpan<byte>((void*)simdPtr, q8Bytes);
+
+            Assert.True(scalarSpan.SequenceEqual(simdSpan),
+                "SIMD quantization output differs from scalar for all-positive input");
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)scalarPtr);
+            NativeMemory.AlignedFree((void*)simdPtr);
         }
     }
 
@@ -286,6 +635,120 @@ public sealed unsafe class MatMulTests
             fixed (float* dummy = new float[33])
                 MatMul.GemvQ8_0(null, dummy, dummy, 1, 33);
         });
+    }
+
+    [Fact]
+    public void GemvQ8_0_LargeM_MultiRowPath()
+    {
+        // M=100, K=4096 exercises 4-row loop (25 iterations) + remainder.
+        const int m = 100, k = 4096;
+        int blockCount = k / Q8_0GroupSize;
+        int rowBytes = blockCount * Q8_0BlockBytes;
+
+        nint weightsPtr = (nint)NativeMemory.AlignedAlloc((nuint)(m * rowBytes), 64);
+        try
+        {
+            var rng = new Random(42);
+            for (int row = 0; row < m; row++)
+                FillRandomQ8_0Blocks((byte*)weightsPtr + row * rowBytes, blockCount, rng);
+
+            float[] x = new float[k];
+            for (int i = 0; i < k; i++)
+                x[i] = rng.NextSingle() * 2f - 1f;
+
+            float[] result = new float[m];
+
+            fixed (float* xp = x, rp = result)
+                MatMul.GemvQ8_0((byte*)weightsPtr, xp, rp, m, k);
+
+            for (int i = 0; i < m; i++)
+                Assert.True(float.IsFinite(result[i]), $"result[{i}] = {result[i]}");
+
+            // Verify against scalar VecDot for each row.
+            int xQ8Bytes = blockCount * Q8_0BlockBytes;
+            nint xQ8Ptr = (nint)NativeMemory.AlignedAlloc((nuint)xQ8Bytes, 64);
+            try
+            {
+                fixed (float* xp = x)
+                    MatMul.QuantizeF32ToQ8_0(xp, (byte*)xQ8Ptr, k);
+
+                for (int row = 0; row < m; row++)
+                {
+                    float scalarResult = MatMul.VecDotQ8_0Scalar(
+                        (byte*)weightsPtr + row * rowBytes, (byte*)xQ8Ptr, blockCount);
+                    Assert.Equal(scalarResult, result[row], 1e-2f);
+                }
+            }
+            finally
+            {
+                NativeMemory.AlignedFree((void*)xQ8Ptr);
+            }
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)weightsPtr);
+        }
+    }
+
+    [Fact]
+    public void GemvQ8_0_OptimizedMatchesOriginalScalar()
+    {
+        // M=64, K=4096 — compare full GEMV against pure scalar path.
+        const int m = 64, k = 4096;
+        int blockCount = k / Q8_0GroupSize;
+        int rowBytes = blockCount * Q8_0BlockBytes;
+
+        nint weightsPtr = (nint)NativeMemory.AlignedAlloc((nuint)(m * rowBytes), 64);
+        try
+        {
+            var rng = new Random(42);
+            for (int row = 0; row < m; row++)
+                FillRandomQ8_0Blocks((byte*)weightsPtr + row * rowBytes, blockCount, rng);
+
+            float[] x = new float[k];
+            for (int i = 0; i < k; i++)
+                x[i] = rng.NextSingle() * 2f - 1f;
+
+            // Quantize x via scalar for reference.
+            int xQ8Bytes = blockCount * Q8_0BlockBytes;
+            nint xQ8Ptr = (nint)NativeMemory.AlignedAlloc((nuint)xQ8Bytes, 64);
+            try
+            {
+                fixed (float* xp = x)
+                    MatMul.QuantizeF32ToQ8_0Scalar(xp, (byte*)xQ8Ptr, k);
+
+                float[] scalarResults = new float[m];
+                for (int row = 0; row < m; row++)
+                {
+                    scalarResults[row] = MatMul.VecDotQ8_0Scalar(
+                        (byte*)weightsPtr + row * rowBytes, (byte*)xQ8Ptr, blockCount);
+                }
+
+                float[] optimizedResults = new float[m];
+                fixed (float* xp = x, rp = optimizedResults)
+                    MatMul.GemvQ8_0((byte*)weightsPtr, xp, rp, m, k);
+
+                for (int i = 0; i < m; i++)
+                    Assert.Equal(scalarResults[i], optimizedResults[i], 1e-2f);
+            }
+            finally
+            {
+                NativeMemory.AlignedFree((void*)xQ8Ptr);
+            }
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)weightsPtr);
+        }
+    }
+
+    // ──────────────────── Q4_K stub ────────────────────
+
+    [Fact]
+    public void VecDotQ4_K_Q8_0Scalar_ThrowsNotImplemented()
+    {
+        Assert.Throws<NotImplementedException>(() =>
+            MatMul.VecDotQ4_K_Q8_0Scalar(null, null, 1));
     }
 
     // ──────────────────── Helpers ────────────────────

@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 using BenchmarkDotNet.Attributes;
 using DotLLM.Cpu.Kernels;
 
@@ -29,6 +30,9 @@ public unsafe class KernelBenchmarks
     private nint _weightsF32;
     private float[] _x = null!;
     private float[] _gemvResult = null!;
+
+    // Pre-built Q8_0 activation buffer for VecDot-level benchmarks
+    private nint _xQ8;
 
     private const int GemvM = 64;
 
@@ -77,6 +81,11 @@ public unsafe class KernelBenchmarks
         float* fp = (float*)_weightsF32;
         for (int i = 0; i < GemvM * K; i++)
             fp[i] = rng.NextSingle() * 2f - 1f;
+
+        // Pre-quantize activation vector for VecDot-level benchmarks
+        _xQ8 = (nint)NativeMemory.AlignedAlloc((nuint)(blocksPerRow * Q8_0BlockBytes), 64);
+        fixed (float* xp = _x)
+            MatMul.QuantizeF32ToQ8_0(xp, (byte*)_xQ8, K);
     }
 
     [GlobalCleanup]
@@ -84,6 +93,7 @@ public unsafe class KernelBenchmarks
     {
         NativeMemory.AlignedFree((void*)_weightsQ8);
         NativeMemory.AlignedFree((void*)_weightsF32);
+        NativeMemory.AlignedFree((void*)_xQ8);
     }
 
     // ──────────────────── Element-wise ops ────────────────────
@@ -119,10 +129,101 @@ public unsafe class KernelBenchmarks
             MatMul.GemvF32((float*)_weightsF32, xp, rp, GemvM, K);
     }
 
-    [Benchmark]
+    [Benchmark(Baseline = true)]
     public void GemvQ8_0()
     {
         fixed (float* xp = _x, rp = _gemvResult)
             MatMul.GemvQ8_0((byte*)_weightsQ8, xp, rp, GemvM, K);
+    }
+
+    // ──────────────────── VecDot micro-benchmarks ────────────────────
+
+    [Benchmark]
+    public float VecDotQ8_0_Scalar()
+    {
+        int blockCount = K / Q8_0GroupSize;
+        return MatMul.VecDotQ8_0Scalar((byte*)_weightsQ8, (byte*)_xQ8, blockCount);
+    }
+
+    [Benchmark]
+    public float VecDotQ8_0_Avx2()
+    {
+        if (!Avx2.IsSupported) return 0f;
+        int blockCount = K / Q8_0GroupSize;
+        return MatMul.VecDotQ8_0Avx2((byte*)_weightsQ8, (byte*)_xQ8, blockCount);
+    }
+
+    [Benchmark]
+    public void QuantizeF32ToQ8_0()
+    {
+        fixed (float* xp = _x)
+            MatMul.QuantizeF32ToQ8_0(xp, (byte*)_xQ8, K);
+    }
+
+    [Benchmark]
+    public void QuantizeF32ToQ8_0_Scalar()
+    {
+        fixed (float* xp = _x)
+            MatMul.QuantizeF32ToQ8_0Scalar(xp, (byte*)_xQ8, K);
+    }
+}
+
+/// <summary>
+/// Separate benchmark class for GEMV scaling by M (output rows).
+/// Uses a fixed K=4096 to isolate the impact of multi-row optimization.
+/// </summary>
+[MemoryDiagnoser]
+[SimpleJob(warmupCount: 3, iterationCount: 10)]
+public unsafe class GemvScalingBenchmarks
+{
+    private const int Q8_0BlockBytes = 34;
+    private const int Q8_0GroupSize = 32;
+    private const int FixedK = 4096;
+
+    private nint _weightsQ8;
+    private float[] _x = null!;
+    private float[] _result = null!;
+
+    [Params(1, 64, 1024, 4096)]
+    public int M { get; set; }
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        var rng = new Random(42);
+        int blocksPerRow = FixedK / Q8_0GroupSize;
+        int rowBytes = blocksPerRow * Q8_0BlockBytes;
+
+        _weightsQ8 = (nint)NativeMemory.AlignedAlloc((nuint)(M * rowBytes), 64);
+        _x = new float[FixedK];
+        _result = new float[M];
+
+        for (int i = 0; i < FixedK; i++)
+            _x[i] = rng.NextSingle() * 2f - 1f;
+
+        byte* p = (byte*)_weightsQ8;
+        for (int row = 0; row < M; row++)
+        {
+            for (int b = 0; b < blocksPerRow; b++)
+            {
+                *(Half*)p = (Half)(rng.NextSingle() * 0.1f);
+                for (int i = 0; i < Q8_0GroupSize; i++)
+                    ((sbyte*)(p + 2))[i] = (sbyte)rng.Next(-127, 128);
+                p += Q8_0BlockBytes;
+            }
+        }
+    }
+
+    [GlobalCleanup]
+    public void Cleanup()
+    {
+        NativeMemory.AlignedFree((void*)_weightsQ8);
+    }
+
+    [Benchmark]
+    public void GemvQ8_0_ByM()
+    {
+        fixed (float* xp = _x, rp = _result)
+            MatMul.GemvQ8_0((byte*)_weightsQ8, xp, rp, M, FixedK);
     }
 }

@@ -32,7 +32,7 @@ Each step is designed to be a discrete unit of work suitable for a single implem
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
-| 10 | **SIMD kernel tuning** | Benchmark-driven optimization of Q8_0/Q4_K GEMV kernels. Fused dequant-dot (no intermediate f32 buffer), `Fma.MultiplyAdd` accumulation, AVX-512 specialization with AVX2 fallback. Scalar reference as correctness oracle. Target: ~2-4× over current functional kernels. | 3 |
+| 10 | **SIMD kernel tuning** :white_check_mark: | Benchmark-driven optimization of Q8_0/Q4_K GEMV kernels. Fused dequant-dot (no intermediate f32 buffer), `Fma.MultiplyAdd` accumulation, AVX-512 specialization with AVX2 fallback. Scalar reference as correctness oracle. Target: ~2-4× over current functional kernels. | 3 |
 | 11 | **CPU batched GEMM** | Batched matrix-matrix multiply for prefill: process all prompt tokens in one GEMM call instead of per-token GEMV. Tiled loop with cache-friendly access patterns. Falls back to GEMV for single-token decode. Target: ~5-10× prefill speedup. | 3 |
 | 12 | **Q4_K_M dequantization** | K-quant with super-blocks, double quantization. See `docs/QUANTIZATION.md` for block layout. | 2 |
 | 13 | **Mixed quantization** | Handle heterogeneous per-tensor quantization types (common in Q4_K_M files: attention Q6_K, FFN Q4_K). Dispatch correct kernel per tensor. | 12 |
