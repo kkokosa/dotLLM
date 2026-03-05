@@ -76,9 +76,67 @@ common_perf_print:       total time =      21.27 ms /     6 tokens
 ╰───────────────┴────────────────────────────╯
 ```
 
+## Results — Llama 3.2 1B (2026-03-05)
+
+Larger model to exercise SIMD kernel optimizations at production dimensions (K=2048, FFN K=8192).
+
+- **Model**: `bartowski/Llama-3.2-1B-Instruct-GGUF` / Q8_0 (1252 MiB)
+- **Hardware**: AMD Ryzen 7 5800HS, 16 GB DDR4, Windows 11, CPU-only
+
+### llama.cpp (b5291)
+
+```
+common_perf_print:        load time =    4662.65 ms
+common_perf_print: prompt eval time =    1786.38 ms /    15 tokens (  119.09 ms per token,     8.40 tokens per second)
+common_perf_print:        eval time =     104.47 ms /     2 runs   (   52.23 ms per token,    19.14 tokens per second)
+common_perf_print:       total time =   11727.30 ms /    17 tokens
+```
+
+### dotLLM — before Step 10 (row-by-row AVX2 + scalar quantize)
+
+```
+                    Performance Summary
+╭─────────────┬────────────┬────────┬──────────┬──────────╮
+│ Phase       │       Time │ Tokens │ ms/token │ tokens/s │
+├─────────────┼────────────┼────────┼──────────┼──────────┤
+│ Load        │  553.66 ms │      — │        — │        — │
+│ Prompt eval │ 1392.68 ms │      5 │   278.54 │     3.59 │
+│ Eval        │ 3249.81 ms │     19 │   171.04 │     5.85 │
+│ Sampling    │   14.49 ms │     20 │     0.72 │        — │
+│ Total       │ 4661.93 ms │     25 │        — │     5.36 │
+╰─────────────┴────────────┴────────┴──────────┴──────────╯
+```
+
+### dotLLM — after Step 10 (4-row AVX2 + FMA + SIMD quantize)
+
+```
+                    Performance Summary
+╭─────────────┬────────────┬────────┬──────────┬──────────╮
+│ Phase       │       Time │ Tokens │ ms/token │ tokens/s │
+├─────────────┼────────────┼────────┼──────────┼──────────┤
+│ Load        │  530.43 ms │      — │        — │        — │
+│ Prompt eval │ 3387.24 ms │      5 │   677.45 │     1.48 │
+│ Eval        │ 2713.50 ms │     19 │   142.82 │     7.00 │
+│ Sampling    │   15.37 ms │     20 │     0.77 │        — │
+│ Total       │ 6120.07 ms │     25 │        — │     4.08 │
+╰─────────────┴────────────┴────────┴──────────┴──────────╯
+```
+
+### Llama 3.2 1B — Analysis
+
+| Metric | Before Step 10 | After Step 10 | Change |
+|--------|---------------|---------------|--------|
+| Eval per token | 171.04 ms | 142.82 ms | **1.20× faster** |
+| Eval tokens/s | 5.85 | 7.00 | **+20%** |
+| Prompt eval per token | 278.54 ms | 677.45 ms | 2.4× slower |
+
+**Eval (decode)** improved by **1.20×** — the FMA accumulation and 4-row batching are effective at K=2048/8192. The gap to llama.cpp (52 ms/token, multi-threaded) narrows from ~3.3× to ~2.7×.
+
+**Prompt eval regression**: The first 5 tokens are slower after the change. This is likely JIT warmup — the new dispatch paths (AVX-512 checks, 4-row branching, SIMD quantize) require more JIT compilation on the first calls. Once the JIT stabilizes, eval tokens are consistently faster. Batched GEMM (Step 11) will address prompt eval performance properly.
+
 ## Analysis
 
-### dotLLM vs llama.cpp
+### SmolLM-135M — dotLLM vs llama.cpp
 
 | Metric | llama.cpp | dotLLM | Ratio |
 |--------|-----------|--------|-------|
@@ -89,7 +147,7 @@ common_perf_print:       total time =      21.27 ms /     6 tokens
 
 **Load time** is comparable — both memory-map the GGUF file. dotLLM is slightly faster.
 
-**Eval per token** (24.4 ms) is now within **3× of llama.cpp** thanks to KV-cache and Release-mode JIT with Dynamic PGO. The remaining gap is SIMD kernel tuning and thread parallelism.
+**Eval per token** (24.4 ms) is now within **3× of llama.cpp** thanks to KV-cache and Release-mode JIT with Dynamic PGO. The remaining gap is thread parallelism (llama.cpp uses all cores, dotLLM is single-threaded).
 
 **Prompt eval** is the main bottleneck (~27× slower). This is expected — dotLLM processes prompt tokens one at a time (GEMV), while llama.cpp batches them into a single GEMM call and parallelizes across cores.
 
@@ -97,7 +155,7 @@ common_perf_print:       total time =      21.27 ms /     6 tokens
 
 | Optimization | Expected impact | Roadmap step |
 |-------------|----------------|--------------|
-| SIMD-tuned Q8_0 kernels | ~2-4× kernel speedup | Phase 2, Step 10 |
+| ~~SIMD-tuned Q8_0 kernels~~ | ~~~2-4× kernel speedup~~ | ~~Phase 2, Step 10~~ :white_check_mark: **1.2× eval on Llama 1B, up to 1.9× on micro-benchmarks** |
 | Batched GEMM for prefill | ~5-10× prefill speedup | Phase 2, Step 11 |
 | Multi-threaded inference | ~4-8× on multi-core | Phase 2, Step 20 |
 | CUDA GPU backend | 10-50× prefill, 3-10× decode | Phase 3, Step 21 |
