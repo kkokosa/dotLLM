@@ -618,7 +618,7 @@ public static unsafe class MatMul
             if (scale == 0)
             {
                 // Zero out all 32 bytes.
-                Avx.Store((float*)qs, Vector256<float>.Zero);
+                Unsafe.InitBlockUnaligned((byte*)qs, 0, Q8_0GroupSize);
             }
             else
             {
@@ -646,7 +646,7 @@ public static unsafe class MatMul
                 Vector256<int> permuted = Avx2.PermuteVar8x32(packed.AsInt32(),
                     Vector256.Create(0, 4, 1, 5, 2, 6, 3, 7));
 
-                Avx.Store((float*)qs, permuted.AsSingle());
+                permuted.AsByte().StoreUnsafe(ref Unsafe.AsRef<byte>((byte*)qs));
             }
         }
     }
@@ -684,7 +684,7 @@ public static unsafe class MatMul
             sbyte* qs = (sbyte*)(blockDst + 2);
             if (scale == 0)
             {
-                Avx.Store((float*)qs, Vector256<float>.Zero);
+                Unsafe.InitBlockUnaligned((byte*)qs, 0, Q8_0GroupSize);
             }
             else
             {
@@ -711,7 +711,7 @@ public static unsafe class MatMul
                 Vector256<int> permuted = Avx2.PermuteVar8x32(packed.AsInt32(),
                     Vector256.Create(0, 4, 1, 5, 2, 6, 3, 7));
 
-                Avx.Store((float*)qs, permuted.AsSingle());
+                permuted.AsByte().StoreUnsafe(ref Unsafe.AsRef<byte>((byte*)qs));
             }
         }
     }
