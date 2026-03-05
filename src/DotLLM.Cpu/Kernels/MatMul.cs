@@ -23,6 +23,19 @@ public static unsafe class MatMul
     private const int StackAllocThreshold = 8192;
 
     /// <summary>
+    /// Computes the number of weight rows per tile that fits within ~50% of a typical 512KB L2 cache.
+    /// Result is aligned down to 4 rows for efficient VecDot batching.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int ComputeTileM(int rowBytes)
+    {
+        const int L2Budget = 256 * 1024; // 50% of typical 512KB L2
+        int tileM = L2Budget / rowBytes;
+        tileM = (tileM / 4) * 4; // align to 4-row VecDot batch
+        return Math.Clamp(tileM, 4, 256);
+    }
+
+    /// <summary>
     /// f32 GEMV: <c>result[m] = dot(A[m,:], x)</c>.
     /// A is [M,K] row-major, x is [K], result is [M].
     /// </summary>
@@ -696,6 +709,31 @@ public static unsafe class MatMul
         }
     }
 
+    // ──────────────────── Tiled GEMM helpers ────────────────────
+
+    /// <summary>
+    /// Cache-tiled Q8_0 GEMM core. Iterates weight-tile-first so that a tile of weight rows
+    /// (~256KB) stays in L2 cache while all N tokens are computed against it.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void ComputeGemmTiled(byte* weightsQ8, byte* inputQ8, float* c,
+                                         int m, int n, int blockCount)
+    {
+        int q8RowBytes = blockCount * Q8_0BlockBytes;
+        int tileM = ComputeTileM(q8RowBytes);
+
+        for (int mStart = 0; mStart < m; mStart += tileM)
+        {
+            int tileRows = Math.Min(tileM, m - mStart);
+            byte* tileWeights = weightsQ8 + (long)mStart * q8RowBytes;
+
+            for (int t = 0; t < n; t++)
+                ComputeRows(tileWeights, inputQ8 + t * q8RowBytes,
+                            c + t * m + mStart, tileRows, blockCount);
+        }
+    }
+
     // ──────────────────── GEMM ────────────────────
 
     /// <summary>
@@ -715,17 +753,21 @@ public static unsafe class MatMul
 
     /// <summary>
     /// Optimized f32 GEMM: <c>C[N,M] = B[N,K] × A[M,K]^T</c>.
-    /// Delegates to <see cref="GemvF32"/> when N==1. For N&gt;1, loops over tokens
-    /// calling GemvF32 per token (weights stay cache-hot across tokens).
+    /// Uses cache-tiled traversal: weight-tile-first so tiles stay in L2 across tokens.
     /// </summary>
     [SkipLocalsInit]
     public static void GemmF32(float* a, float* b, float* c, int m, int k, int n)
     {
-        for (int t = 0; t < n; t++)
+        int rowBytes = k * sizeof(float);
+        int tileM = ComputeTileM(rowBytes);
+
+        for (int mStart = 0; mStart < m; mStart += tileM)
         {
-            float* inputRow = b + t * k;
-            float* outputRow = c + t * m;
-            GemvF32(a, inputRow, outputRow, m, k);
+            int tileRows = Math.Min(tileM, m - mStart);
+            float* tileWeights = a + (long)mStart * k;
+
+            for (int t = 0; t < n; t++)
+                GemvF32(tileWeights, b + t * k, c + t * m + mStart, tileRows, k);
         }
     }
 
@@ -769,34 +811,24 @@ public static unsafe class MatMul
         int blockCount2 = k / Q8_0GroupSize;
         int q8RowBytes = blockCount2 * Q8_0BlockBytes;
 
-        byte* inputQ8;
-        byte[]? rented = null;
-
         if (preQuantizedInput != null)
         {
-            inputQ8 = preQuantizedInput;
-        }
-        else
-        {
-            int totalQ8Bytes = n * q8RowBytes;
-            rented = ArrayPool<byte>.Shared.Rent(totalQ8Bytes);
-            fixed (byte* rentedPtr = rented)
-            {
-                // Quantize all input rows.
-                for (int t = 0; t < n; t++)
-                    QuantizeF32ToQ8_0(b + t * k, rentedPtr + t * q8RowBytes, k);
-
-                // Compute all output rows per token.
-                for (int t = 0; t < n; t++)
-                    ComputeRows(weightsQ8, rentedPtr + t * q8RowBytes, c + t * m, m, blockCount2);
-            }
-            ArrayPool<byte>.Shared.Return(rented);
+            // Pre-quantized path: tiled compute directly.
+            ComputeGemmTiled(weightsQ8, preQuantizedInput, c, m, n, blockCount2);
             return;
         }
 
-        // Pre-quantized path: just compute.
-        for (int t = 0; t < n; t++)
-            ComputeRows(weightsQ8, inputQ8 + t * q8RowBytes, c + t * m, m, blockCount2);
+        // Quantize all input rows, then tiled compute.
+        int totalQ8Bytes = n * q8RowBytes;
+        byte[] rented = ArrayPool<byte>.Shared.Rent(totalQ8Bytes);
+        fixed (byte* rentedPtr = rented)
+        {
+            for (int t = 0; t < n; t++)
+                QuantizeF32ToQ8_0(b + t * k, rentedPtr + t * q8RowBytes, k);
+
+            ComputeGemmTiled(weightsQ8, rentedPtr, c, m, n, blockCount2);
+        }
+        ArrayPool<byte>.Shared.Return(rented);
     }
 
     // ──────────────────── F16 GEMV / GEMM ────────────────────
@@ -844,13 +876,22 @@ public static unsafe class MatMul
 
     /// <summary>
     /// F16 GEMM: <c>C[N,M] = B[N,K] × A[M,K]^T</c> where A is F16 weights.
-    /// Delegates to <see cref="GemvF16"/> per token.
+    /// Uses cache-tiled traversal: weight-tile-first so tiles stay in L2 across tokens.
     /// </summary>
     [SkipLocalsInit]
     public static void GemmF16(nint weights, float* b, float* c, int m, int k, int n)
     {
-        for (int t = 0; t < n; t++)
-            GemvF16(weights, b + t * k, c + t * m, m, k);
+        int rowBytes = k * sizeof(Half);
+        int tileM = ComputeTileM(rowBytes);
+
+        for (int mStart = 0; mStart < m; mStart += tileM)
+        {
+            int tileRows = Math.Min(tileM, m - mStart);
+            nint tileWeights = weights + (nint)((long)mStart * k * sizeof(Half));
+
+            for (int t = 0; t < n; t++)
+                GemvF16(tileWeights, b + t * k, c + t * m + mStart, tileRows, k);
+        }
     }
 
     // ──────────────────── Q4_K stubs ────────────────────
