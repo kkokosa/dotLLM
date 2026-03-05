@@ -69,6 +69,7 @@ public static unsafe class MatMul
     /// <param name="m">Number of rows (output dimension).</param>
     /// <param name="k">Number of columns (input dimension). Must be a multiple of 32.</param>
     [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static void GemvQ8_0(byte* weightsQ8, float* x, float* result, int m, int k)
     {
         if (k % Q8_0GroupSize != 0)
@@ -105,7 +106,7 @@ public static unsafe class MatMul
     }
 
     [SkipLocalsInit]
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     private static void ComputeRows(byte* weightsQ8, byte* xQ8, float* result, int m, int blockCount)
     {
         int rowBytes = blockCount * Q8_0BlockBytes;
@@ -226,14 +227,7 @@ public static unsafe class MatMul
             Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
             Vector256<float> scale = Vector256.Create(da * db);
 
-            if (Fma.IsSupported)
-            {
-                acc = Fma.MultiplyAdd(fsum, scale, acc);
-            }
-            else
-            {
-                acc = Avx.Add(acc, Avx.Multiply(fsum, scale));
-            }
+            acc += fsum * scale;
         }
 
         return HorizontalSumAvx2Float(acc);
@@ -273,9 +267,7 @@ public static unsafe class MatMul
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
                 Vector256<float> scale = Vector256.Create(dx * dw);
-                acc0 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(fsum, scale, acc0)
-                    : Avx.Add(acc0, Avx.Multiply(fsum, scale));
+                acc0 += fsum * scale;
             }
 
             // Row 1
@@ -288,9 +280,7 @@ public static unsafe class MatMul
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
                 Vector256<float> scale = Vector256.Create(dx * dw);
-                acc1 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(fsum, scale, acc1)
-                    : Avx.Add(acc1, Avx.Multiply(fsum, scale));
+                acc1 += fsum * scale;
             }
 
             // Row 2
@@ -303,9 +293,7 @@ public static unsafe class MatMul
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
                 Vector256<float> scale = Vector256.Create(dx * dw);
-                acc2 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(fsum, scale, acc2)
-                    : Avx.Add(acc2, Avx.Multiply(fsum, scale));
+                acc2 += fsum * scale;
             }
 
             // Row 3
@@ -318,9 +306,7 @@ public static unsafe class MatMul
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
                 Vector256<float> scale = Vector256.Create(dx * dw);
-                acc3 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(fsum, scale, acc3)
-                    : Avx.Add(acc3, Avx.Multiply(fsum, scale));
+                acc3 += fsum * scale;
             }
         }
 
@@ -534,6 +520,7 @@ public static unsafe class MatMul
     /// <param name="dest">Destination Q8_0 buffer. Must have (elementCount/32) × 34 bytes.</param>
     /// <param name="elementCount">Number of float elements. Must be a multiple of 32.</param>
     [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal static void QuantizeF32ToQ8_0(float* src, byte* dest, int elementCount)
     {
         if (Avx512BW.IsSupported)
@@ -593,18 +580,16 @@ public static unsafe class MatMul
     internal static void QuantizeF32ToQ8_0Avx2(float* src, byte* dest, int elementCount)
     {
         int blockCount = elementCount / Q8_0GroupSize;
-        Vector256<int> signMask = Vector256.Create(0x7FFFFFFF);
-
         for (int block = 0; block < blockCount; block++)
         {
             float* blockSrc = src + block * Q8_0GroupSize;
             byte* blockDst = dest + block * Q8_0BlockBytes;
 
             // Max-abs scan: 4 loads of 8 floats.
-            Vector256<float> v0 = Avx.And(Avx.LoadVector256(blockSrc), signMask.AsSingle());
-            Vector256<float> v1 = Avx.And(Avx.LoadVector256(blockSrc + 8), signMask.AsSingle());
-            Vector256<float> v2 = Avx.And(Avx.LoadVector256(blockSrc + 16), signMask.AsSingle());
-            Vector256<float> v3 = Avx.And(Avx.LoadVector256(blockSrc + 24), signMask.AsSingle());
+            Vector256<float> v0 = Vector256.Abs(Avx.LoadVector256(blockSrc));
+            Vector256<float> v1 = Vector256.Abs(Avx.LoadVector256(blockSrc + 8));
+            Vector256<float> v2 = Vector256.Abs(Avx.LoadVector256(blockSrc + 16));
+            Vector256<float> v3 = Vector256.Abs(Avx.LoadVector256(blockSrc + 24));
 
             Vector256<float> max01 = Avx.Max(v0, v1);
             Vector256<float> max23 = Avx.Max(v2, v3);
@@ -618,7 +603,7 @@ public static unsafe class MatMul
             if (scale == 0)
             {
                 // Zero out all 32 bytes.
-                Unsafe.InitBlockUnaligned((byte*)qs, 0, Q8_0GroupSize);
+                Vector256<sbyte>.Zero.StoreUnsafe(ref Unsafe.AsRef<sbyte>(qs));
             }
             else
             {
@@ -658,20 +643,15 @@ public static unsafe class MatMul
     internal static void QuantizeF32ToQ8_0Avx512(float* src, byte* dest, int elementCount)
     {
         int blockCount = elementCount / Q8_0GroupSize;
-        Vector512<int> signMask512 = Vector512.Create(0x7FFFFFFF);
 
         for (int block = 0; block < blockCount; block++)
         {
             float* blockSrc = src + block * Q8_0GroupSize;
             byte* blockDst = dest + block * Q8_0BlockBytes;
 
-            // Max-abs scan: 2 loads of 16 floats (clear sign bit via byte-level AND).
-            Vector512<float> v0 = Avx512F.And(
-                Vector512.LoadUnsafe(ref Unsafe.AsRef<float>(blockSrc)).AsByte(),
-                signMask512.AsByte()).AsSingle();
-            Vector512<float> v1 = Avx512F.And(
-                Vector512.LoadUnsafe(ref Unsafe.AsRef<float>(blockSrc + 16)).AsByte(),
-                signMask512.AsByte()).AsSingle();
+            // Max-abs scan: 2 loads of 16 floats.
+            Vector512<float> v0 = Vector512.Abs(Vector512.LoadUnsafe(ref Unsafe.AsRef<float>(blockSrc)));
+            Vector512<float> v1 = Vector512.Abs(Vector512.LoadUnsafe(ref Unsafe.AsRef<float>(blockSrc + 16)));
 
             Vector512<float> maxAll = Avx512F.Max(v0, v1);
             // Reduce 512-bit to scalar max.
@@ -684,7 +664,7 @@ public static unsafe class MatMul
             sbyte* qs = (sbyte*)(blockDst + 2);
             if (scale == 0)
             {
-                Unsafe.InitBlockUnaligned((byte*)qs, 0, Q8_0GroupSize);
+                Vector256<sbyte>.Zero.StoreUnsafe(ref Unsafe.AsRef<sbyte>(qs));
             }
             else
             {
