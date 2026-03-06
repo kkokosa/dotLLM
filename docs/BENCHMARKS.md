@@ -2,47 +2,119 @@
 
 ## Approach
 
-All benchmarks use **greedy decoding** (argmax / top-k=1, temp=0) to ensure deterministic, comparable output across engines. The reference model is **SmolLM-135M Q8_0** — small enough to run on any machine, large enough to exercise the full pipeline.
-
-Each engine is measured on the same machine, same model file, same prompt. We compare:
+All benchmarks use **greedy decoding** (temp=0) to ensure deterministic, comparable output across engines. Each engine is measured on the same machine, same model file, same prompt, same thread count.
 
 | Metric | What it measures |
 |--------|-----------------|
-| Load time | GGUF open + config + tokenizer + weight loading |
-| Prompt eval | First forward pass processing all prompt tokens |
-| Eval | Subsequent decode steps (1 token each, with KV-cache) |
-| Total tokens/s | End-to-end throughput (prompt + generated) / wall time |
+| Prefill | Forward pass processing all prompt tokens (GEMM) |
+| Decode | Autoregressive token generation with KV-cache (GEMV) |
+| Total tok/s | End-to-end throughput (prompt + generated) / wall time |
 
-## Test Setup
+### Methodology
 
-- **Model**: `QuantFactory/SmolLM-135M-GGUF` / `SmolLM-135M.Q8_0.gguf` (136 MiB)
-- **Prompt**: `"The capital of France is"`
-- **Expected output**: `Paris. It is the largest city in France and the capital of the country. Paris is the capital`
+Comparisons are run via `scripts/bench_compare.py`, which ensures fairness:
+
+- **Same prompt & token count** — both engines receive identical inputs via env vars
+- **Warm pages** — llama.cpp runs with `--mlock` to lock model weights in RAM (eliminates mmap page faults during timing); dotLLM uses BDN warmup iterations for the same effect
+- **Warmup run** — llama.cpp gets a discarded warmup invocation before measured runs
+- **Statistical rigor** — dotLLM uses BenchmarkDotNet (2 warmup + 5 measured iterations); llama.cpp uses median of 5 runs
+- **Thread parity** — both engines default to all available cores (`ThreadingConfig.Auto` / llama.cpp default)
+
+```bash
+# Run comparison
+python scripts/bench_compare.py --model QuantFactory/SmolLM-135M-GGUF --prompt-size short
+
+# Available prompt sizes: short (~5 tok), medium (~256 tok), large (~1024 tok)
+python scripts/bench_compare.py --model bartowski/Llama-3.2-3B-Instruct-GGUF --quant Q8_0 --prompt-size large
+```
+
+## Current Results (2026-03-06)
+
+All results on: **AMD Ryzen 7 5800HS**, 16 GB DDR4, 8 cores / 16 threads, Windows 11, CPU-only, .NET 10, llama.cpp b5291.
+
+### SmolLM-135M Q8_0 (136 MiB)
+
+```
+Engine            Prefill                Decode                        Total  Notes
+                       ms      tok/s         ms      tok/s   ms/tok    tok/s
+────────────────────────────────────────────────────────────────────────────────────────────────────
+dotLLM               29.4      170.0      175.2      108.5     9.22    117.3  (BDN: 199.3±2.1 ms)
+llama.cpp             9.6      523.7      130.4      145.8     6.86    171.5  (median of runs)
+────────────────────────────────────────────────────────────────────────────────────────────────────
+vs llama.cpp        0.32x      0.32x      0.74x      0.74x    0.74x    0.68x  (>1 = dotLLM faster)
+────────────────────────────────────────────────────────────────────────────────────────────────────
+```
+
+### Llama 3.2 1B Instruct Q8_0 (1252 MiB)
+
+```
+Engine            Prefill                Decode                        Total  Notes
+                       ms      tok/s         ms      tok/s   ms/tok    tok/s
+────────────────────────────────────────────────────────────────────────────────────────────────────
+dotLLM              120.3       41.6     1065.2       17.8    56.06     20.2  (BDN: 1185.5±10.8 ms)
+llama.cpp            70.9       84.6     1008.8       18.8    53.09     23.2  (median of runs)
+────────────────────────────────────────────────────────────────────────────────────────────────────
+vs llama.cpp        0.59x      0.49x      0.95x      0.95x    0.95x    0.87x  (>1 = dotLLM faster)
+────────────────────────────────────────────────────────────────────────────────────────────────────
+```
+
+### Llama 3.2 3B Instruct Q8_0 (3400 MiB)
+
+```
+Engine            Prefill                Decode                        Total  Notes
+                       ms      tok/s         ms      tok/s   ms/tok    tok/s
+────────────────────────────────────────────────────────────────────────────────────────────────────
+dotLLM              303.1       16.5     2800.0        6.8   147.37      7.7  (BDN: 3032.0±86.1 ms)
+llama.cpp           205.9       29.1     2832.6        6.7   149.08      8.2  (median of runs)
+────────────────────────────────────────────────────────────────────────────────────────────────────
+vs llama.cpp        0.68x      0.57x      1.01x      1.01x    1.01x    0.94x  (>1 = dotLLM faster)
+────────────────────────────────────────────────────────────────────────────────────────────────────
+```
+
+## Analysis
+
+### Decode (memory-bandwidth bound)
+
+| Model | dotLLM tok/s | llama.cpp tok/s | Ratio |
+|-------|-------------|----------------|-------|
+| SmolLM 135M | 108.5 | 145.8 | 0.74× |
+| Llama 1B | 17.8 | 18.8 | 0.95× |
+| Llama 3B | 6.8 | 6.7 | **1.01×** |
+
+Decode is memory-bandwidth bound (GEMV). On larger models where memory bandwidth dominates over kernel overhead, dotLLM is essentially **at parity with llama.cpp**. The remaining gap on small models is per-token overhead (function call dispatch, sampler pipeline) that gets amortized on larger models.
+
+### Prefill (compute bound)
+
+| Model | dotLLM tok/s | llama.cpp tok/s | Ratio |
+|-------|-------------|----------------|-------|
+| SmolLM 135M | 170.0 | 523.7 | 0.32× |
+| Llama 1B | 41.6 | 84.6 | 0.49× |
+| Llama 3B | 16.5 | 29.1 | 0.57× |
+
+Prefill is compute-bound (GEMM). dotLLM uses batched GEMM but llama.cpp's matmul kernels are more heavily optimized. The gap narrows on larger models (0.32× → 0.57×) as compute dominates overhead.
+
+### Roadmap to Parity
+
+| Optimization | Expected impact | Roadmap step |
+|-------------|----------------|--------------|
+| ~~SIMD-tuned Q8_0 kernels~~ | ~~2-4× kernel speedup~~ | ~~Phase 2, Step 10~~ :white_check_mark: |
+| ~~Batched GEMM for prefill~~ | ~~5-10× prefill speedup~~ | ~~Phase 2, Step 11~~ :white_check_mark: |
+| ~~Multi-threaded inference~~ | ~~4-8× on multi-core~~ | ~~Phase 2, Step 20~~ :white_check_mark: |
+| Cache-tiled GEMM | ~1.5-2× prefill improvement | Phase 2, optimization |
+| CUDA GPU backend | 10-50× prefill, 3-10× decode | Phase 3, Step 29 |
+
+---
+
+## Historical Results
+
+<details>
+<summary>Earlier measurements (pre-Step 13, manual runs)</summary>
+
+### SmolLM-135M (2026-03-04)
+
 - **Hardware**: AMD Ryzen 9 7950X, 64 GB DDR5, Windows 11, CPU-only
-- **Build**: Release configuration (JIT + Dynamic PGO)
 
-## Commands
-
-### llama.cpp
-
-```
-llama-completion.exe ^
-  -m C:\Users\kkoko\.dotllm\models\QuantFactory\SmolLM-135M-GGUF\SmolLM-135M.Q8_0.gguf ^
-  -p "The capital of France is" ^
-  -n 2 ^
-  --samplers "top_k" --top-k 1 --repeat-penalty 1.0 --temp 0 ^
-  --verbose-prompt
-```
-
-### dotLLM
-
-```
-DotLLM.Cli.exe run QuantFactory/SmolLM-135M-GGUF -p "The capital of France is" -n 20 -t 0
-```
-
-## Results (2026-03-04)
-
-### llama.cpp (b5291, -n 2)
+#### llama.cpp (b5291, -n 2)
 
 ```
 common_perf_print:        load time =     227.69 ms
@@ -51,7 +123,7 @@ common_perf_print:        eval time =       8.27 ms /     1 runs   (    8.27 ms 
 common_perf_print:       total time =      21.27 ms /     6 tokens
 ```
 
-### dotLLM (Release, -n 20)
+#### dotLLM (Release, -n 20)
 
 ```
                    Performance Summary
@@ -64,98 +136,41 @@ common_perf_print:       total time =      21.27 ms /     6 tokens
 │ Sampling    │  16.74 ms │     20 │     0.84 │        — │
 │ Total       │ 784.59 ms │     25 │        — │    31.86 │
 ╰─────────────┴───────────┴────────┴──────────┴──────────╯
-
-               Memory Breakdown
-╭───────────────┬────────────────────────────╮
-│ Component     │                       Size │
-├───────────────┼────────────────────────────┤
-│ Model weights │ 136.4 MiB  (memory-mapped) │
-│ Compute       │                    0.9 MiB │
-│ KV-cache      │        1.1 MiB  (25 slots) │
-│ Total         │                  138.4 MiB │
-╰───────────────┴────────────────────────────╯
 ```
 
-## Results — Llama 3.2 1B (2026-03-05)
+### Llama 3.2 1B — Step 10 Optimization (2026-03-05)
 
-Larger model to exercise SIMD kernel optimizations at production dimensions (K=2048, FFN K=8192).
-
-- **Model**: `bartowski/Llama-3.2-1B-Instruct-GGUF` / Q8_0 (1252 MiB)
 - **Hardware**: AMD Ryzen 7 5800HS, 16 GB DDR4, Windows 11, CPU-only
 
-### llama.cpp (b5291)
+#### Llama 3.2 1B — before Step 10 (row-by-row AVX2 + scalar quantize)
 
 ```
-common_perf_print:        load time =    4662.65 ms
-common_perf_print: prompt eval time =    1786.38 ms /    15 tokens (  119.09 ms per token,     8.40 tokens per second)
-common_perf_print:        eval time =     104.47 ms /     2 runs   (   52.23 ms per token,    19.14 tokens per second)
-common_perf_print:       total time =   11727.30 ms /    17 tokens
-```
-
-### dotLLM — before Step 10 (row-by-row AVX2 + scalar quantize)
-
-```
-                    Performance Summary
 ╭─────────────┬────────────┬────────┬──────────┬──────────╮
 │ Phase       │       Time │ Tokens │ ms/token │ tokens/s │
 ├─────────────┼────────────┼────────┼──────────┼──────────┤
 │ Load        │  553.66 ms │      — │        — │        — │
 │ Prompt eval │ 1392.68 ms │      5 │   278.54 │     3.59 │
 │ Eval        │ 3249.81 ms │     19 │   171.04 │     5.85 │
-│ Sampling    │   14.49 ms │     20 │     0.72 │        — │
 │ Total       │ 4661.93 ms │     25 │        — │     5.36 │
 ╰─────────────┴────────────┴────────┴──────────┴──────────╯
 ```
 
-### dotLLM — after Step 10 (4-row AVX2 + FMA + SIMD quantize)
+#### Llama 3.2 1B — after Step 10 (4-row AVX2 + FMA + SIMD quantize)
 
 ```
-                    Performance Summary
 ╭─────────────┬────────────┬────────┬──────────┬──────────╮
 │ Phase       │       Time │ Tokens │ ms/token │ tokens/s │
 ├─────────────┼────────────┼────────┼──────────┼──────────┤
 │ Load        │  530.43 ms │      — │        — │        — │
 │ Prompt eval │ 3387.24 ms │      5 │   677.45 │     1.48 │
 │ Eval        │ 2713.50 ms │     19 │   142.82 │     7.00 │
-│ Sampling    │   15.37 ms │     20 │     0.77 │        — │
 │ Total       │ 6120.07 ms │     25 │        — │     4.08 │
 ╰─────────────┴────────────┴────────┴──────────┴──────────╯
 ```
-
-### Llama 3.2 1B — Analysis
 
 | Metric | Before Step 10 | After Step 10 | Change |
 |--------|---------------|---------------|--------|
 | Eval per token | 171.04 ms | 142.82 ms | **1.20× faster** |
 | Eval tokens/s | 5.85 | 7.00 | **+20%** |
-| Prompt eval per token | 278.54 ms | 677.45 ms | 2.4× slower |
 
-**Eval (decode)** improved by **1.20×** — the FMA accumulation and 4-row batching are effective at K=2048/8192. The gap to llama.cpp (52 ms/token, multi-threaded) narrows from ~3.3× to ~2.7×.
-
-**Prompt eval regression**: The first 5 tokens are slower after the change. This is likely JIT warmup — the new dispatch paths (AVX-512 checks, 4-row branching, SIMD quantize) require more JIT compilation on the first calls. Once the JIT stabilizes, eval tokens are consistently faster. Batched GEMM (Step 11) will address prompt eval performance properly.
-
-## Analysis
-
-### SmolLM-135M — dotLLM vs llama.cpp
-
-| Metric | llama.cpp | dotLLM | Ratio |
-|--------|-----------|--------|-------|
-| Load time | 228 ms | 207 ms | 0.91× (dotLLM faster) |
-| Prompt eval (5 tokens) | 11.3 ms | 300 ms | ~27× slower |
-| Eval per token | 8.3 ms | 24.4 ms | ~3× slower |
-| Total tokens/s | ~282 | 31.9 | ~9× slower |
-
-**Load time** is comparable — both memory-map the GGUF file. dotLLM is slightly faster.
-
-**Eval per token** (24.4 ms) is now within **3× of llama.cpp** thanks to KV-cache and Release-mode JIT with Dynamic PGO. The remaining gap is thread parallelism (llama.cpp uses all cores, dotLLM is single-threaded).
-
-**Prompt eval** is the main bottleneck (~27× slower). This is expected — dotLLM processes prompt tokens one at a time (GEMV), while llama.cpp batches them into a single GEMM call and parallelizes across cores.
-
-### Roadmap to Parity
-
-| Optimization | Expected impact | Roadmap step |
-|-------------|----------------|--------------|
-| ~~SIMD-tuned Q8_0 kernels~~ | ~~~2-4× kernel speedup~~ | ~~Phase 2, Step 10~~ :white_check_mark: **1.2× eval on Llama 1B, up to 1.9× on micro-benchmarks** |
-| Batched GEMM for prefill | ~5-10× prefill speedup | Phase 2, Step 11 |
-| Multi-threaded inference | ~4-8× on multi-core | Phase 2, Step 22 |
-| CUDA GPU backend | 10-50× prefill, 3-10× decode | Phase 3, Step 29 |
+</details>

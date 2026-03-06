@@ -67,9 +67,9 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
         public int? Seed { get; set; }
 
         [CommandOption("--threads")]
-        [Description("Number of CPU threads for inference. 1 = single-threaded (default), 0 = auto (all cores).")]
-        [DefaultValue(1)]
-        public int Threads { get; set; } = 1;
+        [Description("Number of CPU threads for inference. 0 = auto/all cores (default), 1 = single-threaded.")]
+        [DefaultValue(0)]
+        public int Threads { get; set; }
     }
 
     public override int Execute(CommandContext context, Settings settings)
@@ -122,7 +122,8 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             RepetitionPenalty = settings.RepeatPenalty,
             RepetitionPenaltyWindow = settings.RepeatLastN,
             MaxTokens = settings.MaxTokens,
-            Seed = settings.Seed
+            Seed = settings.Seed,
+            Threading = new ThreadingConfig(settings.Threads)
         };
 
         if (settings.Temperature > 0)

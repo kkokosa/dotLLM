@@ -53,6 +53,6 @@ public record InferenceOptions
     /// </summary>
     public IReadOnlyList<IStopCondition>? StopConditions { get; init; }
 
-    /// <summary>CPU threading configuration for parallel inference.</summary>
-    public ThreadingConfig Threading { get; init; } = ThreadingConfig.SingleThreaded;
+    /// <summary>CPU threading configuration for parallel inference. Default: auto (all cores).</summary>
+    public ThreadingConfig Threading { get; init; } = ThreadingConfig.Auto;
 }
