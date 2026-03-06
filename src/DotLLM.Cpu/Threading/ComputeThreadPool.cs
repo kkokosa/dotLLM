@@ -128,9 +128,18 @@ public sealed unsafe class ComputeThreadPool : IDisposable
 
             _workReady[arrayIdx].Reset();
 
-            _workFn(_context, threadIdx, _threadCount);
-
-            _completion.Signal();
+            try
+            {
+                _workFn(_context, threadIdx, _threadCount);
+            }
+            catch (Exception ex)
+            {
+                Environment.FailFast($"dotLLM compute worker {threadIdx} crashed", ex);
+            }
+            finally
+            {
+                _completion.Signal();
+            }
         }
     }
 
