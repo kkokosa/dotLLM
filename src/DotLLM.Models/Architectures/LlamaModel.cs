@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Attention;
@@ -299,12 +301,49 @@ public sealed unsafe class LlamaModel : IModel
     {
         if (qt == QuantizationType.Q8_0)
             MatMul.GemvQ8_0((byte*)weights, x, y, m, k, _threadPool);
+        else if (qt == QuantizationType.Q5_0)
+            MatMul.GemvQ5_0((byte*)weights, x, y, m, k, _threadPool);
+        // K-quant types use dequant fallback until Q8_K input quantization is implemented.
+        // llama.cpp uses Q8_K (float32 scale, 256-element blocks) for K-quant vec_dot,
+        // but our fused kernels use Q8_0 (float16 scale, 32-element blocks).
+        // The float16 scale precision loss accumulates across 30 layers and causes gibberish.
+        //else if (qt == QuantizationType.Q4_K)
+        //    MatMul.GemvQ4_K((byte*)weights, x, y, m, k, _threadPool);
+        //else if (qt == QuantizationType.Q5_K)
+        //    MatMul.GemvQ5_K((byte*)weights, x, y, m, k, _threadPool);
+        //else if (qt == QuantizationType.Q6_K)
+        //    MatMul.GemvQ6_K((byte*)weights, x, y, m, k, _threadPool);
         else if (qt == QuantizationType.F32)
             MatMul.GemvF32((float*)weights, x, y, m, k, _threadPool);
         else if (qt == QuantizationType.F16)
             MatMul.GemvF16(weights, x, y, m, k, _threadPool);
         else
-            throw new NotSupportedException($"Unsupported quantization type for GEMV: {qt}");
+            GemvDequantFallback(weights, qt, x, y, m, k);
+    }
+
+    /// <summary>
+    /// Fallback GEMV for quant types without dedicated vec_dot kernels.
+    /// Dequantizes one weight row at a time and computes float dot product.
+    /// Correct but slower than fused kernels.
+    /// </summary>
+    private static void GemvDequantFallback(nint weights, QuantizationType qt, float* x, float* y, int m, int k)
+    {
+        long rowBytes = Dequantize.RowByteSize(k, qt);
+        float[] rowBuf = ArrayPool<float>.Shared.Rent(k);
+        try
+        {
+            var rowSpan = rowBuf.AsSpan(0, k);
+            var xSpan = new ReadOnlySpan<float>(x, k);
+            for (int i = 0; i < m; i++)
+            {
+                Dequantize.ToFloat32(weights + i * (nint)rowBytes, k, qt, rowSpan);
+                y[i] = TensorPrimitives.Dot(new ReadOnlySpan<float>(rowBuf, 0, k), xSpan);
+            }
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(rowBuf);
+        }
     }
 
     /// <summary>
@@ -317,12 +356,37 @@ public sealed unsafe class LlamaModel : IModel
     {
         if (qt == QuantizationType.Q8_0)
             MatMul.GemmQ8_0((byte*)weights, b, c, m, k, n, _threadPool, preQuantizedInput);
+        else if (qt == QuantizationType.Q5_0)
+            MatMul.GemmQ5_0((byte*)weights, b, c, m, k, n, _threadPool, preQuantizedInput);
+        // K-quant types use dequant fallback until Q8_K input quantization is implemented.
+        // llama.cpp uses Q8_K (float32 scale, 256-element blocks) for K-quant vec_dot,
+        // but our fused kernels use Q8_0 (float16 scale, 32-element blocks).
+        // The float16 scale precision loss accumulates across 30 layers and causes gibberish.
+        //else if (qt == QuantizationType.Q4_K)
+        //    MatMul.GemmQ4_K((byte*)weights, b, c, m, k, n, _threadPool, preQuantizedInput);
+        //else if (qt == QuantizationType.Q5_K)
+        //    MatMul.GemmQ5_K((byte*)weights, b, c, m, k, n, _threadPool, preQuantizedInput);
+        //else if (qt == QuantizationType.Q6_K)
+        //    MatMul.GemmQ6_K((byte*)weights, b, c, m, k, n, _threadPool, preQuantizedInput);
         else if (qt == QuantizationType.F32)
             MatMul.GemmF32((float*)weights, b, c, m, k, n, _threadPool);
         else if (qt == QuantizationType.F16)
             MatMul.GemmF16(weights, b, c, m, k, n, _threadPool);
         else
-            throw new NotSupportedException($"Unsupported quantization type for GEMM: {qt}");
+            GemmDequantFallback(weights, qt, b, c, m, k, n);
+    }
+
+    /// <summary>
+    /// Fallback GEMM for quant types without dedicated vec_dot kernels.
+    /// Iterates per input row, calling <see cref="GemvDequantFallback"/> for each.
+    /// </summary>
+    private static void GemmDequantFallback(nint weights, QuantizationType qt, float* b, float* c,
+                                            int m, int k, int n)
+    {
+        for (int t = 0; t < n; t++)
+        {
+            GemvDequantFallback(weights, qt, b + t * k, c + t * m, m, k);
+        }
     }
 
     /// <summary>
@@ -333,7 +397,13 @@ public sealed unsafe class LlamaModel : IModel
     private static byte* QuantizeInput(float* input, byte* scratch, int dim, int seqLen,
                                        QuantizationType qt)
     {
-        if (qt != QuantizationType.Q8_0 || seqLen <= 1)
+        bool isQuantized = qt == QuantizationType.Q8_0
+                          || qt == QuantizationType.Q5_0
+                          || qt == QuantizationType.Q4_K
+                          || qt == QuantizationType.Q5_K
+                          || qt == QuantizationType.Q6_K;
+
+        if (!isQuantized || seqLen <= 1)
             return null;
 
         int blockCount = dim / 32; // Q8_0GroupSize
@@ -384,7 +454,11 @@ public sealed unsafe class LlamaModel : IModel
             }
             else
             {
-                throw new NotSupportedException($"Unsupported embedding quantization type: {qt}");
+                // Generic dequant fallback for any supported quant type (Q4_K, Q5_K, Q6_K, Q5_0, etc.)
+                long rowBytes = Dequantize.RowByteSize(hiddenSize, qt);
+                long rowOffset = (long)tokenId * rowBytes;
+                nint rowPtr = embPtr + (nint)rowOffset;
+                Dequantize.ToFloat32(rowPtr, hiddenSize, qt, destSpan);
             }
         }
     }

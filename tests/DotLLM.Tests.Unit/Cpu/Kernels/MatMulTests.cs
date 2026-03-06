@@ -992,15 +992,6 @@ public sealed unsafe class MatMulTests
         });
     }
 
-    // ──────────────────── Q4_K stub ────────────────────
-
-    [Fact]
-    public void VecDotQ4_K_Q8_0Scalar_ThrowsNotImplemented()
-    {
-        Assert.Throws<NotImplementedException>(() =>
-            MatMul.VecDotQ4_K_Q8_0Scalar(null, null, 1));
-    }
-
     // ──────────────────── Helpers ────────────────────
 
     private static nint AllocQ8_0Block(Half scale, Func<int, sbyte> fillQs)

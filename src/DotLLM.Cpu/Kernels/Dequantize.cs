@@ -12,13 +12,36 @@ namespace DotLLM.Cpu.Kernels;
 /// Supports FP16, Q8_0, and F32 (passthrough). Used at model-load time to convert
 /// memory-mapped GGUF tensor data into compute-ready float buffers.
 /// </summary>
-public static unsafe class Dequantize
+public static unsafe partial class Dequantize
 {
     /// <summary>Q8_0 block size in bytes: 2 (Half scale) + 32 (sbyte quantized values).</summary>
     private const int Q8_0BlockBytes = 34;
 
     /// <summary>Number of elements per Q8_0 block.</summary>
     private const int Q8_0GroupSize = 32;
+
+    /// <summary>Q5_0 block size in bytes: 2 (Half d) + 4 (qh) + 16 (qs) = 22.</summary>
+    private const int Q5_0BlockBytes = 22;
+
+    /// <summary>Number of elements per Q5_0 block.</summary>
+    private const int Q5_0GroupSize = 32;
+
+    /// <summary>
+    /// Returns the byte size of one row of <paramref name="elementCount"/> elements in the given quantization format.
+    /// Useful for computing row strides when iterating weight matrices.
+    /// </summary>
+    public static long RowByteSize(long elementCount, QuantizationType quantType) => quantType switch
+    {
+        QuantizationType.F32 => elementCount * 4,
+        QuantizationType.F16 => elementCount * 2,
+        QuantizationType.Q8_0 => elementCount / Q8_0GroupSize * Q8_0BlockBytes,
+        QuantizationType.Q5_0 => elementCount / Q5_0GroupSize * Q5_0BlockBytes,
+        QuantizationType.Q4_K => elementCount / KQuantGroupSize * Q4_K_BlockBytes,
+        QuantizationType.Q5_K => elementCount / KQuantGroupSize * Q5_K_BlockBytes,
+        QuantizationType.Q6_K => elementCount / KQuantGroupSize * Q6_K_BlockBytes,
+        _ => throw new ArgumentOutOfRangeException(nameof(quantType), quantType,
+            $"Unknown quantization type: {quantType}")
+    };
 
     /// <summary>
     /// Converts quantized tensor data at <paramref name="src"/> to float32 in <paramref name="dest"/>.
@@ -45,6 +68,18 @@ public static unsafe class Dequantize
                 break;
             case QuantizationType.Q8_0:
                 DequantizeQ8_0(src, elementCount, dest);
+                break;
+            case QuantizationType.Q5_0:
+                DequantizeQ5_0(src, elementCount, dest);
+                break;
+            case QuantizationType.Q4_K:
+                DequantizeQ4_K(src, elementCount, dest);
+                break;
+            case QuantizationType.Q5_K:
+                DequantizeQ5_K(src, elementCount, dest);
+                break;
+            case QuantizationType.Q6_K:
+                DequantizeQ6_K(src, elementCount, dest);
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(quantType), quantType,
@@ -109,6 +144,59 @@ public static unsafe class Dequantize
             blockBase += Q8_0BlockBytes;
         }
     }
+
+    // ──────────────────── Q5_0 ────────────────────
+
+    [SkipLocalsInit]
+    private static void DequantizeQ5_0(nint src, long elementCount, Span<float> dest)
+    {
+        if (elementCount % Q5_0GroupSize != 0)
+            throw new ArgumentException(
+                $"Q5_0 element count must be a multiple of {Q5_0GroupSize}, got {elementCount}",
+                nameof(elementCount));
+
+        DequantizeQ5_0Scalar(src, elementCount, dest);
+    }
+
+    /// <summary>
+    /// Scalar Q5_0 dequantization. Block layout (22 bytes, 32 elements):
+    /// <c>d(Half@0), qh[4]@2, qs[16]@6</c>.
+    /// Formula: <c>value = d * (((qh_bit &lt;&lt; 4) | lo_nibble) - 16)</c>.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void DequantizeQ5_0Scalar(nint src, long elementCount, Span<float> dest)
+    {
+        long blockCount = elementCount / Q5_0GroupSize;
+        byte* blockBase = (byte*)src;
+        int outIdx = 0;
+
+        for (long b = 0; b < blockCount; b++)
+        {
+            float d = (float)Unsafe.ReadUnaligned<Half>(blockBase);
+            uint qh = Unsafe.ReadUnaligned<uint>(blockBase + 2);
+            byte* qs = blockBase + 6;
+
+            for (int j = 0; j < 16; j++)
+            {
+                byte qsByte = qs[j];
+                int lo = qsByte & 0xF;
+                int hi = (qsByte >> 4) & 0xF;
+
+                int bit5Lo = (int)((qh >> j) & 1);
+                int bit5Hi = (int)((qh >> (j + 16)) & 1);
+
+                // Low nibbles → elements 0..15, high nibbles → elements 16..31
+                // (matches ggml's dequantize_row_q5_0 output ordering)
+                dest[outIdx + j] = d * ((lo | (bit5Lo << 4)) - 16);
+                dest[outIdx + j + 16] = d * ((hi | (bit5Hi << 4)) - 16);
+            }
+
+            outIdx += Q5_0GroupSize;
+            blockBase += Q5_0BlockBytes;
+        }
+    }
+
+    // ──────────────────── Q8_0 AVX2 ────────────────────
 
     /// <summary>
     /// AVX2-accelerated Q8_0 dequantization. Processes one 32-element block per iteration
