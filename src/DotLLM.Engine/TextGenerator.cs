@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Sampling;
@@ -35,8 +36,10 @@ public sealed class TextGenerator
     /// </summary>
     /// <param name="prompt">Input text prompt.</param>
     /// <param name="options">Inference options controlling sampling and stopping. Null uses defaults.</param>
-    /// <returns>The inference response with generated text and metadata.</returns>
-    public InferenceResponse Generate(string prompt, InferenceOptions? options = null)
+    /// <param name="onTokenGenerated">Optional callback invoked after each token is generated, receiving the token ID.</param>
+    /// <returns>The inference response with generated text, metadata, and timings.</returns>
+    public InferenceResponse Generate(string prompt, InferenceOptions? options = null,
+        Action<int>? onTokenGenerated = null)
     {
         options ??= new InferenceOptions();
 
@@ -96,6 +99,9 @@ public sealed class TextGenerator
 
         var generatedIds = new List<int>();
         var finishReason = FinishReason.Length;
+        long prefillTicks = 0;
+        long decodeTicks = 0;
+        long samplerTicks = 0;
 
         // Prefill: run full prompt through the model
         int[] positions = new int[promptLen];
@@ -103,12 +109,18 @@ public sealed class TextGenerator
             positions[i] = i;
 
         int firstTokenId;
+        long ts0 = Stopwatch.GetTimestamp();
         using (ITensor prefillLogits = _model.Forward(promptIds, positions, deviceId: -1, kvCache))
         {
+            long ts1 = Stopwatch.GetTimestamp();
+            prefillTicks = ts1 - ts0;
+
             unsafe
             {
+                long samplerStart = Stopwatch.GetTimestamp();
                 var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
                 firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
             }
         }
 
@@ -121,10 +133,15 @@ public sealed class TextGenerator
         {
             if (stopResult == StopResult.Stop)
                 generatedIds.RemoveAt(generatedIds.Count - 1);
+            else
+                onTokenGenerated?.Invoke(firstTokenId);
 
             finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
-            return BuildResponse(promptLen, generatedIds, finishReason);
+            return BuildResponse(promptLen, generatedIds, finishReason,
+                prefillTicks, decodeTicks, samplerTicks);
         }
+
+        onTokenGenerated?.Invoke(firstTokenId);
 
         // Decode loop: one token at a time
         for (int step = 1; step < maxTokens; step++)
@@ -135,12 +152,18 @@ public sealed class TextGenerator
 
             int lastToken = generatedIds[^1];
             int nextTokenId;
+
+            long fwdStart = Stopwatch.GetTimestamp();
             using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
             {
+                decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
+
                 unsafe
                 {
+                    long samplerStart = Stopwatch.GetTimestamp();
                     var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
                     nextTokenId = pipeline.Sample(logitSpan, generatedIds);
+                    samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                 }
             }
 
@@ -152,13 +175,18 @@ public sealed class TextGenerator
             {
                 if (stopResult == StopResult.Stop)
                     generatedIds.RemoveAt(generatedIds.Count - 1);
+                else
+                    onTokenGenerated?.Invoke(nextTokenId);
 
                 finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
                 break;
             }
+
+            onTokenGenerated?.Invoke(nextTokenId);
         }
 
-        return BuildResponse(promptLen, generatedIds, finishReason);
+        return BuildResponse(promptLen, generatedIds, finishReason,
+            prefillTicks, decodeTicks, samplerTicks);
     }
 
     private static StopResult CheckStopConditions(
@@ -174,11 +202,15 @@ public sealed class TextGenerator
         return StopResult.Continue;
     }
 
-    private InferenceResponse BuildResponse(int promptLen, List<int> generatedIds, FinishReason finishReason)
+    private InferenceResponse BuildResponse(int promptLen, List<int> generatedIds,
+        FinishReason finishReason, long prefillTicks, long decodeTicks, long samplerTicks)
     {
         string text = generatedIds.Count > 0
             ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds))
             : string.Empty;
+
+        double tickFreq = Stopwatch.Frequency;
+        int decodeSteps = generatedIds.Count > 1 ? generatedIds.Count - 1 : 0;
 
         return new InferenceResponse
         {
@@ -186,7 +218,15 @@ public sealed class TextGenerator
             Text = text,
             FinishReason = finishReason,
             PromptTokenCount = promptLen,
-            GeneratedTokenCount = generatedIds.Count
+            GeneratedTokenCount = generatedIds.Count,
+            Timings = new InferenceTimings
+            {
+                PrefillTimeMs = prefillTicks / tickFreq * 1000.0,
+                DecodeTimeMs = decodeTicks / tickFreq * 1000.0,
+                SamplingTimeMs = samplerTicks / tickFreq * 1000.0,
+                PrefillTokenCount = promptLen,
+                DecodeTokenCount = decodeSteps
+            }
         };
     }
 }

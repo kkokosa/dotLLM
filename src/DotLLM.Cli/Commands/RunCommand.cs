@@ -3,8 +3,7 @@ using System.Diagnostics;
 using DotLLM.Cli.Helpers;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
-using DotLLM.Engine.KvCache;
-using DotLLM.Engine.Samplers;
+using DotLLM.Engine;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using Spectre.Console;
@@ -13,7 +12,7 @@ using Spectre.Console.Cli;
 namespace DotLLM.Cli.Commands;
 
 /// <summary>
-/// Runs text generation on a GGUF model: load → encode prompt → decode loop → stream tokens.
+/// Runs text generation on a GGUF model: load → encode prompt → stream tokens via TextGenerator.
 /// Supports greedy (default) and sampled decoding via composable sampling pipeline.
 /// </summary>
 internal sealed class RunCommand : Command<RunCommand.Settings>
@@ -104,16 +103,16 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
                 ctx.Status("Loading tokenizer...");
                 tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
-                var threading = new DotLLM.Core.Configuration.ThreadingConfig(settings.Threads);
+                var threading = new ThreadingConfig(settings.Threads);
                 ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden, {threading.EffectiveThreadCount} threads)...");
                 model = LlamaModel.LoadFromGguf(gguf, config, threading);
             });
         loadSw.Stop();
 
-        var threadingInfo = new DotLLM.Core.Configuration.ThreadingConfig(settings.Threads);
+        var threadingInfo = new ThreadingConfig(settings.Threads);
         AnsiConsole.MarkupLine($"[grey]Model: {config.Architecture}, {config.NumLayers} layers, {config.HiddenSize} hidden, {config.VocabSize:N0} vocab, {threadingInfo.EffectiveThreadCount} thread(s)[/]");
 
-        // Build sampling pipeline from CLI options
+        // Build inference options from CLI flags
         var inferenceOptions = new InferenceOptions
         {
             Temperature = settings.Temperature,
@@ -125,7 +124,6 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             MaxTokens = settings.MaxTokens,
             Seed = settings.Seed
         };
-        var pipeline = new SamplerPipeline(inferenceOptions);
 
         if (settings.Temperature > 0)
         {
@@ -146,98 +144,29 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
 
         try
         {
-            // Encode prompt
-            int[] promptTokens = tokenizer.Encode(settings.Prompt);
-            int promptLen = promptTokens.Length;
-
-            // Pre-allocate positions array and KV-cache (capped at model's max sequence length)
-            int cacheSize = Math.Min(promptLen + settings.MaxTokens, config.MaxSequenceLength);
-            int[] positions = new int[cacheSize];
-            for (int i = 0; i < cacheSize; i++)
-                positions[i] = i;
-
-            using var kvCache = new SimpleKvCache(
-                config.NumLayers, config.NumKvHeads, config.HeadDim, cacheSize);
-
             // Print prompt echo
             Console.Write(settings.Prompt);
 
+            var generator = new TextGenerator(model, tokenizer);
             var totalSw = Stopwatch.StartNew();
-            long promptEvalTicks = 0;
-            long evalTicks = 0;
-            long samplerTicks = 0;
-            int generated = 0;
-            int vocabSize = config.VocabSize;
 
-            // Prefill: process all prompt tokens at once
-            long fwdStart = Stopwatch.GetTimestamp();
-            using var prefillLogits = model.Forward(
-                promptTokens, positions.AsSpan(0, promptLen), -1, kvCache);
-            long fwdEnd = Stopwatch.GetTimestamp();
-            promptEvalTicks = fwdEnd - fwdStart;
-
-            // Generate tokens only when max-tokens > 0
-            if (settings.MaxTokens > 0)
-            {
-                var generatedTokens = new List<int>();
-
-                // First generated token from prefill logits
-                int lastToken;
-                unsafe
-                {
-                    long samplerStart = Stopwatch.GetTimestamp();
-                    var logitSpan = new Span<float>((float*)prefillLogits.DataPointer, vocabSize);
-                    lastToken = pipeline.Sample(logitSpan, generatedTokens);
-                    samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
-                }
-
-                if (lastToken != tokenizer.EosTokenId)
-                {
-                    generated++;
-                    generatedTokens.Add(lastToken);
-                    Console.Write(tokenizer.DecodeToken(lastToken));
-
-                    // Decode loop: single token per step
-                    for (int step = 1; step < settings.MaxTokens; step++)
-                    {
-                        int pos = promptLen + step - 1;
-                        fwdStart = Stopwatch.GetTimestamp();
-                        using var logitsTensor = model.Forward(
-                            [lastToken], positions.AsSpan(pos, 1), -1, kvCache);
-                        fwdEnd = Stopwatch.GetTimestamp();
-                        evalTicks += fwdEnd - fwdStart;
-
-                        unsafe
-                        {
-                            long samplerStart = Stopwatch.GetTimestamp();
-                            var logitSpan = new Span<float>((float*)logitsTensor.DataPointer, vocabSize);
-                            lastToken = pipeline.Sample(logitSpan, generatedTokens);
-                            samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
-                        }
-
-                        if (lastToken == tokenizer.EosTokenId)
-                            break;
-
-                        generated++;
-                        generatedTokens.Add(lastToken);
-                        Console.Write(tokenizer.DecodeToken(lastToken));
-                    }
-                }
-            }
+            var response = generator.Generate(settings.Prompt, inferenceOptions,
+                onTokenGenerated: tokenId => Console.Write(tokenizer.DecodeToken(tokenId)));
 
             totalSw.Stop();
             Console.WriteLine();
             AnsiConsole.WriteLine();
 
-            // Convert ticks to milliseconds
-            double tickFreq = Stopwatch.Frequency;
+            // Read timings from engine response
+            var timings = response.Timings;
             double loadMs = loadSw.Elapsed.TotalMilliseconds;
-            double promptEvalMs = promptEvalTicks / tickFreq * 1000.0;
-            double evalMs = evalTicks / tickFreq * 1000.0;
-            double samplerMs = samplerTicks / tickFreq * 1000.0;
+            double promptEvalMs = timings.PrefillTimeMs;
+            double evalMs = timings.DecodeTimeMs;
+            double samplerMs = timings.SamplingTimeMs;
             double totalMs = totalSw.Elapsed.TotalMilliseconds;
-
-            int evalSteps = generated > 0 ? generated - 1 : 0; // first generated token comes from prompt eval step
+            int promptLen = timings.PrefillTokenCount;
+            int generated = response.GeneratedTokenCount;
+            int evalSteps = timings.DecodeTokenCount;
 
             // Performance summary table
             var perfTable = new Table()
@@ -331,7 +260,10 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             long fileSize = new FileInfo(resolvedPath).Length;
             long modelWeightsBytes = fileSize - gguf.DataSectionOffset;
             long computeBytes = model.ComputeMemoryBytes;
-            long kvCacheBytes = kvCache.AllocatedBytes;
+
+            int cacheSize = Math.Min(promptLen + settings.MaxTokens, config.MaxSequenceLength);
+            long kvCacheBytes = (long)config.NumLayers * 2 * cacheSize
+                * config.NumKvHeads * config.HeadDim * sizeof(float);
             long totalMemory = modelWeightsBytes + computeBytes + kvCacheBytes;
 
             var memTable = new Table()

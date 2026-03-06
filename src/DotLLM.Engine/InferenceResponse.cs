@@ -19,4 +19,7 @@ public record InferenceResponse
 
     /// <summary>Number of tokens generated.</summary>
     public int GeneratedTokenCount { get; init; }
+
+    /// <summary>Timing measurements from the inference run.</summary>
+    public InferenceTimings Timings { get; init; }
 }

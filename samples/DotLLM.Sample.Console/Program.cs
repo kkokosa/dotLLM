@@ -55,4 +55,9 @@ Console.WriteLine(response.Text);
 Console.WriteLine();
 Console.WriteLine($"[Prompt tokens: {response.PromptTokenCount}, Generated: {response.GeneratedTokenCount}, Finish: {response.FinishReason}]");
 
+var t = response.Timings;
+Console.WriteLine($"[Prefill: {t.PrefillTimeMs:F1} ms ({t.PrefillTokensPerSec:F1} tok/s), " +
+    $"Decode: {t.DecodeTimeMs:F1} ms ({t.DecodeTokensPerSec:F1} tok/s), " +
+    $"Sampling: {t.SamplingTimeMs:F1} ms]");
+
 return 0;

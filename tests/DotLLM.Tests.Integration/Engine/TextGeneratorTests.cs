@@ -118,4 +118,64 @@ public class TextGeneratorTests
             response.FinishReason == FinishReason.Stop || response.FinishReason == FinishReason.Length,
             $"Expected Stop or Length, got {response.FinishReason}.");
     }
+
+    [Fact]
+    public void Timings_ArePopulatedAfterGeneration()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        var generator = new TextGenerator(model, tokenizer);
+        var options = new InferenceOptions { Temperature = 0f, MaxTokens = 10 };
+
+        var response = generator.Generate("The capital of France is", options);
+        var timings = response.Timings;
+
+        // Prefill timing should be positive
+        Assert.True(timings.PrefillTimeMs > 0,
+            $"PrefillTimeMs should be > 0, got {timings.PrefillTimeMs}");
+
+        // PrefillTokenCount should match prompt length
+        Assert.Equal(response.PromptTokenCount, timings.PrefillTokenCount);
+
+        // With multiple generated tokens, decode time should be positive
+        if (response.GeneratedTokenCount > 1)
+        {
+            Assert.True(timings.DecodeTimeMs > 0,
+                $"DecodeTimeMs should be > 0 when multiple tokens generated, got {timings.DecodeTimeMs}");
+            Assert.Equal(response.GeneratedTokenCount - 1, timings.DecodeTokenCount);
+        }
+
+        // Sampling time should be positive when tokens were generated
+        if (response.GeneratedTokenCount > 0)
+        {
+            Assert.True(timings.SamplingTimeMs > 0,
+                $"SamplingTimeMs should be > 0, got {timings.SamplingTimeMs}");
+        }
+
+        // Derived tok/s should be positive
+        Assert.True(timings.PrefillTokensPerSec > 0);
+        if (timings.DecodeTokenCount > 0)
+            Assert.True(timings.DecodeTokensPerSec > 0);
+    }
+
+    [Fact]
+    public void OnTokenGenerated_CallbackIsInvoked()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        var generator = new TextGenerator(model, tokenizer);
+        var options = new InferenceOptions { Temperature = 0f, MaxTokens = 5 };
+        var callbackTokens = new List<int>();
+
+        var response = generator.Generate("Hello", options,
+            onTokenGenerated: tokenId => callbackTokens.Add(tokenId));
+
+        // Callback should have been invoked for each generated token
+        Assert.Equal(response.GeneratedTokenCount, callbackTokens.Count);
+        Assert.Equal(response.GeneratedTokenIds, callbackTokens.ToArray());
+    }
 }
