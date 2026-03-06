@@ -157,5 +157,5 @@ common_perf_print:       total time =   11727.30 ms /    17 tokens
 |-------------|----------------|--------------|
 | ~~SIMD-tuned Q8_0 kernels~~ | ~~~2-4× kernel speedup~~ | ~~Phase 2, Step 10~~ :white_check_mark: **1.2× eval on Llama 1B, up to 1.9× on micro-benchmarks** |
 | Batched GEMM for prefill | ~5-10× prefill speedup | Phase 2, Step 11 |
-| Multi-threaded inference | ~4-8× on multi-core | Phase 2, Step 20 |
-| CUDA GPU backend | 10-50× prefill, 3-10× decode | Phase 3, Step 21 |
+| Multi-threaded inference | ~4-8× on multi-core | Phase 2, Step 22 |
+| CUDA GPU backend | 10-50× prefill, 3-10× decode | Phase 3, Step 29 |
