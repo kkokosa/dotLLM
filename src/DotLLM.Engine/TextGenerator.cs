@@ -97,7 +97,7 @@ public sealed class TextGenerator
             _model.Config.HeadDim,
             cacheSize);
 
-        var generatedIds = new List<int>();
+        var generatedIds = new List<int>(maxTokens);
         var finishReason = FinishReason.Length;
         long prefillTicks = 0;
         long decodeTicks = 0;
