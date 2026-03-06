@@ -87,6 +87,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 
 ## News
 
+- **2026-03** — BDN inference benchmarks: end-to-end benchmarks with custom tok/s columns, auto model download, llama.cpp comparison script ([#42](https://github.com/kkokosa/dotLLM/issues/42))
 - **2026-03** — Engine inference timings: `InferenceTimings` on `InferenceResponse`, `onTokenGenerated` callback, CLI refactored to use `TextGenerator` ([#41](https://github.com/kkokosa/dotLLM/issues/41))
 - **2026-03** — Multi-threaded CPU inference: zero-alloc `ComputeThreadPool` with `delegate*` dispatch, parallel GEMV/GEMM and head-parallel attention ([#36](https://github.com/kkokosa/dotLLM/issues/36))
 - **2026-03** — SIMD kernel tuning: FMA float accumulation, 4-row batched GEMV, AVX-512 paths, SIMD quantization ([#26](https://github.com/kkokosa/dotLLM/issues/26))
@@ -100,7 +101,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 | Phase | Description | Status |
 |-------|-------------|--------|
 | **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | Done (9/9) |
-| **2 — Practical Local Inference** | Engine metrics, inference benchmarks, Q4_K_M, chat templates, streaming, hooks, logit lens, more architectures | In Progress (4/13) |
+| **2 — Practical Local Inference** | Engine metrics, inference benchmarks, Q4_K_M, chat templates, streaming, hooks, logit lens, more architectures | In Progress (5/13) |
 | **2B — CPU Performance** | Weight repacking, outer-product GEMM, tiled attention, fast exp, operator fusion, NUMA | Planned (0/6) |
 | **3 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Planned |
 | **4 — Production Serving** | OpenAI API, continuous batching, paged KV-cache, structured output, tool calling | Planned |

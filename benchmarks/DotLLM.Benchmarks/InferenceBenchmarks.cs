@@ -41,6 +41,7 @@ public class InferenceBenchmarks
     [ParamsAllValues]
     public BenchmarkModel Model { get; set; }
 
+    private GgufFile _gguf = null!;
     private LlamaModel _model = null!;
     private BpeTokenizer _tokenizer = null!;
     private TextGenerator _generator = null!;
@@ -55,14 +56,11 @@ public class InferenceBenchmarks
     private string _metricsKey = null!;
 
     // Accumulate timings across BDN iterations for median computation.
-    // Static because BDN runs benchmark methods many times on the same instance.
-    private static readonly List<InferenceTimings> s_timings = new();
+    private readonly List<InferenceTimings> _timings = new();
 
     [GlobalSetup]
     public void Setup()
     {
-        s_timings.Clear();
-
         var envModelPath = Environment.GetEnvironmentVariable("DOTLLM_BENCH_MODEL_PATH");
         if (!string.IsNullOrEmpty(envModelPath) && File.Exists(envModelPath))
         {
@@ -92,10 +90,10 @@ public class InferenceBenchmarks
         var promptPreview = _prompt.Length > 60 ? _prompt[..60] + "..." : _prompt;
         Console.WriteLine($"Prompt: \"{promptPreview}\", MaxTokens: {_maxTokens}");
 
-        var gguf = GgufFile.Open(_modelPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        _model = LlamaModel.LoadFromGguf(gguf, config, ThreadingConfig.Auto);
-        _tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+        _gguf = GgufFile.Open(_modelPath);
+        var config = GgufModelConfigExtractor.Extract(_gguf.Metadata);
+        _model = LlamaModel.LoadFromGguf(_gguf, config, ThreadingConfig.Auto);
+        _tokenizer = GgufBpeTokenizerFactory.Load(_gguf.Metadata);
         _generator = new TextGenerator(_model, _tokenizer);
     }
 
@@ -109,7 +107,7 @@ public class InferenceBenchmarks
         };
 
         var response = _generator.Generate(_prompt, options);
-        s_timings.Add(response.Timings);
+        _timings.Add(response.Timings);
         return response;
     }
 
@@ -117,26 +115,27 @@ public class InferenceBenchmarks
     public void Cleanup()
     {
         // Write median metrics for the custom IColumn bridge
-        if (s_timings.Count > 0)
+        if (_timings.Count > 0)
         {
-            var prefillTokPerSec = s_timings.Select(t => t.PrefillTokensPerSec).OrderBy(v => v).ToList();
-            var decodeTokPerSec = s_timings.Select(t => t.DecodeTokensPerSec).OrderBy(v => v).ToList();
-            var prefillMs = s_timings.Select(t => t.PrefillTimeMs).OrderBy(v => v).ToList();
-            var decodeMs = s_timings.Select(t => t.DecodeTimeMs).OrderBy(v => v).ToList();
+            var prefillTokPerSec = _timings.Select(t => t.PrefillTokensPerSec).OrderBy(v => v).ToList();
+            var decodeTokPerSec = _timings.Select(t => t.DecodeTokensPerSec).OrderBy(v => v).ToList();
+            var prefillMs = _timings.Select(t => t.PrefillTimeMs).OrderBy(v => v).ToList();
+            var decodeMs = _timings.Select(t => t.DecodeTimeMs).OrderBy(v => v).ToList();
 
             var metrics = new InferenceMetricsFile(
                 MedianPrefillTokPerSec: Median(prefillTokPerSec),
                 MedianDecodeTokPerSec: Median(decodeTokPerSec),
                 MedianPrefillMs: Median(prefillMs),
                 MedianDecodeMs: Median(decodeMs),
-                PrefillTokenCount: s_timings[0].PrefillTokenCount,
-                DecodeTokenCount: s_timings[0].DecodeTokenCount,
-                Iterations: s_timings.Count);
+                PrefillTokenCount: _timings[0].PrefillTokenCount,
+                DecodeTokenCount: _timings[0].DecodeTokenCount,
+                Iterations: _timings.Count);
 
             InferenceMetricsFile.Write(_metricsKey, metrics);
         }
 
         _model?.Dispose();
+        _gguf?.Dispose();
     }
 
     private static double Median(List<double> sorted)

@@ -182,7 +182,7 @@ def _download_with_progress(url: str, dest: Path, total_size: int | None = None)
         sys.exit(1)
 
     print()  # newline after progress
-    tmp_path.rename(dest)
+    tmp_path.replace(dest)
 
 
 def _apply_quant_filter(files: list[str], quant: str | None) -> list[str]:
