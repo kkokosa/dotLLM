@@ -4,12 +4,18 @@ namespace DotLLM.Tokenizers.Bpe;
 /// Byte-pair encoding tokenizer supporting SentencePiece and tiktoken variants.
 /// Vocabulary data is loaded at construction; all encoding and decoding is delegated
 /// to the variant-specific <see cref="IBpeEncoding"/> implementation.
-/// To add a new variant, implement <see cref="IBpeEncoding"/> and add a factory method here —
-/// no modifications to existing code are required.
+/// Special tokens (control/user-defined) are pre-split from the input and emitted
+/// as single token IDs, bypassing BPE encoding.
 /// </summary>
 public sealed class BpeTokenizer : ITokenizer
 {
     private readonly IBpeEncoding _encoding;
+
+    /// <summary>
+    /// Special tokens sorted by descending length so longer tokens match first.
+    /// Each entry is (tokenString, tokenId).
+    /// </summary>
+    private readonly (string Text, int Id)[] _specialTokens;
 
     /// <inheritdoc/>
     public int BosTokenId { get; }
@@ -20,9 +26,11 @@ public sealed class BpeTokenizer : ITokenizer
     /// <inheritdoc/>
     public int VocabSize { get; }
 
-    private BpeTokenizer(IBpeEncoding encoding, int bosId, int eosId, int vocabSize)
+    private BpeTokenizer(IBpeEncoding encoding, (string Text, int Id)[] specialTokens,
+        int bosId, int eosId, int vocabSize)
     {
         _encoding = encoding;
+        _specialTokens = specialTokens;
         BosTokenId = bosId;
         EosTokenId = eosId;
         VocabSize = vocabSize;
@@ -42,9 +50,10 @@ public sealed class BpeTokenizer : ITokenizer
         int bosId, int eosId, bool addBosSpace = true)
     {
         float[] safeScores = scores.Length == tokens.Length ? scores : new float[tokens.Length];
+        var specialTokens = BuildSpecialTokenTable(tokens, tokenTypes);
         return new BpeTokenizer(
             new SentencePieceEncoding(tokens, safeScores, tokenTypes, addBosSpace),
-            bosId, eosId, tokens.Length);
+            specialTokens, bosId, eosId, tokens.Length);
     }
 
     /// <summary>
@@ -57,10 +66,25 @@ public sealed class BpeTokenizer : ITokenizer
     /// <param name="eosId">End-of-sequence token ID.</param>
     public static BpeTokenizer CreateTiktoken(
         string[] tokens, string[] merges, int[]? tokenTypes, int bosId, int eosId)
-        => new(new Gpt2TiktokenEncoding(tokens, merges, tokenTypes), bosId, eosId, tokens.Length);
+    {
+        var specialTokens = BuildSpecialTokenTable(tokens, tokenTypes);
+        return new BpeTokenizer(
+            new Gpt2TiktokenEncoding(tokens, merges, tokenTypes),
+            specialTokens, bosId, eosId, tokens.Length);
+    }
 
     /// <inheritdoc/>
-    public int[] Encode(string text) => text.Length == 0 ? [] : _encoding.Encode(text);
+    public int[] Encode(string text)
+    {
+        if (text.Length == 0)
+            return [];
+
+        // Fast path: no special tokens to split on
+        if (_specialTokens.Length == 0)
+            return _encoding.Encode(text);
+
+        return EncodeWithSpecialTokens(text);
+    }
 
     /// <inheritdoc/>
     public string Decode(ReadOnlySpan<int> tokenIds) =>
@@ -71,4 +95,115 @@ public sealed class BpeTokenizer : ITokenizer
 
     /// <inheritdoc/>
     public int CountTokens(string text) => Encode(text).Length;
+
+    /// <summary>
+    /// Builds the special token table from vocabulary and token types.
+    /// Control tokens (type 3) and user-defined tokens (type 6) that are non-empty
+    /// and not single-byte are treated as special tokens for pre-splitting.
+    /// Sorted by descending length for longest-match-first semantics.
+    /// </summary>
+    private static (string Text, int Id)[] BuildSpecialTokenTable(string[] tokens, int[]? tokenTypes)
+    {
+        if (tokenTypes is null)
+            return [];
+
+        var special = new List<(string Text, int Id)>();
+        for (int i = 0; i < tokens.Length && i < tokenTypes.Length; i++)
+        {
+            // Type 3 = control, Type 6 = user-defined (added tokens)
+            // Skip single chars and empty strings — they're not useful for pre-splitting
+            if ((tokenTypes[i] == 3 || tokenTypes[i] == 6) &&
+                tokens[i].Length > 1 &&
+                !string.IsNullOrEmpty(tokens[i]))
+            {
+                special.Add((tokens[i], i));
+            }
+        }
+
+        // Sort by descending length so longer tokens match first
+        special.Sort((a, b) => b.Text.Length.CompareTo(a.Text.Length));
+        return special.ToArray();
+    }
+
+    /// <summary>
+    /// Encodes text with special token pre-splitting. Scans for special tokens,
+    /// emits their IDs directly, and BPE-encodes the text segments between them.
+    /// </summary>
+    private int[] EncodeWithSpecialTokens(string text)
+    {
+        var result = new List<int>();
+        int pos = 0;
+        bool isFirstSegment = true;
+
+        while (pos < text.Length)
+        {
+            // Try to match a special token at the current position
+            int matchedLen = 0;
+            int matchedId = -1;
+
+            for (int i = 0; i < _specialTokens.Length; i++)
+            {
+                var (specialText, specialId) = _specialTokens[i];
+                if (pos + specialText.Length <= text.Length &&
+                    text.AsSpan(pos, specialText.Length).SequenceEqual(specialText))
+                {
+                    matchedLen = specialText.Length;
+                    matchedId = specialId;
+                    break; // First match wins (sorted by descending length)
+                }
+            }
+
+            if (matchedId >= 0)
+            {
+                // Emit the special token ID directly
+                result.Add(matchedId);
+                pos += matchedLen;
+                isFirstSegment = false;
+            }
+            else
+            {
+                // Find the next special token (or end of string)
+                int nextSpecialPos = FindNextSpecialToken(text, pos + 1);
+                string segment = text[pos..nextSpecialPos];
+
+                // BPE-encode the segment.
+                // First segment gets normal encoding (with BOS space prepend for SentencePiece).
+                // Subsequent segments use EncodeSegment (no BOS space) to avoid spurious ▁ markers.
+                if (segment.Length > 0)
+                {
+                    int[] segmentIds = isFirstSegment
+                        ? _encoding.Encode(segment)
+                        : _encoding.EncodeSegment(segment);
+                    result.AddRange(segmentIds);
+                }
+
+                pos = nextSpecialPos;
+                isFirstSegment = false;
+            }
+        }
+
+        return result.ToArray();
+    }
+
+    /// <summary>
+    /// Finds the position of the next special token starting from <paramref name="startPos"/>.
+    /// Returns <c>text.Length</c> if no special token is found.
+    /// </summary>
+    private int FindNextSpecialToken(string text, int startPos)
+    {
+        for (int pos = startPos; pos < text.Length; pos++)
+        {
+            for (int i = 0; i < _specialTokens.Length; i++)
+            {
+                var (specialText, _) = _specialTokens[i];
+                if (pos + specialText.Length <= text.Length &&
+                    text.AsSpan(pos, specialText.Length).SequenceEqual(specialText))
+                {
+                    return pos;
+                }
+            }
+        }
+
+        return text.Length;
+    }
 }

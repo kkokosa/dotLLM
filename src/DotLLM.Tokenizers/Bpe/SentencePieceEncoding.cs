@@ -37,11 +37,15 @@ internal sealed class SentencePieceEncoding : IBpeEncoding
         }
     }
 
-    public int[] Encode(string text)
+    public int[] Encode(string text) => EncodeCore(text, addBosSpace: _addBosSpace);
+
+    public int[] EncodeSegment(string text) => EncodeCore(text, addBosSpace: false);
+
+    private int[] EncodeCore(string text, bool addBosSpace)
     {
         // 1. Normalize: replace ' ' with ▁ throughout; optionally prepend ▁.
         //    Uses ArrayPool to avoid string allocations on the hot path.
-        bool needPrepend = _addBosSpace && (text.Length == 0 || (text[0] != ' ' && text[0] != SpaceMarker));
+        bool needPrepend = addBosSpace && (text.Length == 0 || (text[0] != ' ' && text[0] != SpaceMarker));
         int normalizedLen = text.Length + (needPrepend ? 1 : 0);
         char[] rentedNorm = ArrayPool<char>.Shared.Rent(normalizedLen);
         try

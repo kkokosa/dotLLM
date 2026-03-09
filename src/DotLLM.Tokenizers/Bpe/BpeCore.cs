@@ -11,6 +11,12 @@ namespace DotLLM.Tokenizers.Bpe;
 internal interface IBpeEncoding
 {
     int[] Encode(string text);
+    /// <summary>
+    /// Encodes text as a continuation segment (no BOS space prepend).
+    /// Used for text segments that follow a special token during pre-splitting.
+    /// Default implementation falls back to <see cref="Encode"/>.
+    /// </summary>
+    int[] EncodeSegment(string text) => Encode(text);
     string Decode(ReadOnlySpan<int> tokenIds);
     string DecodeToken(int tokenId);
 }

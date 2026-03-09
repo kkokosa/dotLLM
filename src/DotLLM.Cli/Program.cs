@@ -35,6 +35,10 @@ app.Configure(config =>
         .WithDescription("Run greedy text generation on a GGUF model.")
         .WithExample("run", "QuantFactory/SmolLM-135M-GGUF", "--prompt", "The capital of France is", "--max-tokens", "64");
 
+    config.AddCommand<ChatCommand>("chat")
+        .WithDescription("Interactive multi-turn chat with a GGUF model.")
+        .WithExample("chat", "QuantFactory/SmolLM-135M-GGUF", "--system", "You are a helpful assistant.");
+
     config.AddCommand<ServeCommand>("serve")
         .WithDescription("Launch OpenAI-compatible API server (stub).")
         .WithExample("serve", "--port", "8080");
