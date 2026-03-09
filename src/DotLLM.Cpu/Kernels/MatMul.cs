@@ -629,14 +629,15 @@ public static unsafe partial class MatMul
                 Vector256<float> vInvScale = Vector256.Create(1.0f / scale);
 
                 // Process 8 floats at a time → round → convert to int32 → pack to sbyte.
-                Vector256<int> i0 = Avx.ConvertToVector256Int32(Avx.RoundToNearestInteger(
-                    Avx.Multiply(Avx.LoadVector256(blockSrc), vInvScale)));
-                Vector256<int> i1 = Avx.ConvertToVector256Int32(Avx.RoundToNearestInteger(
-                    Avx.Multiply(Avx.LoadVector256(blockSrc + 8), vInvScale)));
-                Vector256<int> i2 = Avx.ConvertToVector256Int32(Avx.RoundToNearestInteger(
-                    Avx.Multiply(Avx.LoadVector256(blockSrc + 16), vInvScale)));
-                Vector256<int> i3 = Avx.ConvertToVector256Int32(Avx.RoundToNearestInteger(
-                    Avx.Multiply(Avx.LoadVector256(blockSrc + 24), vInvScale)));
+                // vcvtps2dq already rounds to nearest per MXCSR default — no explicit vroundps needed.
+                Vector256<int> i0 = Avx.ConvertToVector256Int32(
+                    Avx.Multiply(Avx.LoadVector256(blockSrc), vInvScale));
+                Vector256<int> i1 = Avx.ConvertToVector256Int32(
+                    Avx.Multiply(Avx.LoadVector256(blockSrc + 8), vInvScale));
+                Vector256<int> i2 = Avx.ConvertToVector256Int32(
+                    Avx.Multiply(Avx.LoadVector256(blockSrc + 16), vInvScale));
+                Vector256<int> i3 = Avx.ConvertToVector256Int32(
+                    Avx.Multiply(Avx.LoadVector256(blockSrc + 24), vInvScale));
 
                 // Pack int32 → int16 (saturating).
                 Vector256<short> s01 = Avx2.PackSignedSaturate(i0, i1);
@@ -690,16 +691,15 @@ public static unsafe partial class MatMul
                 Vector512<float> vInvScale = Vector512.Create(1.0f / scale);
 
                 // Process 16 floats at a time.
-                Vector512<int> i0 = Avx512F.ConvertToVector512Int32(Avx512F.RoundScale(
+                // vcvtps2dq already rounds to nearest per MXCSR default — no explicit vrndscaleps needed.
+                Vector512<int> i0 = Avx512F.ConvertToVector512Int32(
                     Avx512F.Multiply(
                         Vector512.LoadUnsafe(ref Unsafe.AsRef<float>(blockSrc)),
-                        vInvScale),
-                    0x08)); // _MM_FROUND_TO_NEAREST_INT
-                Vector512<int> i1 = Avx512F.ConvertToVector512Int32(Avx512F.RoundScale(
+                        vInvScale));
+                Vector512<int> i1 = Avx512F.ConvertToVector512Int32(
                     Avx512F.Multiply(
                         Vector512.LoadUnsafe(ref Unsafe.AsRef<float>(blockSrc + 16)),
-                        vInvScale),
-                    0x08));
+                        vInvScale));
 
                 // Pack int32 → int16 → int8 using AVX2 on each 256-bit half.
                 Vector256<short> s0 = Avx2.PackSignedSaturate(i0.GetLower(), i0.GetUpper());

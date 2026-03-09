@@ -139,14 +139,15 @@ public static unsafe partial class MatMul
                     float* chunkSrc = blockSrc + chunk * 32;
                     sbyte* chunkDst = qs + chunk * 32;
 
-                    Vector256<int> i0 = Avx.ConvertToVector256Int32(Avx.RoundToNearestInteger(
-                        Avx.Multiply(Avx.LoadVector256(chunkSrc), vInvScale)));
-                    Vector256<int> i1 = Avx.ConvertToVector256Int32(Avx.RoundToNearestInteger(
-                        Avx.Multiply(Avx.LoadVector256(chunkSrc + 8), vInvScale)));
-                    Vector256<int> i2 = Avx.ConvertToVector256Int32(Avx.RoundToNearestInteger(
-                        Avx.Multiply(Avx.LoadVector256(chunkSrc + 16), vInvScale)));
-                    Vector256<int> i3 = Avx.ConvertToVector256Int32(Avx.RoundToNearestInteger(
-                        Avx.Multiply(Avx.LoadVector256(chunkSrc + 24), vInvScale)));
+                    // vcvtps2dq already rounds to nearest per MXCSR default — no explicit vroundps needed.
+                    Vector256<int> i0 = Avx.ConvertToVector256Int32(
+                        Avx.Multiply(Avx.LoadVector256(chunkSrc), vInvScale));
+                    Vector256<int> i1 = Avx.ConvertToVector256Int32(
+                        Avx.Multiply(Avx.LoadVector256(chunkSrc + 8), vInvScale));
+                    Vector256<int> i2 = Avx.ConvertToVector256Int32(
+                        Avx.Multiply(Avx.LoadVector256(chunkSrc + 16), vInvScale));
+                    Vector256<int> i3 = Avx.ConvertToVector256Int32(
+                        Avx.Multiply(Avx.LoadVector256(chunkSrc + 24), vInvScale));
 
                     Vector256<short> s01 = Avx2.PackSignedSaturate(i0, i1);
                     Vector256<short> s23 = Avx2.PackSignedSaturate(i2, i3);

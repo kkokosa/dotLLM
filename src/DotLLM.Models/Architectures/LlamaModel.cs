@@ -162,9 +162,12 @@ public sealed unsafe class LlamaModel : IModel
             byte* preQuantNorm = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, lw.QQuantType);
 
             // Batched Q/K/V projections (GEMM)
+            // Guard: only reuse preQuantNorm when target quant type is in the same family as QQuantType
             Gemm(lw.QWeight, lw.QQuantType, normOut, q, lw.QOutputDim, lw.QInputDim, seqLen, preQuantNorm);
-            Gemm(lw.KWeight, lw.KQuantType, normOut, k, lw.KOutputDim, lw.KInputDim, seqLen, preQuantNorm);
-            Gemm(lw.VWeight, lw.VQuantType, normOut, v, lw.VOutputDim, lw.VInputDim, seqLen, preQuantNorm);
+            Gemm(lw.KWeight, lw.KQuantType, normOut, k, lw.KOutputDim, lw.KInputDim, seqLen,
+                 IsCompatiblePreQuant(lw.QQuantType, lw.KQuantType) ? preQuantNorm : null);
+            Gemm(lw.VWeight, lw.VQuantType, normOut, v, lw.VOutputDim, lw.VInputDim, seqLen,
+                 IsCompatiblePreQuant(lw.QQuantType, lw.VQuantType) ? preQuantNorm : null);
 
             // Optional bias: y = Wx + b (no-op when null)
             AddBias(lw.QBias, q, lw.QOutputDim, seqLen);
@@ -233,7 +236,8 @@ public sealed unsafe class LlamaModel : IModel
 
             // Batched Gate + Up projections
             Gemm(lw.GateWeight, lw.GateQuantType, normOut, ffnGate, lw.GateOutputDim, lw.GateInputDim, seqLen, preQuantFfn);
-            Gemm(lw.UpWeight, lw.UpQuantType, normOut, ffnUp, lw.UpOutputDim, lw.UpInputDim, seqLen, preQuantFfn);
+            Gemm(lw.UpWeight, lw.UpQuantType, normOut, ffnUp, lw.UpOutputDim, lw.UpInputDim, seqLen,
+                 IsCompatiblePreQuant(lw.GateQuantType, lw.UpQuantType) ? preQuantFfn : null);
             AddBias(lw.GateBias, ffnGate, lw.GateOutputDim, seqLen);
             AddBias(lw.UpBias, ffnUp, lw.UpOutputDim, seqLen);
 
@@ -406,10 +410,30 @@ public sealed unsafe class LlamaModel : IModel
     }
 
     /// <summary>
+    /// Returns true when a pre-quantized buffer produced for <paramref name="preQuantSource"/>
+    /// can be safely reused for a GEMM targeting <paramref name="target"/>.
+    /// K-quant types share Q8_K layout; Q8_0/Q5_0 share Q8_0 layout. Cross-family reuse
+    /// would misinterpret block layout (different sizes, missing bsums), corrupting output.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsCompatiblePreQuant(QuantizationType preQuantSource, QuantizationType target)
+    {
+        if (preQuantSource == target) return true;
+
+        bool sourceIsKQuant = preQuantSource is QuantizationType.Q4_K or QuantizationType.Q5_K or QuantizationType.Q6_K;
+        bool targetIsKQuant = target is QuantizationType.Q4_K or QuantizationType.Q5_K or QuantizationType.Q6_K;
+        if (sourceIsKQuant && targetIsKQuant) return true;
+
+        bool sourceIsQ8Family = preQuantSource is QuantizationType.Q8_0 or QuantizationType.Q5_0;
+        bool targetIsQ8Family = target is QuantizationType.Q8_0 or QuantizationType.Q5_0;
+        return sourceIsQ8Family && targetIsQ8Family;
+    }
+
+    /// <summary>
     /// Pre-quantizes [seqLen, dim] f32 input for GEMM reuse across Q/K/V or Gate/Up projections.
     /// K-quant types (Q4_K, Q5_K, Q6_K) use Q8_K (float32 scale, 256 elements/block).
     /// Q8_0 and Q5_0 types use Q8_0 (Half scale, 32 elements/block).
-    /// Returns the scratch pointer if quantized and seqLen &gt; 1, otherwise null.
+    /// Returns the scratch pointer if quantized, otherwise null.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static byte* QuantizeInput(float* input, byte* scratch, int dim, int seqLen,
@@ -421,7 +445,7 @@ public sealed unsafe class LlamaModel : IModel
         bool isQ8Type = qt == QuantizationType.Q8_0
                      || qt == QuantizationType.Q5_0;
 
-        if ((!isKQuant && !isQ8Type) || seqLen <= 1)
+        if (!isKQuant && !isQ8Type)
             return null;
 
         if (isKQuant)
