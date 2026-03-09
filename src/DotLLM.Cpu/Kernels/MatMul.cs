@@ -12,7 +12,7 @@ namespace DotLLM.Cpu.Kernels;
 /// Matrix-vector multiplication kernels for transformer inference.
 /// Supports f32 weights and Q8_0 quantized weights with on-the-fly activation quantization.
 /// </summary>
-public static unsafe class MatMul
+public static unsafe partial class MatMul
 {
     /// <summary>Q8_0 block size in bytes: 2 (Half scale) + 32 (sbyte quantized values).</summary>
     private const int Q8_0BlockBytes = 34;
@@ -1362,18 +1362,6 @@ public static unsafe class MatMul
             M = m, K = k, N = n, TileM = tileM, ScratchPtrs = scratchPtrs
         };
         pool.Dispatch((nint)(&ctx), &GemmTiledF16Worker);
-    }
-
-    // ──────────────────── Q4_K stubs ────────────────────
-
-    /// <summary>
-    /// Scalar Q4_K × Q8_0 dot product. Stub for Step 12 implementation.
-    /// </summary>
-    /// <exception cref="NotImplementedException">Always thrown — this is a placeholder for Step 12.</exception>
-    internal static float VecDotQ4_K_Q8_0Scalar(byte* a, byte* b, int blockCount)
-    {
-        throw new NotImplementedException(
-            "Q4_K × Q8_0 dot product is not yet implemented. See Step 12 in docs/ROADMAP.md.");
     }
 
     // ──────────────────── Horizontal reduction helpers ────────────────────

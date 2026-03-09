@@ -70,6 +70,10 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
         [Description("Number of CPU threads for inference. 0 = auto/all cores (default), 1 = single-threaded.")]
         [DefaultValue(0)]
         public int Threads { get; set; }
+
+        [CommandOption("--quant|-q")]
+        [Description("Quantization filter when multiple GGUF files exist (e.g., Q4_K_M, Q8_0).")]
+        public string? Quant { get; set; }
     }
 
     public override int Execute(CommandContext context, Settings settings)
@@ -80,7 +84,7 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             return 1;
         }
 
-        var resolvedPath = GgufFileResolver.Resolve(settings.Model);
+        var resolvedPath = GgufFileResolver.Resolve(settings.Model, settings.Quant);
         if (resolvedPath is null)
             return 1;
 
