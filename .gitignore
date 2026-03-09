@@ -3,8 +3,9 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
-# Claude Code local config (machine-specific paths, not committed)
+# Claude Code local config (machine-specific paths, agent memory)
 .claude/local-paths.md
+.claude/agent-memory/
 
 # User-specific files
 *.rsuser
