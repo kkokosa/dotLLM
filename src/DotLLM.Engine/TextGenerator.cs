@@ -221,6 +221,8 @@ public sealed class TextGenerator
         if (maxTokens <= 0)
             yield break;
 
+        cancellationToken.ThrowIfCancellationRequested();
+
         // Build sampling pipeline
         var pipeline = new SamplerPipeline(options);
 
@@ -302,9 +304,16 @@ public sealed class TextGenerator
             yield break;
         }
 
-        // Yield first token
+        // Yield first token — check if it's also the last (maxTokens == 1)
         {
+            bool firstIsLast = maxTokens <= 1;
             string text = decodedText[previousDecodeLength..];
+            if (firstIsLast)
+            {
+                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                yield return new GenerationToken(firstTokenId, text, FinishReason.Length, timings);
+                yield break;
+            }
             previousDecodeLength = decodedText.Length;
             yield return new GenerationToken(firstTokenId, text, null);
         }
@@ -358,19 +367,19 @@ public sealed class TextGenerator
                 yield break;
             }
 
-            // Yield token with incremental text
+            // Yield token — attach finish reason if this is the last iteration
             {
+                bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
                 string text = decodedText[previousDecodeLength..];
+                if (isLastStep)
+                {
+                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                    yield return new GenerationToken(nextTokenId, text, FinishReason.Length, timings);
+                    yield break;
+                }
                 previousDecodeLength = decodedText.Length;
                 yield return new GenerationToken(nextTokenId, text, null);
             }
-        }
-
-        // If we exit the loop without a stop condition (cache full or maxTokens exhausted
-        // without MaxTokensStopCondition in the pipeline), yield a final Length finish
-        {
-            var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
-            yield return new GenerationToken(generatedIds[^1], string.Empty, FinishReason.Length, timings);
         }
     }
 

@@ -152,7 +152,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             await foreach (var token in generator.GenerateStreamingTokensAsync(settings.Prompt, inferenceOptions))
             {
                 Console.Write(token.Text);
-                generated++;
+                if (token.FinishReason is null || token.Text.Length > 0)
+                    generated++;
                 if (token.FinishReason.HasValue)
                 {
                     finishReason = token.FinishReason.Value;

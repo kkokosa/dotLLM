@@ -246,11 +246,12 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
 
             await foreach (var token in generator.GenerateStreamingTokensAsync(prompt, options))
             {
-                if (tokenCount == 0)
+                if (tokenCount == 0 && token.Text.Length > 0)
                     firstTokenTicks = sw.ElapsedTicks;
                 Console.Write(token.Text);
                 sb.Append(token.Text);
-                tokenCount++;
+                if (token.FinishReason is null || token.Text.Length > 0)
+                    tokenCount++;
                 if (token.FinishReason.HasValue)
                 {
                     finishReason = token.FinishReason.Value;
