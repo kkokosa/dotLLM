@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using DotLLM.Cli.Helpers;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
@@ -8,6 +9,7 @@ using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using Spectre.Console;
 using Spectre.Console.Cli;
+using Spectre.Console.Rendering;
 
 namespace DotLLM.Cli.Commands;
 
@@ -114,7 +116,6 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
         loadSw.Stop();
 
         var threadingInfo = new ThreadingConfig(settings.Threads);
-        AnsiConsole.MarkupLine($"[grey]Model: {config.Architecture}, {config.NumLayers} layers, {config.HiddenSize} hidden, {config.VocabSize:N0} vocab, {threadingInfo.EffectiveThreadCount} thread(s)[/]");
 
         // Build inference options from CLI flags
         var inferenceOptions = new InferenceOptions
@@ -130,21 +131,11 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             Threading = new ThreadingConfig(settings.Threads)
         };
 
-        if (settings.Temperature > 0)
-        {
-            var parts = new List<string> { $"temp={settings.Temperature:F2}" };
-            if (settings.TopK > 0) parts.Add($"top-k={settings.TopK}");
-            if (settings.TopP < 1.0f) parts.Add($"top-p={settings.TopP:F2}");
-            if (settings.MinP > 0f) parts.Add($"min-p={settings.MinP:F2}");
-            if (settings.RepeatPenalty != 1.0f) parts.Add($"repeat-penalty={settings.RepeatPenalty:F2}");
-            if (settings.Seed.HasValue) parts.Add($"seed={settings.Seed.Value}");
-            AnsiConsole.MarkupLine($"[grey]Sampling: {string.Join(", ", parts)}[/]");
-        }
-        else
-        {
-            AnsiConsole.MarkupLine("[grey]Sampling: greedy[/]");
-        }
-
+        // Build compact pre-gen header rule
+        var quantLabel = InferQuantLabel(resolvedPath, settings.Quant);
+        var samplingLabel = BuildSamplingLabel(settings);
+        var segments = $"{config.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {threadingInfo.EffectiveThreadCount} threads | {samplingLabel}";
+        AnsiConsole.Write(new Rule($"[grey]dotllm | {Markup.Escape(segments)}[/]").LeftJustified());
         AnsiConsole.WriteLine();
 
         try
@@ -173,117 +164,63 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             int generated = response.GeneratedTokenCount;
             int evalSteps = timings.DecodeTokenCount;
 
-            // Performance summary table
-            var perfTable = new Table()
-                .Border(TableBorder.Rounded)
-                .Title("[bold]Performance Summary[/]");
-
-            perfTable.AddColumn(new TableColumn("Phase").LeftAligned());
-            perfTable.AddColumn(new TableColumn("Time").RightAligned());
-            perfTable.AddColumn(new TableColumn("Tokens").RightAligned());
-            perfTable.AddColumn(new TableColumn("ms/token").RightAligned());
-            perfTable.AddColumn(new TableColumn("tokens/s").RightAligned());
-
-            // Load
-            perfTable.AddRow(
-                "Load",
-                $"{loadMs:F2} ms",
-                Markup.Escape("—"),
-                Markup.Escape("—"),
-                Markup.Escape("—"));
-
-            // Prompt eval
-            if (promptLen > 0)
-            {
-                double promptMsPerToken = promptEvalMs / promptLen;
-                double promptTokPerSec = promptLen / (promptEvalMs / 1000.0);
-                perfTable.AddRow(
-                    "Prompt eval",
-                    $"{promptEvalMs:F2} ms",
-                    promptLen.ToString(),
-                    $"{promptMsPerToken:F2}",
-                    $"{promptTokPerSec:F2}");
-            }
-
-            // Eval (decode steps after the first)
-            if (evalSteps > 0)
-            {
-                double evalMsPerToken = evalMs / evalSteps;
-                double evalTokPerSec = evalSteps / (evalMs / 1000.0);
-                perfTable.AddRow(
-                    "Eval",
-                    $"{evalMs:F2} ms",
-                    $"{evalSteps}",
-                    $"{evalMsPerToken:F2}",
-                    $"{evalTokPerSec:F2}");
-            }
-            else
-            {
-                perfTable.AddRow(
-                    "Eval",
-                    $"{evalMs:F2} ms",
-                    "0",
-                    Markup.Escape("—"),
-                    Markup.Escape("—"));
-            }
-
-            // Sampling
-            if (generated > 0)
-            {
-                double samplerMsPerToken = samplerMs / generated;
-                perfTable.AddRow(
-                    "Sampling",
-                    $"{samplerMs:F2} ms",
-                    generated.ToString(),
-                    $"{samplerMsPerToken:F2}",
-                    Markup.Escape("—"));
-            }
-            else
-            {
-                perfTable.AddRow(
-                    "Sampling",
-                    $"{samplerMs:F2} ms",
-                    "0",
-                    Markup.Escape("—"),
-                    Markup.Escape("—"));
-            }
-
-            // Total
+            // Compute metrics
             int totalTokens = promptLen + generated;
+            double decodeTokPerSec = evalSteps > 0 ? evalSteps / (evalMs / 1000.0) : 0;
+            double prefillTokPerSec = promptLen > 0 ? promptLen / (promptEvalMs / 1000.0) : 0;
             double totalTokPerSec = totalTokens > 0 ? totalTokens / (totalMs / 1000.0) : 0;
-            perfTable.AddRow(
-                "[bold]Total[/]",
-                $"[bold]{totalMs:F2} ms[/]",
-                $"[bold]{totalTokens}[/]",
-                Markup.Escape("—"),
-                $"[bold]{totalTokPerSec:F2}[/]");
 
-            AnsiConsole.Write(perfTable);
-            AnsiConsole.WriteLine();
-
-            // Memory breakdown table
+            // Memory metrics
             long fileSize = new FileInfo(resolvedPath).Length;
             long modelWeightsBytes = fileSize - gguf.DataSectionOffset;
             long computeBytes = model.ComputeMemoryBytes;
-
             int cacheSize = Math.Min(promptLen + settings.MaxTokens, config.MaxSequenceLength);
             long kvCacheBytes = (long)config.NumLayers * 2 * cacheSize
                 * config.NumKvHeads * config.HeadDim * sizeof(float);
             long totalMemory = modelWeightsBytes + computeBytes + kvCacheBytes;
 
-            var memTable = new Table()
-                .Border(TableBorder.Rounded)
-                .Title("[bold]Memory Breakdown[/]");
+            // Header grid: title left, hero metric right
+            var headerGrid = new Grid();
+            headerGrid.AddColumn(new GridColumn().NoWrap());
+            headerGrid.AddColumn(new GridColumn().NoWrap().RightAligned());
+            headerGrid.AddRow(
+                new Markup("[bold]Generation Complete[/]"),
+                new Markup($"[bold green]{decodeTokPerSec:F2} tok/s[/]"));
 
-            memTable.AddColumn(new TableColumn("Component").LeftAligned());
-            memTable.AddColumn(new TableColumn("Size").RightAligned());
+            // Build body lines
+            var bodyLines = new List<IRenderable>();
+            bodyLines.Add(new Markup("  [bold]Performance[/]"));
+            bodyLines.Add(new Markup(PerfLine("Prefill", promptEvalMs, promptLen, prefillTokPerSec)));
+            bodyLines.Add(new Markup(PerfLine("Decode", evalMs, evalSteps, decodeTokPerSec)));
+            bodyLines.Add(new Markup(PerfLine("Sampling", samplerMs, generated, null)));
+            bodyLines.Add(new Markup("  [dim]──────────────────────────────────────────────────────[/]"));
+            bodyLines.Add(new Markup(PerfLine("Total", totalMs, totalTokens, totalTokPerSec)));
+            bodyLines.Add(new Markup(PerfLine("Load", loadMs, null, null)));
+            bodyLines.Add(new Text(""));
+            bodyLines.Add(new Markup("  [bold]Memory[/]"));
+            bodyLines.Add(new Markup(MemLine("Weights", modelWeightsBytes, "(memory-mapped)")));
+            bodyLines.Add(new Markup(MemLine("Compute", computeBytes, null)));
+            bodyLines.Add(new Markup(MemLine("KV Cache", kvCacheBytes, $"({cacheSize} slots)")));
+            bodyLines.Add(new Markup("  [dim]──────────────────────────────────────────────────────[/]"));
+            bodyLines.Add(new Markup(MemLine("Total", totalMemory, null)));
+            bodyLines.Add(new Text(""));
 
-            memTable.AddRow("Model weights", $"{FormatHelpers.FormatMiB(modelWeightsBytes)}  [dim](memory-mapped)[/]");
-            memTable.AddRow("Compute", FormatHelpers.FormatMiB(computeBytes));
-            memTable.AddRow("KV-cache", $"{FormatHelpers.FormatMiB(kvCacheBytes)}  [dim]({cacheSize} slots)[/]");
-            memTable.AddRow("[bold]Total[/]", $"[bold]{FormatHelpers.FormatMiB(totalMemory)}[/]");
+            var finishReason = response.FinishReason.ToString().ToLowerInvariant();
+            bodyLines.Add(new Markup($"  [dim]{Markup.Escape(finishReason)} | {promptLen} prompt, {generated} generated[/]"));
 
-            AnsiConsole.Write(memTable);
+            // Assemble panel
+            var panelContent = new Rows(
+                new Text(""),
+                headerGrid,
+                new Text(""),
+                new Rows(bodyLines),
+                new Text(""));
+
+            var panel = new Panel(panelContent)
+                .Border(BoxBorder.Rounded)
+                .Padding(2, 0);
+
+            AnsiConsole.Write(panel);
         }
         finally
         {
@@ -292,5 +229,45 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
         }
 
         return 0;
+    }
+
+    private static string PerfLine(string label, double ms, int? tokens, double? tokPerSec)
+    {
+        var labelPart = $"[dim]{label,-14}[/]";
+        var msPart = $"{ms,10:N1} ms";
+        var tokensPart = tokens.HasValue ? $"{tokens.Value,6:N0} tokens" : "              ";
+        var toksPart = tokPerSec.HasValue ? $"{tokPerSec.Value,10:F2} tok/s" : "";
+        return $"  {labelPart} {msPart}   {tokensPart}   {toksPart}";
+    }
+
+    private static string MemLine(string label, long bytes, string? annotation)
+    {
+        var labelPart = $"[dim]{label,-14}[/]";
+        var sizePart = $"{FormatHelpers.FormatMiB(bytes),12}";
+        var annPart = annotation != null ? $"   [dim]{Markup.Escape(annotation)}[/]" : "";
+        return $"  {labelPart} {sizePart}{annPart}";
+    }
+
+    private static string InferQuantLabel(string resolvedPath, string? quantFlag)
+    {
+        if (!string.IsNullOrEmpty(quantFlag))
+            return quantFlag;
+
+        var match = Regex.Match(Path.GetFileName(resolvedPath), @"\.(Q[\w]+)\.gguf$", RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value : "unknown";
+    }
+
+    private static string BuildSamplingLabel(Settings settings)
+    {
+        if (settings.Temperature <= 0)
+            return "greedy";
+
+        var parts = new List<string> { $"temp={settings.Temperature:F1}" };
+        if (settings.TopK > 0) parts.Add($"top-k={settings.TopK}");
+        if (settings.TopP < 1.0f) parts.Add($"top-p={settings.TopP:F2}");
+        if (settings.MinP > 0f) parts.Add($"min-p={settings.MinP:F2}");
+        if (settings.RepeatPenalty != 1.0f) parts.Add($"rep={settings.RepeatPenalty:F2}");
+        if (settings.Seed.HasValue) parts.Add($"seed={settings.Seed.Value}");
+        return string.Join(", ", parts);
     }
 }
