@@ -1,5 +1,7 @@
+using System.Text;
 using DotLLM.Core.Configuration;
 using DotLLM.Engine;
+using DotLLM.Engine.Samplers.StopConditions;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using DotLLM.Tests.Integration.Fixtures;
@@ -177,5 +179,127 @@ public class TextGeneratorTests
         // Callback should have been invoked for each generated token
         Assert.Equal(response.GeneratedTokenCount, callbackTokens.Count);
         Assert.Equal(response.GeneratedTokenIds, callbackTokens.ToArray());
+    }
+
+    [Fact]
+    public async Task StreamingOutput_MatchesSynchronousOutput()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        var generator = new TextGenerator(model, tokenizer);
+        var options = new InferenceOptions { Temperature = 0f, MaxTokens = 10 };
+
+        // Synchronous generation
+        var syncResponse = generator.Generate("The capital of France is", options);
+
+        // Streaming generation — concatenate all text
+        var sb = new StringBuilder();
+        await foreach (var token in generator.GenerateStreamingTokensAsync("The capital of France is", options))
+            sb.Append(token.Text);
+
+        Assert.Equal(syncResponse.Text, sb.ToString());
+    }
+
+    [Fact]
+    public async Task StreamingTokens_HaveCorrectFinishReasonAndTimings()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        var generator = new TextGenerator(model, tokenizer);
+        var options = new InferenceOptions { Temperature = 0f, MaxTokens = 10 };
+
+        var tokens = new List<GenerationToken>();
+        await foreach (var token in generator.GenerateStreamingTokensAsync("Hello", options))
+            tokens.Add(token);
+
+        Assert.True(tokens.Count > 0, "Should generate at least one token.");
+
+        // All non-last tokens should have null FinishReason
+        for (int i = 0; i < tokens.Count - 1; i++)
+        {
+            Assert.Null(tokens[i].FinishReason);
+            Assert.Null(tokens[i].Timings);
+        }
+
+        // Last token should have non-null FinishReason and Timings
+        var last = tokens[^1];
+        Assert.NotNull(last.FinishReason);
+        Assert.NotNull(last.Timings);
+        Assert.True(last.Timings!.Value.PrefillTimeMs > 0, "Timings should have positive prefill time.");
+    }
+
+    [Fact]
+    public async Task StreamingGeneration_CancellationStopsCleanly()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        var generator = new TextGenerator(model, tokenizer);
+        var options = new InferenceOptions { Temperature = 0f, MaxTokens = 100 };
+        var cts = new CancellationTokenSource();
+
+        int tokenCount = 0;
+        bool caughtCancellation = false;
+
+        try
+        {
+            await foreach (var token in generator.GenerateStreamingTokensAsync("Hello world", options, cts.Token))
+            {
+                tokenCount++;
+                if (tokenCount >= 2)
+                    cts.Cancel();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            caughtCancellation = true;
+        }
+
+        Assert.True(caughtCancellation, "Should have caught OperationCanceledException.");
+        Assert.True(tokenCount >= 2, $"Should have generated at least 2 tokens before cancellation, got {tokenCount}.");
+        Assert.True(tokenCount < 100, $"Should have stopped before generating all 100 tokens, got {tokenCount}.");
+    }
+
+    [Fact]
+    public async Task StreamingGeneration_StopSequenceTerminatesStream()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        var generator = new TextGenerator(model, tokenizer);
+
+        // Use greedy to get deterministic output, with a stop sequence
+        // First generate without stop to see what we get
+        var baseOptions = new InferenceOptions { Temperature = 0f, MaxTokens = 20 };
+        var baseResponse = generator.Generate("The capital of France is", baseOptions);
+
+        // Pick a substring from the generated text as a stop sequence
+        if (baseResponse.Text.Length < 5)
+            return; // Skip if output is too short for a meaningful test
+
+        string stopSeq = baseResponse.Text[..5]; // First 5 chars as stop
+
+        var stopOptions = new InferenceOptions
+        {
+            Temperature = 0f,
+            MaxTokens = 20,
+            StopSequences = [stopSeq]
+        };
+
+        FinishReason? finishReason = null;
+        await foreach (var token in generator.GenerateStreamingTokensAsync("The capital of France is", stopOptions))
+        {
+            if (token.FinishReason.HasValue)
+                finishReason = token.FinishReason.Value;
+        }
+
+        Assert.NotNull(finishReason);
+        Assert.Equal(FinishReason.Stop, finishReason!.Value);
     }
 }

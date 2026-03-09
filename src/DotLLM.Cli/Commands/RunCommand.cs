@@ -17,7 +17,7 @@ namespace DotLLM.Cli.Commands;
 /// Runs text generation on a GGUF model: load → encode prompt → stream tokens via TextGenerator.
 /// Supports greedy (default) and sampled decoding via composable sampling pipeline.
 /// </summary>
-internal sealed class RunCommand : Command<RunCommand.Settings>
+internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 {
     public sealed class Settings : CommandSettings
     {
@@ -78,7 +78,7 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
         public string? Quant { get; set; }
     }
 
-    public override int Execute(CommandContext context, Settings settings)
+    public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
     {
         if (string.IsNullOrEmpty(settings.Prompt))
         {
@@ -145,23 +145,32 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
 
             var generator = new TextGenerator(model, tokenizer);
             var totalSw = Stopwatch.StartNew();
+            int generated = 0;
+            InferenceTimings timings = default;
+            FinishReason finishReason = FinishReason.Length;
 
-            var response = generator.Generate(settings.Prompt, inferenceOptions,
-                onTokenGenerated: tokenId => Console.Write(tokenizer.DecodeToken(tokenId)));
+            await foreach (var token in generator.GenerateStreamingTokensAsync(settings.Prompt, inferenceOptions))
+            {
+                Console.Write(token.Text);
+                generated++;
+                if (token.FinishReason.HasValue)
+                {
+                    finishReason = token.FinishReason.Value;
+                    timings = token.Timings ?? default;
+                }
+            }
 
             totalSw.Stop();
             Console.WriteLine();
             AnsiConsole.WriteLine();
 
-            // Read timings from engine response
-            var timings = response.Timings;
+            // Read timings from streaming result
             double loadMs = loadSw.Elapsed.TotalMilliseconds;
             double promptEvalMs = timings.PrefillTimeMs;
             double evalMs = timings.DecodeTimeMs;
             double samplerMs = timings.SamplingTimeMs;
             double totalMs = totalSw.Elapsed.TotalMilliseconds;
             int promptLen = timings.PrefillTokenCount;
-            int generated = response.GeneratedTokenCount;
             int evalSteps = timings.DecodeTokenCount;
 
             // Compute metrics
@@ -205,8 +214,8 @@ internal sealed class RunCommand : Command<RunCommand.Settings>
             bodyLines.Add(new Markup(MemLine("Total", totalMemory, null)));
             bodyLines.Add(new Text(""));
 
-            var finishReason = response.FinishReason.ToString().ToLowerInvariant();
-            bodyLines.Add(new Markup($"  [dim]{Markup.Escape(finishReason)} | {promptLen} prompt, {generated} generated[/]"));
+            var finishReasonStr = finishReason.ToString().ToLowerInvariant();
+            bodyLines.Add(new Markup($"  [dim]{Markup.Escape(finishReasonStr)} | {promptLen} prompt, {generated} generated[/]"));
 
             // Assemble panel
             var panelContent = new Rows(

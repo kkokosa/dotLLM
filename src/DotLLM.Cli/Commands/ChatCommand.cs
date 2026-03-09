@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text;
 using System.Text.RegularExpressions;
 using DotLLM.Cli.Helpers;
 using DotLLM.Core.Configuration;
@@ -18,7 +19,7 @@ namespace DotLLM.Cli.Commands;
 /// Interactive multi-turn chat REPL: load model → apply chat template → stream tokens.
 /// Maintains conversation history across turns with Jinja2 template formatting.
 /// </summary>
-internal sealed class ChatCommand : Command<ChatCommand.Settings>
+internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
 {
     public sealed class Settings : CommandSettings
     {
@@ -92,7 +93,7 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
     }
 
     /// <inheritdoc/>
-    public override int Execute(CommandContext context, Settings settings)
+    public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
     {
         var resolvedPath = GgufFileResolver.Resolve(settings.Model, settings.Quant);
         if (resolvedPath is null)
@@ -170,7 +171,7 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
 
         try
         {
-            RunRepl(generator, chatTemplate, inferenceOptions, history, tokenizer, settings);
+            await RunRepl(generator, chatTemplate, inferenceOptions, history, settings);
         }
         finally
         {
@@ -181,12 +182,11 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
         return 0;
     }
 
-    private static void RunRepl(
+    private static async Task RunRepl(
         TextGenerator generator,
         IChatTemplate chatTemplate,
         InferenceOptions options,
         List<ChatMessage> history,
-        Tokenizers.Bpe.BpeTokenizer tokenizer,
         Settings settings)
     {
         while (true)
@@ -235,25 +235,35 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
             // Apply chat template to full history
             string prompt = chatTemplate.Apply(history, new ChatTemplateOptions { AddGenerationPrompt = true });
 
-            // Generate response
+            // Generate response via streaming
             var sw = Stopwatch.StartNew();
             int tokenCount = 0;
             long firstTokenTicks = 0;
+            var sb = new StringBuilder();
+            FinishReason finishReason = FinishReason.Length;
+            InferenceTimings timings = default;
+            int promptTokenCount = 0;
 
-            var response = generator.Generate(prompt, options,
-                onTokenGenerated: tokenId =>
+            await foreach (var token in generator.GenerateStreamingTokensAsync(prompt, options))
+            {
+                if (tokenCount == 0)
+                    firstTokenTicks = sw.ElapsedTicks;
+                Console.Write(token.Text);
+                sb.Append(token.Text);
+                tokenCount++;
+                if (token.FinishReason.HasValue)
                 {
-                    if (tokenCount == 0)
-                        firstTokenTicks = sw.ElapsedTicks;
-                    Console.Write(tokenizer.DecodeToken(tokenId));
-                    tokenCount++;
-                });
+                    finishReason = token.FinishReason.Value;
+                    timings = token.Timings ?? default;
+                    promptTokenCount = timings.PrefillTokenCount;
+                }
+            }
 
             sw.Stop();
             Console.WriteLine();
 
             // Strip any remaining stop sequence suffixes from the response text
-            string assistantText = response.Text;
+            string assistantText = sb.ToString();
             foreach (var seq in options.StopSequences)
             {
                 if (assistantText.EndsWith(seq, StringComparison.Ordinal))
@@ -265,12 +275,10 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
 
             // Print timing info
             double ttftMs = firstTokenTicks > 0 ? firstTokenTicks * 1000.0 / Stopwatch.Frequency : 0;
-            int promptTokens = response.PromptTokenCount;
-            var timings = response.Timings;
             double prefillTokSec = timings.PrefillTokensPerSec;
             double decodeTokSec = timings.DecodeTokensPerSec;
             AnsiConsole.MarkupLine(
-                $"[dim][[{promptTokens} prompt tokens, {tokenCount} generated tokens, " +
+                $"[dim][[{promptTokenCount} prompt tokens, {tokenCount} generated tokens, " +
                 $"{ttftMs:F0} ms TTFT, {prefillTokSec:F1} prefill tok/s, {decodeTokSec:F1} decode tok/s]][/]");
             Console.WriteLine();
         }

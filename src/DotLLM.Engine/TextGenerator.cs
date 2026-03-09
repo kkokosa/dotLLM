@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Sampling;
@@ -189,6 +190,207 @@ public sealed class TextGenerator
             prefillTicks, decodeTicks, samplerTicks);
     }
 
+    /// <summary>
+    /// Streams generated tokens as an async enumerable, yielding each token with incremental text,
+    /// finish reason, and timings on the final token.
+    /// </summary>
+    /// <param name="prompt">Input text prompt.</param>
+    /// <param name="options">Inference options controlling sampling and stopping. Null uses defaults.</param>
+    /// <param name="cancellationToken">Token to cancel generation cooperatively between decode steps.</param>
+    /// <returns>An async enumerable of <see cref="GenerationToken"/> values.</returns>
+    public async IAsyncEnumerable<GenerationToken> GenerateStreamingTokensAsync(
+        string prompt,
+        InferenceOptions? options = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        options ??= new InferenceOptions();
+
+        int[] promptIds = _tokenizer.Encode(prompt);
+        int promptLen = promptIds.Length;
+        int maxTokens = options.MaxTokens;
+        int vocabSize = _model.Config.VocabSize;
+
+        // Guard: empty prompt — use BOS token as seed
+        if (promptLen == 0)
+        {
+            promptIds = [_tokenizer.BosTokenId];
+            promptLen = 1;
+        }
+
+        // Guard: MaxTokens=0 — yield nothing
+        if (maxTokens <= 0)
+            yield break;
+
+        // Build sampling pipeline
+        var pipeline = new SamplerPipeline(options);
+
+        // Build stop conditions
+        List<IStopCondition> stopConditions;
+        if (options.StopConditions is not null)
+        {
+            stopConditions = new List<IStopCondition>(options.StopConditions);
+        }
+        else
+        {
+            stopConditions = new List<IStopCondition>
+            {
+                new EosStopCondition(_tokenizer.EosTokenId),
+                new MaxTokensStopCondition(maxTokens)
+            };
+            foreach (string seq in options.StopSequences)
+                stopConditions.Add(new StopStringCondition(seq));
+        }
+
+        // Allocate KV-cache — disposed when the enumerator completes/disposes
+        int cacheSize = Math.Min(promptLen + maxTokens, _model.Config.MaxSequenceLength);
+        using var kvCache = new SimpleKvCache(
+            _model.Config.NumLayers,
+            _model.Config.NumKvHeads,
+            _model.Config.HeadDim,
+            cacheSize);
+
+        var generatedIds = new List<int>(maxTokens);
+        long prefillTicks = 0;
+        long decodeTicks = 0;
+        long samplerTicks = 0;
+        int previousDecodeLength = 0;
+
+        // Prefill: run full prompt through the model
+        int[] positions = new int[promptLen];
+        for (int i = 0; i < promptLen; i++)
+            positions[i] = i;
+
+        int firstTokenId;
+        long ts0 = Stopwatch.GetTimestamp();
+        using (ITensor prefillLogits = _model.Forward(promptIds, positions, deviceId: -1, kvCache))
+        {
+            long ts1 = Stopwatch.GetTimestamp();
+            prefillTicks = ts1 - ts0;
+
+            unsafe
+            {
+                long samplerStart = Stopwatch.GetTimestamp();
+                var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
+                firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+            }
+        }
+
+        // Check stop conditions for first token
+        generatedIds.Add(firstTokenId);
+        string decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds));
+
+        var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds, decodedText);
+        if (stopResult != StopResult.Continue)
+        {
+            var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+
+            if (stopResult == StopResult.Stop)
+            {
+                // Token excluded — match sync path which removes it before computing timings
+                generatedIds.RemoveAt(generatedIds.Count - 1);
+                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                yield return new GenerationToken(firstTokenId, string.Empty, fr, timings);
+            }
+            else
+            {
+                // Token included
+                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                string text = decodedText[previousDecodeLength..];
+                yield return new GenerationToken(firstTokenId, text, fr, timings);
+            }
+            yield break;
+        }
+
+        // Yield first token
+        {
+            string text = decodedText[previousDecodeLength..];
+            previousDecodeLength = decodedText.Length;
+            yield return new GenerationToken(firstTokenId, text, null);
+        }
+
+        // Decode loop: one token at a time
+        for (int step = 1; step < maxTokens; step++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            int pos = promptLen + step - 1;
+            if (pos >= cacheSize)
+                break;
+
+            int lastToken = generatedIds[^1];
+            int nextTokenId;
+
+            long fwdStart = Stopwatch.GetTimestamp();
+            using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
+            {
+                decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
+
+                unsafe
+                {
+                    long samplerStart = Stopwatch.GetTimestamp();
+                    var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
+                    nextTokenId = pipeline.Sample(logitSpan, generatedIds);
+                    samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                }
+            }
+
+            generatedIds.Add(nextTokenId);
+            decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds));
+
+            stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
+            if (stopResult != StopResult.Continue)
+            {
+                var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+
+                if (stopResult == StopResult.Stop)
+                {
+                    generatedIds.RemoveAt(generatedIds.Count - 1);
+                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                    yield return new GenerationToken(nextTokenId, string.Empty, fr, timings);
+                }
+                else
+                {
+                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                    string text = decodedText[previousDecodeLength..];
+                    yield return new GenerationToken(nextTokenId, text, fr, timings);
+                }
+                yield break;
+            }
+
+            // Yield token with incremental text
+            {
+                string text = decodedText[previousDecodeLength..];
+                previousDecodeLength = decodedText.Length;
+                yield return new GenerationToken(nextTokenId, text, null);
+            }
+        }
+
+        // If we exit the loop without a stop condition (cache full or maxTokens exhausted
+        // without MaxTokensStopCondition in the pipeline), yield a final Length finish
+        {
+            var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+            yield return new GenerationToken(generatedIds[^1], string.Empty, FinishReason.Length, timings);
+        }
+    }
+
+    /// <summary>
+    /// Streams generated text as an async enumerable, yielding incremental text fragments.
+    /// This is a convenience wrapper over <see cref="GenerateStreamingTokensAsync"/>.
+    /// </summary>
+    /// <param name="prompt">Input text prompt.</param>
+    /// <param name="options">Inference options controlling sampling and stopping. Null uses defaults.</param>
+    /// <param name="cancellationToken">Token to cancel generation cooperatively between decode steps.</param>
+    /// <returns>An async enumerable of incremental text strings.</returns>
+    public async IAsyncEnumerable<string> GenerateStreamingAsync(
+        string prompt,
+        InferenceOptions? options = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await foreach (var token in GenerateStreamingTokensAsync(prompt, options, cancellationToken))
+            yield return token.Text;
+    }
+
     private static StopResult CheckStopConditions(
         List<IStopCondition> conditions, int tokenId,
         IReadOnlyList<int> generatedTokens, string decodedText)
@@ -209,9 +411,6 @@ public sealed class TextGenerator
             ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds))
             : string.Empty;
 
-        double tickFreq = Stopwatch.Frequency;
-        int decodeSteps = generatedIds.Count > 1 ? generatedIds.Count - 1 : 0;
-
         return new InferenceResponse
         {
             GeneratedTokenIds = generatedIds.ToArray(),
@@ -219,14 +418,23 @@ public sealed class TextGenerator
             FinishReason = finishReason,
             PromptTokenCount = promptLen,
             GeneratedTokenCount = generatedIds.Count,
-            Timings = new InferenceTimings
-            {
-                PrefillTimeMs = prefillTicks / tickFreq * 1000.0,
-                DecodeTimeMs = decodeTicks / tickFreq * 1000.0,
-                SamplingTimeMs = samplerTicks / tickFreq * 1000.0,
-                PrefillTokenCount = promptLen,
-                DecodeTokenCount = decodeSteps
-            }
+            Timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks)
+        };
+    }
+
+    private static InferenceTimings BuildTimings(int promptLen, int generatedCount,
+        long prefillTicks, long decodeTicks, long samplerTicks)
+    {
+        double tickFreq = Stopwatch.Frequency;
+        int decodeSteps = generatedCount > 1 ? generatedCount - 1 : 0;
+
+        return new InferenceTimings
+        {
+            PrefillTimeMs = prefillTicks / tickFreq * 1000.0,
+            DecodeTimeMs = decodeTicks / tickFreq * 1000.0,
+            SamplingTimeMs = samplerTicks / tickFreq * 1000.0,
+            PrefillTokenCount = promptLen,
+            DecodeTokenCount = decodeSteps
         };
     }
 }

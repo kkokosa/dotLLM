@@ -48,16 +48,26 @@ var options = new InferenceOptions
     MaxTokens = 128
 };
 
-var response = generator.Generate(prompt, options);
-
+// --- Streaming generation via IAsyncEnumerable ---
 Console.Write(prompt);
-Console.WriteLine(response.Text);
-Console.WriteLine();
-Console.WriteLine($"[Prompt tokens: {response.PromptTokenCount}, Generated: {response.GeneratedTokenCount}, Finish: {response.FinishReason}]");
 
-var t = response.Timings;
-Console.WriteLine($"[Prefill: {t.PrefillTimeMs:F1} ms ({t.PrefillTokensPerSec:F1} tok/s), " +
-    $"Decode: {t.DecodeTimeMs:F1} ms ({t.DecodeTokensPerSec:F1} tok/s), " +
-    $"Sampling: {t.SamplingTimeMs:F1} ms]");
+InferenceTimings timings = default;
+int tokenCount = 0;
+
+await foreach (var token in generator.GenerateStreamingTokensAsync(prompt, options))
+{
+    Console.Write(token.Text);
+    tokenCount++;
+    if (token.Timings.HasValue)
+        timings = token.Timings.Value;
+}
+
+Console.WriteLine();
+Console.WriteLine();
+Console.WriteLine($"[Prompt tokens: {timings.PrefillTokenCount}, Generated: {tokenCount}, " +
+    $"Decode steps: {timings.DecodeTokenCount}]");
+Console.WriteLine($"[Prefill: {timings.PrefillTimeMs:F1} ms ({timings.PrefillTokensPerSec:F1} tok/s), " +
+    $"Decode: {timings.DecodeTimeMs:F1} ms ({timings.DecodeTokensPerSec:F1} tok/s), " +
+    $"Sampling: {timings.SamplingTimeMs:F1} ms]");
 
 return 0;
