@@ -9,6 +9,7 @@ namespace DotLLM.Models.Architectures;
 /// Holds per-layer weight references for a single transformer layer.
 /// Norm weights are dequantized to <c>float[]</c> at load time (small).
 /// Linear projection weights remain as mmap pointers with their quantization type.
+/// Bias arrays are nullable — null when the model has no biases (e.g. standard Llama/Mistral).
 /// </summary>
 internal readonly struct LlamaLayerWeights
 {
@@ -20,24 +21,32 @@ internal readonly struct LlamaLayerWeights
     public readonly QuantizationType QQuantType;
     public readonly int QOutputDim;
     public readonly int QInputDim;
+    /// <summary>Optional Q projection bias [QOutputDim]. Null when absent.</summary>
+    public readonly float[]? QBias;
 
     /// <summary>K projection pointer, quantType, output dim, input dim.</summary>
     public readonly nint KWeight;
     public readonly QuantizationType KQuantType;
     public readonly int KOutputDim;
     public readonly int KInputDim;
+    /// <summary>Optional K projection bias [KOutputDim]. Null when absent.</summary>
+    public readonly float[]? KBias;
 
     /// <summary>V projection pointer, quantType, output dim, input dim.</summary>
     public readonly nint VWeight;
     public readonly QuantizationType VQuantType;
     public readonly int VOutputDim;
     public readonly int VInputDim;
+    /// <summary>Optional V projection bias [VOutputDim]. Null when absent.</summary>
+    public readonly float[]? VBias;
 
     /// <summary>Output projection pointer, quantType, output dim, input dim.</summary>
     public readonly nint OWeight;
     public readonly QuantizationType OQuantType;
     public readonly int OOutputDim;
     public readonly int OInputDim;
+    /// <summary>Optional output projection bias [OOutputDim]. Null when absent.</summary>
+    public readonly float[]? OBias;
 
     /// <summary>Pre-FFN RMSNorm weight [hiddenSize].</summary>
     public readonly float[] FfnNormWeight;
@@ -47,18 +56,24 @@ internal readonly struct LlamaLayerWeights
     public readonly QuantizationType GateQuantType;
     public readonly int GateOutputDim;
     public readonly int GateInputDim;
+    /// <summary>Optional gate projection bias [GateOutputDim]. Null when absent.</summary>
+    public readonly float[]? GateBias;
 
     /// <summary>SwiGLU up projection.</summary>
     public readonly nint UpWeight;
     public readonly QuantizationType UpQuantType;
     public readonly int UpOutputDim;
     public readonly int UpInputDim;
+    /// <summary>Optional up projection bias [UpOutputDim]. Null when absent.</summary>
+    public readonly float[]? UpBias;
 
     /// <summary>Down projection.</summary>
     public readonly nint DownWeight;
     public readonly QuantizationType DownQuantType;
     public readonly int DownOutputDim;
     public readonly int DownInputDim;
+    /// <summary>Optional down projection bias [DownOutputDim]. Null when absent.</summary>
+    public readonly float[]? DownBias;
 
     public LlamaLayerWeights(
         float[] attnNormWeight,
@@ -69,17 +84,19 @@ internal readonly struct LlamaLayerWeights
         float[] ffnNormWeight,
         nint gateWeight, QuantizationType gateQuantType, int gateOutputDim, int gateInputDim,
         nint upWeight, QuantizationType upQuantType, int upOutputDim, int upInputDim,
-        nint downWeight, QuantizationType downQuantType, int downOutputDim, int downInputDim)
+        nint downWeight, QuantizationType downQuantType, int downOutputDim, int downInputDim,
+        float[]? qBias = null, float[]? kBias = null, float[]? vBias = null, float[]? oBias = null,
+        float[]? gateBias = null, float[]? upBias = null, float[]? downBias = null)
     {
         AttnNormWeight = attnNormWeight;
-        QWeight = qWeight; QQuantType = qQuantType; QOutputDim = qOutputDim; QInputDim = qInputDim;
-        KWeight = kWeight; KQuantType = kQuantType; KOutputDim = kOutputDim; KInputDim = kInputDim;
-        VWeight = vWeight; VQuantType = vQuantType; VOutputDim = vOutputDim; VInputDim = vInputDim;
-        OWeight = oWeight; OQuantType = oQuantType; OOutputDim = oOutputDim; OInputDim = oInputDim;
+        QWeight = qWeight; QQuantType = qQuantType; QOutputDim = qOutputDim; QInputDim = qInputDim; QBias = qBias;
+        KWeight = kWeight; KQuantType = kQuantType; KOutputDim = kOutputDim; KInputDim = kInputDim; KBias = kBias;
+        VWeight = vWeight; VQuantType = vQuantType; VOutputDim = vOutputDim; VInputDim = vInputDim; VBias = vBias;
+        OWeight = oWeight; OQuantType = oQuantType; OOutputDim = oOutputDim; OInputDim = oInputDim; OBias = oBias;
         FfnNormWeight = ffnNormWeight;
-        GateWeight = gateWeight; GateQuantType = gateQuantType; GateOutputDim = gateOutputDim; GateInputDim = gateInputDim;
-        UpWeight = upWeight; UpQuantType = upQuantType; UpOutputDim = upOutputDim; UpInputDim = upInputDim;
-        DownWeight = downWeight; DownQuantType = downQuantType; DownOutputDim = downOutputDim; DownInputDim = downInputDim;
+        GateWeight = gateWeight; GateQuantType = gateQuantType; GateOutputDim = gateOutputDim; GateInputDim = gateInputDim; GateBias = gateBias;
+        UpWeight = upWeight; UpQuantType = upQuantType; UpOutputDim = upOutputDim; UpInputDim = upInputDim; UpBias = upBias;
+        DownWeight = downWeight; DownQuantType = downQuantType; DownOutputDim = downOutputDim; DownInputDim = downInputDim; DownBias = downBias;
     }
 }
 
@@ -197,6 +214,12 @@ internal sealed class LlamaWeights
         var (vPtr, vQt, vM, vK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_v.weight"]);
         var (oPtr, oQt, oM, oK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_output.weight"]);
 
+        // Optional biases (e.g. Bielik). Null when absent (standard Llama/Mistral).
+        float[]? qBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_q.bias");
+        float[]? kBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_k.bias");
+        float[]? vBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_v.bias");
+        float[]? oBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_output.bias");
+
         // FFN norm
         var ffnNormDesc = tensors[$"{prefix}.ffn_norm.weight"];
         float[] ffnNorm = DequantizeNorm(dataBase, ffnNormDesc, hiddenSize);
@@ -205,6 +228,10 @@ internal sealed class LlamaWeights
         var (gatePtr, gateQt, gateM, gateK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_gate.weight"]);
         var (upPtr, upQt, upM, upK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_up.weight"]);
         var (downPtr, downQt, downM, downK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_down.weight"]);
+
+        float[]? gateBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_gate.bias");
+        float[]? upBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_up.bias");
+        float[]? downBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_down.bias");
 
         return new LlamaLayerWeights(
             attnNorm,
@@ -215,7 +242,9 @@ internal sealed class LlamaWeights
             ffnNorm,
             gatePtr, gateQt, gateM, gateK,
             upPtr, upQt, upM, upK,
-            downPtr, downQt, downM, downK);
+            downPtr, downQt, downM, downK,
+            qBias, kBias, vBias, oBias,
+            gateBias, upBias, downBias);
     }
 
     private static (nint ptr, QuantizationType qt, int outputDim, int inputDim) LoadLinear(
@@ -233,6 +262,19 @@ internal sealed class LlamaWeights
         nint ptr = dataBase + (nint)desc.DataOffset;
         float[] result = new float[expectedSize];
         Dequantize.ToFloat32(ptr, expectedSize, desc.QuantizationType, result);
+        return result;
+    }
+
+    /// <summary>
+    /// Loads an optional bias tensor (F32 in GGUF). Returns null when the tensor is absent.
+    /// </summary>
+    private static float[]? LoadOptionalBias(nint dataBase,
+        IReadOnlyDictionary<string, GgufTensorDescriptor> tensors, string name)
+    {
+        if (!tensors.TryGetValue(name, out var desc)) return null;
+        int size = (int)desc.Shape.ElementCount;
+        float[] result = new float[size];
+        Dequantize.ToFloat32(dataBase + (nint)desc.DataOffset, size, desc.QuantizationType, result);
         return result;
     }
 }

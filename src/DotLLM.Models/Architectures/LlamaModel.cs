@@ -166,6 +166,11 @@ public sealed unsafe class LlamaModel : IModel
             Gemm(lw.KWeight, lw.KQuantType, normOut, k, lw.KOutputDim, lw.KInputDim, seqLen, preQuantNorm);
             Gemm(lw.VWeight, lw.VQuantType, normOut, v, lw.VOutputDim, lw.VInputDim, seqLen, preQuantNorm);
 
+            // Optional bias: y = Wx + b (no-op when null)
+            AddBias(lw.QBias, q, lw.QOutputDim, seqLen);
+            AddBias(lw.KBias, k, lw.KOutputDim, seqLen);
+            AddBias(lw.VBias, v, lw.VOutputDim, seqLen);
+
             // d. RoPE (in-place on Q and K for all tokens)
             RoPE.Execute(
                 new Span<float>(q, seqLen * numHeads * headDim),
@@ -199,6 +204,7 @@ public sealed unsafe class LlamaModel : IModel
             // f. Batched O projection
             byte* preQuantAttn = QuantizeInput(attnOut, inputQ8Scratch, numHeads * headDim, seqLen, lw.OQuantType);
             Gemm(lw.OWeight, lw.OQuantType, attnOut, normOut, lw.OOutputDim, lw.OInputDim, seqLen, preQuantAttn);
+            AddBias(lw.OBias, normOut, lw.OOutputDim, seqLen);
 
             // g. Residual add (per token)
             for (int t = 0; t < seqLen; t++)
@@ -228,6 +234,8 @@ public sealed unsafe class LlamaModel : IModel
             // Batched Gate + Up projections
             Gemm(lw.GateWeight, lw.GateQuantType, normOut, ffnGate, lw.GateOutputDim, lw.GateInputDim, seqLen, preQuantFfn);
             Gemm(lw.UpWeight, lw.UpQuantType, normOut, ffnUp, lw.UpOutputDim, lw.UpInputDim, seqLen, preQuantFfn);
+            AddBias(lw.GateBias, ffnGate, lw.GateOutputDim, seqLen);
+            AddBias(lw.UpBias, ffnUp, lw.UpOutputDim, seqLen);
 
             // SiLU + Multiply (element-wise, per token)
             for (int t = 0; t < seqLen; t++)
@@ -251,6 +259,7 @@ public sealed unsafe class LlamaModel : IModel
 
             // Batched Down projection (output into normOut as scratch)
             Gemm(lw.DownWeight, lw.DownQuantType, siluOut, normOut, lw.DownOutputDim, lw.DownInputDim, seqLen, preQuantSilu);
+            AddBias(lw.DownBias, normOut, lw.DownOutputDim, seqLen);
 
             // k. Residual add (per token)
             for (int t = 0; t < seqLen; t++)
@@ -290,6 +299,21 @@ public sealed unsafe class LlamaModel : IModel
             new Span<float>((void*)result.DataPointer, vocabSize));
 
         return result;
+    }
+
+    /// <summary>
+    /// Adds a bias vector [outputDim] to each row of a [seqLen, outputDim] output buffer.
+    /// No-op when <paramref name="bias"/> is null (zero overhead for bias-less models).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AddBias(float[]? bias, float* output, int outputDim, int seqLen)
+    {
+        if (bias is null) return;
+        for (int t = 0; t < seqLen; t++)
+        {
+            var row = new Span<float>(output + t * outputDim, outputDim);
+            TensorPrimitives.Add((ReadOnlySpan<float>)row, bias, row);
+        }
     }
 
     /// <summary>
