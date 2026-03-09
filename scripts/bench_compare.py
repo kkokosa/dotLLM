@@ -10,6 +10,7 @@ Usage:
     python scripts/bench_compare.py --model bartowski/Llama-3.2-3B-Instruct-GGUF --quant Q8_0
     python scripts/bench_compare.py --model path/to/model.gguf --llamacpp
     python scripts/bench_compare.py --model path/to/model.gguf --llamacpp --dotllm
+    python scripts/bench_compare.py --model repo/A,repo/B --quant Q4_K_M,Q8_0
 """
 
 from __future__ import annotations
@@ -562,25 +563,46 @@ ENGINES: dict[str, callable] = {
 
 
 def print_comparison(results: list[EngineResult], prompt: str, max_tokens: int) -> None:
-    """Print a formatted comparison table."""
+    """Print a formatted comparison table, supporting multiple models."""
     if not results:
         print("No results to display.")
         return
 
-    model_name = results[0].model
+    # Ordered unique models
+    models = list(dict.fromkeys(r.model for r in results))
+    multi_model = len(models) > 1
+
     print()
     prompt_preview = prompt[:80] + "..." if len(prompt) > 80 else prompt
-    print(f"=== Engine Comparison: {model_name} ===")
+    if multi_model:
+        print(f"=== Benchmark Results ({len(models)} models) ===")
+    else:
+        print(f"=== Engine Comparison: {models[0]} ===")
     print(f'Prompt: "{prompt_preview}", Max tokens: {max_tokens}')
     print()
 
-    # Header
-    hdr = f"{'Engine':<14} {'Prefill':>10} {'':>10} {'Decode':>10} {'':>10} {'':>8} {'Total':>8}  {'Notes'}"
-    sub = f"{'':14} {'ms':>10} {'tok/s':>10} {'ms':>10} {'tok/s':>10} {'ms/tok':>8} {'tok/s':>8}"
-    sep = "\u2500" * 100
+    def speedup(base_val: float, other_val: float, higher_is_better: bool) -> str:
+        """Return speedup string. >1.0x means dotLLM is faster."""
+        if base_val == 0 or other_val == 0:
+            return "N/A"
+        if higher_is_better:
+            return f"{base_val / other_val:.2f}x"
+        else:
+            return f"{other_val / base_val:.2f}x"
 
-    print(hdr)
-    print(sub)
+    # Dynamic model column width
+    model_w = max((len(r.model) for r in results), default=10) + 2 if multi_model else 0
+
+    def prefix(text: str) -> str:
+        return f"{text:<{model_w}} " if multi_model else ""
+
+    # Header
+    data_cols = f"{'Engine':<14} {'Prefill':>10} {'':>10} {'Decode':>10} {'':>10} {'':>8} {'Total':>8}  {'Notes'}"
+    sub_cols = f"{'':14} {'ms':>10} {'tok/s':>10} {'ms':>10} {'tok/s':>10} {'ms/tok':>8} {'tok/s':>8}"
+    sep = "-" * (100 + (model_w + 1 if multi_model else 0))
+
+    print(f"{prefix('Model' if multi_model else '')}{data_cols}")
+    print(f"{prefix('')}{sub_cols}")
     print(sep)
 
     for r in results:
@@ -593,6 +615,7 @@ def print_comparison(results: list[EngineResult], prompt: str, max_tokens: int) 
             notes = "(median of runs)"
 
         print(
+            f"{prefix(r.model)}"
             f"{r.engine:<14} "
             f"{r.prefill_ms:>10.1f} {r.prefill_tok_per_sec:>10.1f} "
             f"{r.decode_ms:>10.1f} {r.decode_tok_per_sec:>10.1f} "
@@ -601,37 +624,34 @@ def print_comparison(results: list[EngineResult], prompt: str, max_tokens: int) 
 
     print(sep)
 
-    # Ratio rows: dotLLM as baseline, one row per other engine.
+    # Ratio rows: dotLLM as baseline, grouped by model.
     # >1.0x consistently means dotLLM is faster.
     # For time (ms, ms/tok): other/dotllm  — other took more time = dotLLM faster.
     # For throughput (tok/s): dotllm/other — dotLLM has more throughput.
-    dotllm_results = [r for r in results if r.engine == "dotLLM"]
-    other_results = [r for r in results if r.engine != "dotLLM"]
+    has_ratios = False
+    for model in models:
+        model_results = [r for r in results if r.model == model]
+        dotllm_results = [r for r in model_results if r.engine == "dotLLM"]
+        other_results = [r for r in model_results if r.engine != "dotLLM"]
 
-    if dotllm_results and other_results:
-        base = dotllm_results[0]
+        if dotllm_results and other_results:
+            base = dotllm_results[0]
+            for comp in other_results:
+                has_ratios = True
+                label = f"vs {comp.engine}"
+                print(
+                    f"{prefix(model)}"
+                    f"{label:<14} "
+                    f"{speedup(base.prefill_ms, comp.prefill_ms, False):>10} "
+                    f"{speedup(base.prefill_tok_per_sec, comp.prefill_tok_per_sec, True):>10} "
+                    f"{speedup(base.decode_ms, comp.decode_ms, False):>10} "
+                    f"{speedup(base.decode_tok_per_sec, comp.decode_tok_per_sec, True):>10} "
+                    f"{speedup(base.decode_ms_per_tok, comp.decode_ms_per_tok, False):>8} "
+                    f"{speedup(base.total_tok_per_sec, comp.total_tok_per_sec, True):>8}  "
+                    f"(>1 = dotLLM faster)"
+                )
 
-        def speedup(base_val: float, other_val: float, higher_is_better: bool) -> str:
-            """Return speedup string. >1.0x means dotLLM is faster."""
-            if base_val == 0 or other_val == 0:
-                return "N/A"
-            if higher_is_better:
-                return f"{base_val / other_val:.2f}x"
-            else:
-                return f"{other_val / base_val:.2f}x"
-
-        for comp in other_results:
-            label = f"vs {comp.engine}"
-            print(
-                f"{label:<14} "
-                f"{speedup(base.prefill_ms, comp.prefill_ms, False):>10} "
-                f"{speedup(base.prefill_tok_per_sec, comp.prefill_tok_per_sec, True):>10} "
-                f"{speedup(base.decode_ms, comp.decode_ms, False):>10} "
-                f"{speedup(base.decode_tok_per_sec, comp.decode_tok_per_sec, True):>10} "
-                f"{speedup(base.decode_ms_per_tok, comp.decode_ms_per_tok, False):>8} "
-                f"{speedup(base.total_tok_per_sec, comp.total_tok_per_sec, True):>8}  "
-                f"(>1 = dotLLM faster)"
-            )
+    if has_ratios:
         print(sep)
 
     print()
@@ -652,9 +672,9 @@ def main() -> int:
         description="Run dotLLM benchmarks and compare against other engines."
     )
     parser.add_argument("--model", type=str, default=None,
-                        help="HuggingFace repo ID (e.g. 'QuantFactory/SmolLM-135M-GGUF') or local .gguf path")
+                        help="HF repo ID(s) or .gguf path(s), comma-separated (e.g. 'repo/A,repo/B')")
     parser.add_argument("--quant", type=str, default=None,
-                        help="Quantization filter substring (e.g. 'Q8_0') to narrow GGUF selection")
+                        help="Quantization filter(s), comma-separated (e.g. 'Q4_K_M,Q8_0')")
     parser.add_argument("--prompt", type=str, default=None,
                         help="Custom prompt text (overrides --prompt-size)")
     parser.add_argument("--prompt-size", type=str, default="short",
@@ -692,12 +712,17 @@ def main() -> int:
         prompt_size_label = args.prompt_size
         prompt = PROMPTS[prompt_size_label]
 
-    # Resolve model: download from HF if needed, get a single local path
-    resolved_model: str | None = None
-    if args.model:
-        resolved_path = resolve_model(args.model, args.quant)
-        resolved_model = str(resolved_path)
-        print(f"[model] Resolved: {resolved_model}")
+    # Resolve model(s): comma-separated list supported
+    model_specs = [m.strip() for m in args.model.split(",")] if args.model else []
+    quant_specs = [q.strip() for q in args.quant.split(",")] if args.quant else [None]
+
+    resolved_models: list[str] = []
+    if model_specs:
+        for model_spec in model_specs:
+            for quant_spec in quant_specs:
+                resolved_path = resolve_model(model_spec, quant_spec)
+                resolved_models.append(str(resolved_path))
+        print(f"[model] Resolved {len(resolved_models)} model(s)")
     else:
         # No --model: list cached models and exit
         models_dir = _default_models_dir()
@@ -721,7 +746,7 @@ def main() -> int:
     estimated_tokens = max(1, len(prompt.split()) * 4 // 3)  # rough word→token estimate
     prompt_preview = prompt[:60] + "..." if len(prompt) > 60 else prompt
     print()
-    print(f"[config] Threads: {os.cpu_count()} (auto)")
+    print(f"[config] Models: {len(resolved_models)}, Threads: {os.cpu_count()} (auto)")
     print(f'[config] Prompt ({prompt_size_label}): "{prompt_preview}" (~{estimated_tokens} tokens est.)')
     print(f"[config] Max tokens: {args.tokens}")
     print()
@@ -742,23 +767,30 @@ def main() -> int:
 
     all_results: list[EngineResult] = []
 
-    for name in engine_names:
-        if name not in ENGINES:
-            print(f"Unknown engine: {name}. Available: {', '.join(ENGINES.keys())}", file=sys.stderr)
-            return 1
+    for i, resolved_model in enumerate(resolved_models):
+        if len(resolved_models) > 1:
+            model_label = Path(resolved_model).stem
+            print(f"\n{'-' * 60}")
+            print(f"[bench] {model_label} ({i + 1}/{len(resolved_models)})")
+            print(f"{'-' * 60}")
 
-        fn = ENGINES[name]
-        results = fn(
-            model_path=resolved_model,
-            prompt=prompt,
-            max_tokens=args.tokens,
-            runs=args.runs,
-            llamacpp_bin=llamacpp_bin,
-            bdn_filter=args.bdn_filter,
-            bdn_project=args.bdn_project,
-            skip_bdn_build=args.skip_bdn_build,
-        )
-        all_results.extend(results)
+        for name in engine_names:
+            if name not in ENGINES:
+                print(f"Unknown engine: {name}. Available: {', '.join(ENGINES.keys())}", file=sys.stderr)
+                return 1
+
+            fn = ENGINES[name]
+            results = fn(
+                model_path=resolved_model,
+                prompt=prompt,
+                max_tokens=args.tokens,
+                runs=args.runs,
+                llamacpp_bin=llamacpp_bin,
+                bdn_filter=args.bdn_filter,
+                bdn_project=args.bdn_project,
+                skip_bdn_build=args.skip_bdn_build,
+            )
+            all_results.extend(results)
 
     print_comparison(all_results, prompt, args.tokens)
     return 0
