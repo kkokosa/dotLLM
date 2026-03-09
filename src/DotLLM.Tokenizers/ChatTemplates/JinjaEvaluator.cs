@@ -19,7 +19,7 @@ internal sealed class JinjaEvaluator
     private static readonly Dictionary<string, Func<object?, IReadOnlyList<object?>, object?>> Filters = new()
     {
         ["trim"] = (input, _) => input?.ToString()?.Trim() ?? "",
-        ["tojson"] = (input, _) => ToJson(input),
+        ["tojson"] = (input, args) => ToJson(input, args.Count > 0 ? ToInt(args[0]) : 0),
         ["length"] = (input, _) => GetLength(input),
         ["default"] = (input, args) =>
         {
@@ -370,7 +370,7 @@ internal sealed class JinjaEvaluator
                 return args.Count switch
                 {
                     1 => Enumerable.Range(0, ToInt(args[0])).Cast<object?>().ToList(),
-                    2 => Enumerable.Range(ToInt(args[0]), ToInt(args[1]) - ToInt(args[0])).Cast<object?>().ToList(),
+                    2 => Enumerable.Range(ToInt(args[0]), Math.Max(0, ToInt(args[1]) - ToInt(args[0]))).Cast<object?>().ToList(),
                     _ => throw new JinjaException("range() takes 1 or 2 arguments")
                 };
             }
@@ -557,7 +557,6 @@ internal sealed class JinjaEvaluator
         if (value is double d) return d != 0.0;
         if (value is string s) return s.Length > 0;
         if (value is ICollection c) return c.Count > 0;
-        if (value is IList l) return l.Count > 0;
         return true;
     }
 
@@ -584,7 +583,7 @@ internal sealed class JinjaEvaluator
         return Stringify(value);
     }
 
-    private static string ToJson(object? value)
+    private static string ToJson(object? value, int indent = 0)
     {
         if (value is null || ReferenceEquals(value, Undefined))
             return "null";
@@ -597,40 +596,89 @@ internal sealed class JinjaEvaluator
         if (value is string s)
             return JsonSerializer.Serialize(s);
         if (value is Dictionary<string, object?> dict)
-            return SerializeDictToJson(dict);
+            return SerializeDictToJson(dict, indent, 0);
         if (value is IList list)
-            return SerializeListToJson(list);
+            return SerializeListToJson(list, indent, 0);
         return JsonSerializer.Serialize(value);
     }
 
-    private static string SerializeDictToJson(Dictionary<string, object?> dict)
+    private static string SerializeDictToJson(Dictionary<string, object?> dict, int indent, int depth)
     {
-        var sb = new StringBuilder();
-        sb.Append('{');
-        bool first = true;
+        if (indent <= 0)
+        {
+            var sb = new StringBuilder();
+            sb.Append('{');
+            bool first = true;
+            foreach (var kvp in dict)
+            {
+                if (!first) sb.Append(", ");
+                first = false;
+                sb.Append(JsonSerializer.Serialize(kvp.Key));
+                sb.Append(": ");
+                sb.Append(ToJson(kvp.Value));
+            }
+            sb.Append('}');
+            return sb.ToString();
+        }
+
+        var isb = new StringBuilder();
+        isb.Append("{\n");
+        string childIndent = new(' ', indent * (depth + 1));
+        string closingIndent = new(' ', indent * depth);
+        bool ifirst = true;
         foreach (var kvp in dict)
         {
-            if (!first) sb.Append(", ");
-            first = false;
-            sb.Append(JsonSerializer.Serialize(kvp.Key));
-            sb.Append(": ");
-            sb.Append(ToJson(kvp.Value));
+            if (!ifirst) isb.Append(",\n");
+            ifirst = false;
+            isb.Append(childIndent);
+            isb.Append(JsonSerializer.Serialize(kvp.Key));
+            isb.Append(": ");
+            isb.Append(SerializeValueToJson(kvp.Value, indent, depth + 1));
         }
-        sb.Append('}');
-        return sb.ToString();
+        isb.Append('\n');
+        isb.Append(closingIndent);
+        isb.Append('}');
+        return isb.ToString();
     }
 
-    private static string SerializeListToJson(IList list)
+    private static string SerializeListToJson(IList list, int indent, int depth)
     {
-        var sb = new StringBuilder();
-        sb.Append('[');
+        if (indent <= 0)
+        {
+            var sb = new StringBuilder();
+            sb.Append('[');
+            for (int i = 0; i < list.Count; i++)
+            {
+                if (i > 0) sb.Append(", ");
+                sb.Append(ToJson(list[i]));
+            }
+            sb.Append(']');
+            return sb.ToString();
+        }
+
+        var isb = new StringBuilder();
+        isb.Append("[\n");
+        string childIndent = new(' ', indent * (depth + 1));
+        string closingIndent = new(' ', indent * depth);
         for (int i = 0; i < list.Count; i++)
         {
-            if (i > 0) sb.Append(", ");
-            sb.Append(ToJson(list[i]));
+            if (i > 0) isb.Append(",\n");
+            isb.Append(childIndent);
+            isb.Append(SerializeValueToJson(list[i], indent, depth + 1));
         }
-        sb.Append(']');
-        return sb.ToString();
+        isb.Append('\n');
+        isb.Append(closingIndent);
+        isb.Append(']');
+        return isb.ToString();
+    }
+
+    private static string SerializeValueToJson(object? value, int indent, int depth)
+    {
+        if (value is Dictionary<string, object?> dict)
+            return SerializeDictToJson(dict, indent, depth);
+        if (value is IList list)
+            return SerializeListToJson(list, indent, depth);
+        return ToJson(value);
     }
 
     private static new bool Equals(object? a, object? b)

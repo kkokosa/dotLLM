@@ -41,7 +41,7 @@ public sealed class BpeTokenizer : ITokenizer
     /// </summary>
     /// <param name="tokens">Vocabulary strings indexed by token ID.</param>
     /// <param name="scores">Unigram log-probability scores (higher = preferred merge).</param>
-    /// <param name="tokenTypes">Per-token type flags (0=normal, 1=unknown, 2=control, 3=byte, 5=user-defined). Null = all normal.</param>
+    /// <param name="tokenTypes">Per-token type flags (1=normal, 2=unknown, 3=control, 4=user-defined, 5=unused, 6=byte). Null = all normal.</param>
     /// <param name="bosId">Beginning-of-sequence token ID.</param>
     /// <param name="eosId">End-of-sequence token ID.</param>
     /// <param name="addBosSpace">Prepend ▁ to text that doesn't start with a space (matches SentencePiece default).</param>
@@ -98,7 +98,7 @@ public sealed class BpeTokenizer : ITokenizer
 
     /// <summary>
     /// Builds the special token table from vocabulary and token types.
-    /// Control tokens (type 3) and user-defined tokens (type 6) that are non-empty
+    /// Control tokens (type 3) and user-defined tokens (type 4) that are non-empty
     /// and not single-byte are treated as special tokens for pre-splitting.
     /// Sorted by descending length for longest-match-first semantics.
     /// </summary>
@@ -110,9 +110,9 @@ public sealed class BpeTokenizer : ITokenizer
         var special = new List<(string Text, int Id)>();
         for (int i = 0; i < tokens.Length && i < tokenTypes.Length; i++)
         {
-            // Type 3 = control, Type 6 = user-defined (added tokens)
+            // Type 3 = control, Type 4 = user-defined (added tokens)
             // Skip single chars and empty strings — they're not useful for pre-splitting
-            if ((tokenTypes[i] == 3 || tokenTypes[i] == 6) &&
+            if ((tokenTypes[i] == 3 || tokenTypes[i] == 4) &&
                 tokens[i].Length > 1 &&
                 !string.IsNullOrEmpty(tokens[i]))
             {
@@ -196,7 +196,8 @@ public sealed class BpeTokenizer : ITokenizer
             for (int i = 0; i < _specialTokens.Length; i++)
             {
                 var (specialText, _) = _specialTokens[i];
-                if (pos + specialText.Length <= text.Length &&
+                if (text[pos] == specialText[0] &&
+                    pos + specialText.Length <= text.Length &&
                     text.AsSpan(pos, specialText.Length).SequenceEqual(specialText))
                 {
                     return pos;

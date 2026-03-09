@@ -98,10 +98,10 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
         if (resolvedPath is null)
             return 1;
 
-        GgufFile gguf = null!;
-        ModelConfig config = null!;
-        Tokenizers.Bpe.BpeTokenizer tokenizer = null!;
-        LlamaModel model = null!;
+        GgufFile? gguf = null;
+        ModelConfig? config = null;
+        Tokenizers.Bpe.BpeTokenizer? tokenizer = null;
+        LlamaModel? model = null;
 
         AnsiConsole.Status()
             .Spinner(Spinner.Known.Dots)
@@ -122,10 +122,10 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
             });
 
         // Create chat template from GGUF metadata, fallback to ChatML
-        string bosTokenStr = tokenizer.DecodeToken(tokenizer.BosTokenId);
+        string bosTokenStr = tokenizer!.DecodeToken(tokenizer.BosTokenId);
         string eosTokenStr = tokenizer.DecodeToken(tokenizer.EosTokenId);
         IChatTemplate chatTemplate;
-        var jinjaTemplate = GgufChatTemplateFactory.TryCreate(gguf.Metadata, tokenizer);
+        var jinjaTemplate = GgufChatTemplateFactory.TryCreate(gguf!.Metadata, tokenizer);
         chatTemplate = jinjaTemplate ?? new JinjaChatTemplate(DefaultChatMlTemplate, bosTokenStr, eosTokenStr);
 
         // Common end-of-turn markers used by chat templates.
@@ -156,7 +156,7 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
         var threadingInfo = new ThreadingConfig(settings.Threads);
         var quantLabel = InferQuantLabel(resolvedPath, settings.Quant);
         var samplingLabel = BuildSamplingLabel(settings);
-        var segments = $"{config.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {threadingInfo.EffectiveThreadCount} threads | {samplingLabel}";
+        var segments = $"{config!.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {threadingInfo.EffectiveThreadCount} threads | {samplingLabel}";
         AnsiConsole.Write(new Rule($"[grey]dotllm chat | {Markup.Escape(segments)}[/]").LeftJustified());
         AnsiConsole.MarkupLine("[dim]Type /exit to quit, /clear to reset history, /system <text> to set system prompt.[/]");
         AnsiConsole.WriteLine();
@@ -166,7 +166,7 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
         if (!string.IsNullOrEmpty(settings.SystemPrompt))
             history.Add(new ChatMessage { Role = "system", Content = settings.SystemPrompt });
 
-        var generator = new TextGenerator(model, tokenizer);
+        var generator = new TextGenerator(model!, tokenizer);
 
         try
         {
@@ -174,8 +174,8 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
         }
         finally
         {
-            model.Dispose();
-            gguf.Dispose();
+            model?.Dispose();
+            gguf?.Dispose();
         }
 
         return 0;
@@ -238,10 +238,13 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
             // Generate response
             var sw = Stopwatch.StartNew();
             int tokenCount = 0;
+            long firstTokenTicks = 0;
 
             var response = generator.Generate(prompt, options,
                 onTokenGenerated: tokenId =>
                 {
+                    if (tokenCount == 0)
+                        firstTokenTicks = sw.ElapsedTicks;
                     Console.Write(tokenizer.DecodeToken(tokenId));
                     tokenCount++;
                 });
@@ -261,8 +264,14 @@ internal sealed class ChatCommand : Command<ChatCommand.Settings>
             history.Add(new ChatMessage { Role = "assistant", Content = assistantText.TrimEnd() });
 
             // Print timing info
-            double tokPerSec = tokenCount > 0 ? tokenCount / sw.Elapsed.TotalSeconds : 0;
-            AnsiConsole.MarkupLine($"[dim][[{tokenCount} tokens, {tokPerSec:F1} tok/s]][/]");
+            double ttftMs = firstTokenTicks > 0 ? firstTokenTicks * 1000.0 / Stopwatch.Frequency : 0;
+            int promptTokens = response.PromptTokenCount;
+            var timings = response.Timings;
+            double prefillTokSec = timings.PrefillTokensPerSec;
+            double decodeTokSec = timings.DecodeTokensPerSec;
+            AnsiConsole.MarkupLine(
+                $"[dim][[{promptTokens} prompt tokens, {tokenCount} generated tokens, " +
+                $"{ttftMs:F0} ms TTFT, {prefillTokSec:F1} prefill tok/s, {decodeTokSec:F1} decode tok/s]][/]");
             Console.WriteLine();
         }
     }
