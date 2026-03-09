@@ -200,13 +200,9 @@ public class Q4KForwardPassTests
 
         var response = generator.Generate("The capital of France is", options);
 
-        // Q4_K_M on a 135M model may not get "Paris" due to quantization loss,
-        // but should still produce coherent non-empty output with valid tokens.
         Assert.True(response.GeneratedTokenIds.Length > 0);
-        Assert.False(string.IsNullOrWhiteSpace(response.Text));
-
-        foreach (int id in response.GeneratedTokenIds)
-            Assert.InRange(id, 0, model.Config.VocabSize - 1);
+        string firstToken = tokenizer.DecodeToken(response.GeneratedTokenIds[0]).Trim();
+        Assert.Equal("Paris", firstToken);
     }
 
     [Fact]
