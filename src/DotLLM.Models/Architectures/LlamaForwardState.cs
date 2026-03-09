@@ -34,10 +34,11 @@ internal sealed unsafe class LlamaForwardState : IDisposable
             bytes += s * _intermediateSize * 3;              // FfnGate + FfnUp + SiluOutput
             bytes += _vocabSize;                             // Logits (only last token)
             bytes *= sizeof(float);
-            // InputQ8Scratch: seqLen × q8RowBytes (max of hidden/intermediate dim)
+            // InputQ8Scratch: seqLen × max(Q8_0, Q8_K) row bytes
             int maxInputDim = Math.Max(_hiddenSize, _intermediateSize);
-            int q8RowBytes = (maxInputDim / 32) * 34;
-            bytes += s * q8RowBytes;
+            int q8_0Bytes = (maxInputDim / 32) * 34;
+            int q8_kBytes = (maxInputDim / 256) * 292;
+            bytes += s * Math.Max(q8_0Bytes, q8_kBytes);
             // RoPE tables (managed, but still part of compute memory)
             bytes += (CosTable.Length + SinTable.Length) * sizeof(float);
             return bytes;
@@ -58,7 +59,8 @@ internal sealed unsafe class LlamaForwardState : IDisposable
     public nint Logits;
 
     /// <summary>
-    /// Scratch buffer for pre-quantized Q8_0 input rows [seqLen × q8RowBytes].
+    /// Scratch buffer for pre-quantized input rows [seqLen × rowBytes].
+    /// Sized for the larger of Q8_0 (34 bytes per 32 elements) and Q8_K (292 bytes per 256 elements).
     /// Used to quantize the input once and reuse across Q/K/V and Gate/Up projections.
     /// </summary>
     public nint InputQ8Scratch;
@@ -116,10 +118,13 @@ internal sealed unsafe class LlamaForwardState : IDisposable
         SiluOutput = AllocFloats(newCapacity * _intermediateSize);
         Logits = AllocFloats(_vocabSize); // Only last token's logits needed
 
-        // InputQ8Scratch: seqLen × q8RowBytes for pre-quantized GEMM input reuse.
+        // InputQ8Scratch: seqLen × max(q8_0RowBytes, q8_kRowBytes) for pre-quantized GEMM input reuse.
+        // Q8_0: 34 bytes per 32-element block. Q8_K: 292 bytes per 256-element block.
         int maxInputDim = Math.Max(_hiddenSize, _intermediateSize);
-        int q8RowBytes = (maxInputDim / 32) * 34; // Q8_0: 34 bytes per 32-element block
-        InputQ8Scratch = AllocBytes(newCapacity * q8RowBytes);
+        int q8_0RowBytes = (maxInputDim / 32) * 34;
+        int q8_kRowBytes = (maxInputDim / 256) * 292;
+        int scratchRowBytes = Math.Max(q8_0RowBytes, q8_kRowBytes);
+        InputQ8Scratch = AllocBytes(newCapacity * scratchRowBytes);
 
         _currentSeqLen = newCapacity;
     }
