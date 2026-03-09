@@ -104,7 +104,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 |-------|-------------|--------|
 | **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | Done (9/9) |
 | **2 — Practical Local Inference** | Engine metrics, inference benchmarks, Q4_K_M, chat templates, streaming, hooks, logit lens, more architectures | In Progress (7/13) |
-| **2B — CPU Performance** | Weight repacking, outer-product GEMM, tiled attention, fast exp, operator fusion, NUMA | Planned (0/6) |
+| **2B — CPU Performance** | Decode dispatch optimization, Q8_1 input format, weight repacking, outer-product GEMM, tiled attention, fast exp, operator fusion, NUMA | Planned (0/8) |
 | **3 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Planned |
 | **4 — Production Serving** | OpenAI API, continuous batching, paged KV-cache, structured output, tool calling | Planned |
 | **5 — Expand** | LoRA, MLA, SAE, multi-GPU tensor parallelism, ROCm | Planned |
