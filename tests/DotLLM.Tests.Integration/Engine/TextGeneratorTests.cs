@@ -279,11 +279,21 @@ public class TextGeneratorTests
         var baseOptions = new InferenceOptions { Temperature = 0f, MaxTokens = 20 };
         var baseResponse = generator.Generate("The capital of France is", baseOptions);
 
-        // Pick a substring from the generated text as a stop sequence
-        if (baseResponse.Text.Length < 5)
+        // Pick a stop sequence that aligns with a token boundary.
+        // StopStringCondition uses EndsWith, so the stop sequence must be a SUFFIX
+        // of the decoded text at some intermediate step — not a prefix of the full text.
+        // Use a suffix of the first token's decoded text: guaranteed to EndsWith-match
+        // after the first generated token, regardless of leading-space stripping.
+        if (baseResponse.GeneratedTokenCount < 2)
             return; // Skip if output is too short for a meaningful test
 
-        string stopSeq = baseResponse.Text[..5]; // First 5 chars as stop
+        string firstTokenDecoded = tokenizer.Decode(baseResponse.GeneratedTokenIds.AsSpan(0, 1));
+        if (firstTokenDecoded.Length < 3)
+            return;
+
+        string stopSeq = firstTokenDecoded.Length <= 5
+            ? firstTokenDecoded
+            : firstTokenDecoded[^5..];
 
         var stopOptions = new InferenceOptions
         {
