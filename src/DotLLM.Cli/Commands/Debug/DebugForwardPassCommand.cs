@@ -35,7 +35,7 @@ internal sealed class DebugForwardPassCommand : Command<DebugForwardPassCommand.
         using var gguf = GgufFile.Open(resolvedPath);
         var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
         var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-        using var model = LlamaModel.LoadFromGguf(gguf, config);
+        using var model = TransformerModel.LoadFromGguf(gguf, config);
 
         // Model config summary
         AnsiConsole.Write(new Rule("[bold yellow]Model Config[/]").LeftJustified());

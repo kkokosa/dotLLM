@@ -13,10 +13,10 @@ using DotLLM.Models.Gguf;
 namespace DotLLM.Models.Architectures;
 
 /// <summary>
-/// Llama-family forward pass: embedding lookup → N × transformer blocks → final norm → LM head → logits.
+/// Transformer forward pass: embedding lookup → N × transformer blocks → final norm → LM head → logits.
 /// Operates entirely on the CPU using pre-allocated scratch buffers for zero-allocation inference.
 /// </summary>
-public sealed unsafe class LlamaModel : IModel
+public sealed unsafe class TransformerModel : IModel
 {
     /// <summary>Q8_0 block: 2 bytes (Half scale) + 32 bytes (sbyte values).</summary>
     private const int Q8_0BlockBytes = 34;
@@ -24,10 +24,11 @@ public sealed unsafe class LlamaModel : IModel
     /// <summary>Elements per Q8_0 block.</summary>
     private const int Q8_0GroupSize = 32;
 
-    private readonly LlamaWeights _weights;
-    private readonly LlamaForwardState _state;
+    private readonly TransformerWeights _weights;
+    private readonly TransformerForwardState _state;
     private readonly GgufFile _gguf; // prevent premature GC of mmap
     private readonly int _ropeDim;
+    private readonly int? _slidingWindowSize;
     private readonly ComputeThreadPool? _threadPool;
     private readonly bool _ownsThreadPool;
 
@@ -37,7 +38,7 @@ public sealed unsafe class LlamaModel : IModel
     /// <summary>Total bytes allocated for inference scratch buffers.</summary>
     public long ComputeMemoryBytes => _state.AllocatedBytes;
 
-    private LlamaModel(ModelConfig config, LlamaWeights weights, LlamaForwardState state,
+    private TransformerModel(ModelConfig config, TransformerWeights weights, TransformerForwardState state,
                        GgufFile gguf, int ropeDim, ComputeThreadPool? threadPool, bool ownsPool)
     {
         Config = config;
@@ -45,31 +46,32 @@ public sealed unsafe class LlamaModel : IModel
         _state = state;
         _gguf = gguf;
         _ropeDim = ropeDim;
+        _slidingWindowSize = config.SlidingWindowSize;
         _threadPool = threadPool;
         _ownsThreadPool = ownsPool;
     }
 
     /// <summary>
-    /// Loads a Llama model from an opened GGUF file (single-threaded).
+    /// Loads a transformer model from an opened GGUF file (single-threaded).
     /// The <paramref name="gguf"/> must remain alive for the lifetime of the returned model.
     /// </summary>
-    public static LlamaModel LoadFromGguf(GgufFile gguf, ModelConfig config)
+    public static TransformerModel LoadFromGguf(GgufFile gguf, ModelConfig config)
         => LoadFromGguf(gguf, config, ThreadingConfig.SingleThreaded);
 
     /// <summary>
-    /// Loads a Llama model from an opened GGUF file with threading configuration.
+    /// Loads a transformer model from an opened GGUF file with threading configuration.
     /// When <paramref name="threading"/> is parallel, creates a <see cref="ComputeThreadPool"/>
     /// owned by this model (disposed with the model).
     /// </summary>
-    public static LlamaModel LoadFromGguf(GgufFile gguf, ModelConfig config, ThreadingConfig threading)
+    public static TransformerModel LoadFromGguf(GgufFile gguf, ModelConfig config, ThreadingConfig threading)
     {
-        var weights = LlamaWeights.LoadFromGguf(gguf, config);
+        var weights = TransformerWeights.LoadFromGguf(gguf, config);
 
         int ropeDim = config.RoPEConfig?.DimensionCount ?? config.HeadDim;
         if (ropeDim == 0) ropeDim = config.HeadDim;
         float ropeTheta = config.RoPEConfig?.Theta ?? 10000.0f;
 
-        var state = new LlamaForwardState(
+        var state = new TransformerForwardState(
             config.HiddenSize,
             config.NumAttentionHeads,
             config.NumKvHeads,
@@ -84,7 +86,7 @@ public sealed unsafe class LlamaModel : IModel
             ? new ComputeThreadPool(threading.EffectiveThreadCount)
             : null;
 
-        return new LlamaModel(config, weights, state, gguf, ropeDim, pool, ownsPool: pool is not null);
+        return new TransformerModel(config, weights, state, gguf, ropeDim, pool, ownsPool: pool is not null);
     }
 
     /// <inheritdoc/>
@@ -196,12 +198,14 @@ public sealed unsafe class LlamaModel : IModel
                 var cachedV = kvCache.GetValuesRef(layer);
 
                 Attention.Execute(q, (float*)cachedK.DataPointer, (float*)cachedV.DataPointer, attnOut,
-                    seqLen, seqKv, numHeads, numKvHeads, headDim, positions[0], _threadPool);
+                    seqLen, seqKv, numHeads, numKvHeads, headDim, positions[0], _threadPool,
+                    _slidingWindowSize);
             }
             else
             {
                 Attention.Execute(q, k, v, attnOut,
-                    seqLen, seqLen, numHeads, numKvHeads, headDim, 0, _threadPool);
+                    seqLen, seqLen, numHeads, numKvHeads, headDim, 0, _threadPool,
+                    _slidingWindowSize);
             }
 
             // f. Batched O projection

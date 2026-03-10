@@ -227,4 +227,157 @@ public class GgufModelConfigExtractorTests
         var config = GgufModelConfigExtractor.Extract(metadata);
         Assert.Equal(expected, config.Architecture);
     }
+
+    [Fact]
+    public void Extract_SlidingWindow_Extracted()
+    {
+        var metadata = BuildLlamaMetadata(d =>
+            d.AddUInt32("llama.attention.sliding_window", 4096));
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.NotNull(config.SlidingWindowSize);
+        Assert.Equal(4096, config.SlidingWindowSize!.Value);
+    }
+
+    [Fact]
+    public void Extract_SlidingWindow_NullWhenAbsent()
+    {
+        var metadata = BuildLlamaMetadata();
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.Null(config.SlidingWindowSize);
+    }
+
+    [Fact]
+    public void Extract_SlidingWindow_NullWhenZero()
+    {
+        var metadata = BuildLlamaMetadata(d =>
+            d.AddUInt32("llama.attention.sliding_window", 0));
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.Null(config.SlidingWindowSize);
+    }
+
+    [Fact]
+    public void Extract_RoPEScaling_Su()
+    {
+        var metadata = BuildLlamaMetadata(d =>
+        {
+            d.AddString("llama.rope.scaling.type", "su");
+            d.AddFloat32("llama.rope.scaling.factor", 2.0f);
+            d.AddUInt32("llama.rope.scaling.original_context_length", 4096);
+        });
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.NotNull(config.RoPEConfig);
+        Assert.Equal(RoPEScalingType.Su, config.RoPEConfig.Value.ScalingType);
+        Assert.Equal(2.0f, config.RoPEConfig.Value.ScalingFactor);
+        Assert.Equal(4096, config.RoPEConfig.Value.OrigMaxSeqLen);
+    }
+
+    [Fact]
+    public void Extract_RoPEScaling_LongRope()
+    {
+        var metadata = BuildLlamaMetadata(d =>
+        {
+            d.AddString("llama.rope.scaling.type", "longrope");
+            d.AddFloat32("llama.rope.scaling.factor", 8.0f);
+            d.AddUInt32("llama.rope.scaling.original_context_length", 8192);
+            d.AddFloat32("llama.rope.scaling.attn_factor", 1.5f);
+        });
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.NotNull(config.RoPEConfig);
+        Assert.Equal(RoPEScalingType.Su, config.RoPEConfig.Value.ScalingType);
+        Assert.Equal(8.0f, config.RoPEConfig.Value.ScalingFactor);
+        Assert.Equal(8192, config.RoPEConfig.Value.OrigMaxSeqLen);
+        Assert.Equal(1.5f, config.RoPEConfig.Value.AttnFactor);
+    }
+
+    [Fact]
+    public void Extract_RoPEScaling_Linear()
+    {
+        var metadata = BuildLlamaMetadata(d =>
+        {
+            d.AddString("llama.rope.scaling.type", "linear");
+            d.AddFloat32("llama.rope.scaling.factor", 4.0f);
+        });
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.NotNull(config.RoPEConfig);
+        Assert.Equal(RoPEScalingType.Linear, config.RoPEConfig.Value.ScalingType);
+        Assert.Equal(4.0f, config.RoPEConfig.Value.ScalingFactor);
+    }
+
+    [Fact]
+    public void Extract_RoPEScaling_DynamicNtk()
+    {
+        var metadata = BuildLlamaMetadata(d =>
+        {
+            d.AddString("llama.rope.scaling.type", "dynamic_ntk");
+            d.AddFloat32("llama.rope.scaling.factor", 2.0f);
+        });
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.NotNull(config.RoPEConfig);
+        Assert.Equal(RoPEScalingType.DynamicNTK, config.RoPEConfig.Value.ScalingType);
+    }
+
+    [Fact]
+    public void Extract_RoPEScaling_Dynamic()
+    {
+        var metadata = BuildLlamaMetadata(d =>
+        {
+            d.AddString("llama.rope.scaling.type", "dynamic");
+            d.AddFloat32("llama.rope.scaling.factor", 2.0f);
+        });
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.NotNull(config.RoPEConfig);
+        Assert.Equal(RoPEScalingType.DynamicNTK, config.RoPEConfig.Value.ScalingType);
+    }
+
+    [Fact]
+    public void Extract_RoPEScaling_NTK()
+    {
+        var metadata = BuildLlamaMetadata(d =>
+        {
+            d.AddString("llama.rope.scaling.type", "ntk");
+            d.AddFloat32("llama.rope.scaling.factor", 2.0f);
+        });
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.NotNull(config.RoPEConfig);
+        Assert.Equal(RoPEScalingType.NTK, config.RoPEConfig.Value.ScalingType);
+    }
+
+    [Fact]
+    public void Extract_RoPEScaling_UnknownType_FallsBackToNone()
+    {
+        var metadata = BuildLlamaMetadata(d =>
+        {
+            d.AddString("llama.rope.scaling.type", "unknown_scaling");
+            d.AddFloat32("llama.rope.scaling.factor", 2.0f);
+        });
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.NotNull(config.RoPEConfig);
+        Assert.Equal(RoPEScalingType.None, config.RoPEConfig.Value.ScalingType);
+    }
+
+    [Fact]
+    public void Extract_RoPEScaling_YaRN_AllDefaults()
+    {
+        var metadata = BuildLlamaMetadata(d =>
+            d.AddString("llama.rope.scaling.type", "yarn"));
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.NotNull(config.RoPEConfig);
+        Assert.Equal(RoPEScalingType.YaRN, config.RoPEConfig.Value.ScalingType);
+        // Verify defaults when optional keys are absent
+        Assert.Equal(1.0f, config.RoPEConfig.Value.ScalingFactor);
+        Assert.Equal(0, config.RoPEConfig.Value.OrigMaxSeqLen);
+        Assert.Equal(1.0f, config.RoPEConfig.Value.AttnFactor);
+        Assert.Equal(32.0f, config.RoPEConfig.Value.BetaFast);
+        Assert.Equal(1.0f, config.RoPEConfig.Value.BetaSlow);
+    }
 }

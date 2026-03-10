@@ -20,13 +20,13 @@ public class ChatTemplateIntegrationTests
     /// <summary>
     /// Loads a GGUF model and returns all components needed for chat inference.
     /// </summary>
-    private static (LlamaModel Model, GgufFile Gguf, BpeTokenizer Tokenizer, IChatTemplate Template, List<string> StopSequences)
+    private static (TransformerModel Model, GgufFile Gguf, BpeTokenizer Tokenizer, IChatTemplate Template, List<string> StopSequences)
         LoadChatModel(string filePath)
     {
         var gguf = GgufFile.Open(filePath);
         var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
         var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-        var model = LlamaModel.LoadFromGguf(gguf, config);
+        var model = TransformerModel.LoadFromGguf(gguf, config);
 
         // Create chat template from GGUF metadata, fallback to ChatML
         string bosToken = tokenizer.DecodeToken(tokenizer.BosTokenId);

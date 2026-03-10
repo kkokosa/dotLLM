@@ -32,13 +32,14 @@ public static class Attention
     /// <param name="numKvHeads">Number of key/value heads.</param>
     /// <param name="headDim">Dimension per attention head.</param>
     /// <param name="positionOffset">Position offset for causal mask. For prefill: 0. For decode: number of cached tokens.</param>
+    /// <param name="slidingWindowSize">Optional sliding window size. When non-null, limits attention to the most recent positions.</param>
     [SkipLocalsInit]
     public static void Execute(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
                                 Span<float> output,
                                 int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
-                                int positionOffset)
+                                int positionOffset, int? slidingWindowSize = null)
         => Execute(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
-                   positionOffset, 1.0f / MathF.Sqrt(headDim));
+                   positionOffset, 1.0f / MathF.Sqrt(headDim), slidingWindowSize);
 
     /// <summary>
     /// Computes scaled dot-product attention with causal masking, GQA head broadcast, and caller-provided scale.
@@ -54,11 +55,12 @@ public static class Attention
     /// <param name="headDim">Dimension per attention head.</param>
     /// <param name="positionOffset">Position offset for causal mask. For prefill: 0. For decode: number of cached tokens.</param>
     /// <param name="scale">Attention scale factor applied to dot-product scores.</param>
+    /// <param name="slidingWindowSize">Optional sliding window size. When non-null, limits attention to the most recent positions.</param>
     [SkipLocalsInit]
     public static void Execute(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
                                 Span<float> output,
                                 int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
-                                int positionOffset, float scale)
+                                int positionOffset, float scale, int? slidingWindowSize = null)
     {
         if (headDim <= 0)
             throw new ArgumentException($"headDim must be positive, got {headDim}", nameof(headDim));
@@ -77,13 +79,13 @@ public static class Attention
         {
             Span<float> scores = stackalloc float[scoreSize];
             ExecuteCore(q, k, v, output, scores, seqQ, seqKv, numHeads, headDim,
-                        groupSize, scale, qStride, kvStride, positionOffset);
+                        groupSize, scale, qStride, kvStride, positionOffset, slidingWindowSize);
         }
         else
         {
             float[] rented = ArrayPool<float>.Shared.Rent(scoreSize);
             ExecuteCore(q, k, v, output, rented.AsSpan(0, scoreSize), seqQ, seqKv, numHeads, headDim,
-                        groupSize, scale, qStride, kvStride, positionOffset);
+                        groupSize, scale, qStride, kvStride, positionOffset, slidingWindowSize);
             ArrayPool<float>.Shared.Return(rented);
         }
     }
@@ -92,7 +94,7 @@ public static class Attention
                                      Span<float> output, Span<float> scores,
                                      int seqQ, int seqKv, int numHeads, int headDim,
                                      int groupSize, float scale, int qStride, int kvStride,
-                                     int positionOffset)
+                                     int positionOffset, int? slidingWindowSize = null)
     {
         for (int h = 0; h < numHeads; h++)
         {
@@ -103,7 +105,7 @@ public static class Attention
                                    h, kvH, qStride, kvStride);
 
             // 2. Apply causal mask
-            ApplyCausalMask(scores, seqQ, seqKv, positionOffset);
+            ApplyCausalMask(scores, seqQ, seqKv, positionOffset, slidingWindowSize);
 
             // 3. Softmax per row
             for (int i = 0; i < seqQ; i++)
@@ -127,9 +129,10 @@ public static class Attention
     [SkipLocalsInit]
     public static unsafe void Execute(float* q, float* k, float* v, float* output,
                                       int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
-                                      int positionOffset, ComputeThreadPool? pool)
+                                      int positionOffset, ComputeThreadPool? pool,
+                                      int? slidingWindowSize = null)
         => Execute(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
-                   positionOffset, 1.0f / MathF.Sqrt(headDim), pool);
+                   positionOffset, 1.0f / MathF.Sqrt(headDim), pool, slidingWindowSize);
 
     /// <summary>
     /// Pointer-based attention with caller-provided scale and optional head-parallel execution.
@@ -137,7 +140,8 @@ public static class Attention
     [SkipLocalsInit]
     public static unsafe void Execute(float* q, float* k, float* v, float* output,
                                       int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
-                                      int positionOffset, float scale, ComputeThreadPool? pool)
+                                      int positionOffset, float scale, ComputeThreadPool? pool,
+                                      int? slidingWindowSize = null)
     {
         if (headDim <= 0)
             throw new ArgumentException($"headDim must be positive, got {headDim}", nameof(headDim));
@@ -155,7 +159,7 @@ public static class Attention
                 new ReadOnlySpan<float>(k, kvLen),
                 new ReadOnlySpan<float>(v, kvLen),
                 new Span<float>(output, qLen),
-                seqQ, seqKv, numHeads, numKvHeads, headDim, positionOffset, scale);
+                seqQ, seqKv, numHeads, numKvHeads, headDim, positionOffset, scale, slidingWindowSize);
             return;
         }
 
@@ -176,7 +180,8 @@ public static class Attention
             QStride = numHeads * headDim,
             KvStride = numKvHeads * headDim,
             ScoreSize = scoreSize,
-            ScratchPtrs = scratchPtrs
+            ScratchPtrs = scratchPtrs,
+            SlidingWindowSize = slidingWindowSize ?? 0
         };
         pool.Dispatch((nint)(&ctx), &AttentionWorker);
     }
@@ -199,6 +204,8 @@ public static class Attention
         public int KvStride;
         public int ScoreSize;
         public nint* ScratchPtrs;
+        /// <summary>Sliding window size. 0 means no sliding window (full context).</summary>
+        public int SlidingWindowSize;
     }
 
     private static unsafe void AttentionWorker(nint ctxPtr, int threadIdx, int threadCount)
@@ -219,6 +226,8 @@ public static class Attention
         var vSpan = new ReadOnlySpan<float>(ctx.V, ctx.SeqKv * ctx.KvStride);
         var outSpan = new Span<float>(ctx.Output, ctx.SeqQ * ctx.QStride);
 
+        int? slidingWindow = ctx.SlidingWindowSize > 0 ? ctx.SlidingWindowSize : null;
+
         for (int h = startHead; h < endHead; h++)
         {
             int kvH = h / ctx.GroupSize;
@@ -226,7 +235,7 @@ public static class Attention
             ScaledDotProductScores(qSpan, kSpan, scoresSpan, ctx.SeqQ, ctx.SeqKv, ctx.HeadDim, ctx.Scale,
                                    h, kvH, ctx.QStride, ctx.KvStride);
 
-            ApplyCausalMask(scoresSpan, ctx.SeqQ, ctx.SeqKv, ctx.PositionOffset);
+            ApplyCausalMask(scoresSpan, ctx.SeqQ, ctx.SeqKv, ctx.PositionOffset, slidingWindow);
 
             for (int i = 0; i < ctx.SeqQ; i++)
             {
@@ -247,9 +256,9 @@ public static class Attention
     internal static void ExecuteScalar(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
                                         Span<float> output,
                                         int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
-                                        int positionOffset)
+                                        int positionOffset, int? slidingWindowSize = null)
         => ExecuteScalar(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
-                         positionOffset, 1.0f / MathF.Sqrt(headDim));
+                         positionOffset, 1.0f / MathF.Sqrt(headDim), slidingWindowSize);
 
     /// <summary>
     /// Scalar reference implementation with caller-provided scale.
@@ -258,7 +267,7 @@ public static class Attention
     internal static void ExecuteScalar(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
                                         Span<float> output,
                                         int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
-                                        int positionOffset, float scale)
+                                        int positionOffset, float scale, int? slidingWindowSize = null)
     {
         if (headDim <= 0)
             throw new ArgumentException($"headDim must be positive, got {headDim}", nameof(headDim));
@@ -295,6 +304,20 @@ public static class Attention
                 {
                     if (j > positionOffset + i)
                         scores[i * seqKv + j] = float.NegativeInfinity;
+                }
+            }
+
+            // Sliding window mask
+            if (slidingWindowSize.HasValue)
+            {
+                int window = slidingWindowSize.Value;
+                for (int i = 0; i < seqQ; i++)
+                {
+                    int earliestVisible = positionOffset + i - window + 1;
+                    for (int j = 0; j < seqKv && j < earliestVisible; j++)
+                    {
+                        scores[i * seqKv + j] = float.NegativeInfinity;
+                    }
                 }
             }
 
@@ -341,15 +364,31 @@ public static class Attention
     /// Applies causal (autoregressive) mask. Sets <c>scores[i,j] = -inf</c> where
     /// <c>j &gt; positionOffset + i</c> (query at position <c>positionOffset + i</c>
     /// cannot attend to keys at later positions).
+    /// Optionally applies a sliding window mask that limits attention to the most recent
+    /// <paramref name="slidingWindowSize"/> positions.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static void ApplyCausalMask(Span<float> scores, int seqQ, int seqKv, int positionOffset)
+    internal static void ApplyCausalMask(Span<float> scores, int seqQ, int seqKv, int positionOffset,
+                                         int? slidingWindowSize = null)
     {
         for (int i = 0; i < seqQ; i++)
         {
             for (int j = positionOffset + i + 1; j < seqKv; j++)
             {
                 scores[i * seqKv + j] = float.NegativeInfinity;
+            }
+        }
+
+        if (slidingWindowSize.HasValue)
+        {
+            int window = slidingWindowSize.Value;
+            for (int i = 0; i < seqQ; i++)
+            {
+                int earliestVisible = positionOffset + i - window + 1;
+                for (int j = 0; j < seqKv && j < earliestVisible; j++)
+                {
+                    scores[i * seqKv + j] = float.NegativeInfinity;
+                }
             }
         }
     }

@@ -11,7 +11,7 @@ namespace DotLLM.Models.Architectures;
 /// Linear projection weights remain as mmap pointers with their quantization type.
 /// Bias arrays are nullable — null when the model has no biases (e.g. standard Llama/Mistral).
 /// </summary>
-internal readonly struct LlamaLayerWeights
+internal readonly struct TransformerLayerWeights
 {
     /// <summary>Pre-attention RMSNorm weight [hiddenSize].</summary>
     public readonly float[] AttnNormWeight;
@@ -75,7 +75,7 @@ internal readonly struct LlamaLayerWeights
     /// <summary>Optional down projection bias [DownOutputDim]. Null when absent.</summary>
     public readonly float[]? DownBias;
 
-    public LlamaLayerWeights(
+    public TransformerLayerWeights(
         float[] attnNormWeight,
         nint qWeight, QuantizationType qQuantType, int qOutputDim, int qInputDim,
         nint kWeight, QuantizationType kQuantType, int kOutputDim, int kInputDim,
@@ -101,11 +101,11 @@ internal readonly struct LlamaLayerWeights
 }
 
 /// <summary>
-/// Organizes all weight tensor references from a loaded GGUF file for a Llama-family model.
+/// Organizes all weight tensor references from a loaded GGUF file for a transformer-family model.
 /// Norm weights are dequantized to managed <c>float[]</c> at load time.
 /// Linear projections remain as raw mmap pointers for zero-copy inference.
 /// </summary>
-internal sealed class LlamaWeights
+internal sealed class TransformerWeights
 {
     /// <summary>Token embedding pointer and metadata.</summary>
     public nint TokenEmbedWeight { get; }
@@ -114,7 +114,7 @@ internal sealed class LlamaWeights
     public int HiddenSize { get; }
 
     /// <summary>Per-layer weights.</summary>
-    public LlamaLayerWeights[] Layers { get; }
+    public TransformerLayerWeights[] Layers { get; }
 
     /// <summary>Final RMSNorm weight [hiddenSize].</summary>
     public float[] OutputNormWeight { get; }
@@ -125,9 +125,9 @@ internal sealed class LlamaWeights
     public int OutputOutputDim { get; }
     public int OutputInputDim { get; }
 
-    private LlamaWeights(
+    private TransformerWeights(
         nint tokenEmbedWeight, QuantizationType tokenEmbedQuantType, int vocabSize, int hiddenSize,
-        LlamaLayerWeights[] layers,
+        TransformerLayerWeights[] layers,
         float[] outputNormWeight,
         nint outputWeight, QuantizationType outputQuantType, int outputOutputDim, int outputInputDim)
     {
@@ -147,7 +147,7 @@ internal sealed class LlamaWeights
     /// Loads all weight references from an opened GGUF file.
     /// Norm weights are dequantized to <c>float[]</c>. Linear projections stay as mmap pointers.
     /// </summary>
-    public static LlamaWeights LoadFromGguf(GgufFile gguf, ModelConfig config)
+    public static TransformerWeights LoadFromGguf(GgufFile gguf, ModelConfig config)
     {
         nint dataBase = gguf.DataBasePointer;
         var tensors = gguf.TensorsByName;
@@ -157,10 +157,10 @@ internal sealed class LlamaWeights
         nint embPtr = dataBase + (nint)embDesc.DataOffset;
 
         // Per-layer weights
-        var layers = new LlamaLayerWeights[config.NumLayers];
+        var layers = new TransformerLayerWeights[config.NumLayers];
         for (int i = 0; i < config.NumLayers; i++)
         {
-            layers[i] = LoadLayer(i, dataBase, tensors, config.HiddenSize);
+            layers[i] = LoadLayer(i, dataBase, tensors, config);
         }
 
         // Output norm
@@ -189,35 +189,78 @@ internal sealed class LlamaWeights
             outputM = embDesc.Shape[1];
         }
 
-        return new LlamaWeights(
+        return new TransformerWeights(
             embPtr, embDesc.QuantizationType, config.VocabSize, config.HiddenSize,
             layers,
             outputNormWeight,
             outputPtr, outputQt, outputM, outputK);
     }
 
-    private static LlamaLayerWeights LoadLayer(
+    private static TransformerLayerWeights LoadLayer(
         int layerIdx,
         nint dataBase,
         IReadOnlyDictionary<string, GgufTensorDescriptor> tensors,
-        int hiddenSize)
+        ModelConfig config)
     {
         string prefix = $"blk.{layerIdx}";
+        int hiddenSize = config.HiddenSize;
 
         // Attention norm — dequantize to float[]
         var attnNormDesc = tensors[$"{prefix}.attn_norm.weight"];
         float[] attnNorm = DequantizeNorm(dataBase, attnNormDesc, hiddenSize);
 
-        // Q/K/V/O projections — keep as mmap pointers
-        var (qPtr, qQt, qM, qK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_q.weight"]);
-        var (kPtr, kQt, kM, kK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_k.weight"]);
-        var (vPtr, vQt, vM, vK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_v.weight"]);
+        // Q/K/V projections — check for fused attn_qkv.weight (Phi-3 style)
+        nint qPtr, kPtr, vPtr;
+        QuantizationType qQt, kQt, vQt;
+        int qM, qK, kM, kK, vM, vK;
+
+        if (tensors.TryGetValue($"{prefix}.attn_qkv.weight", out var qkvDesc))
+        {
+            // Fused QKV — split by row offset
+            nint qkvPtr = dataBase + (nint)qkvDesc.DataOffset;
+            int inputDim = qkvDesc.Shape[0]; // hidden_size
+            long rowBytes = Dequantize.RowByteSize(inputDim, qkvDesc.QuantizationType);
+
+            int qDim = config.NumAttentionHeads * config.HeadDim;
+            int kvDim = config.NumKvHeads * config.HeadDim;
+
+            qPtr = qkvPtr; qQt = qkvDesc.QuantizationType; qM = qDim; qK = inputDim;
+            kPtr = qkvPtr + (nint)(qDim * rowBytes); kQt = qkvDesc.QuantizationType; kM = kvDim; kK = inputDim;
+            vPtr = qkvPtr + (nint)((qDim + kvDim) * rowBytes); vQt = qkvDesc.QuantizationType; vM = kvDim; vK = inputDim;
+        }
+        else
+        {
+            // Separate Q/K/V (standard path)
+            (qPtr, qQt, qM, qK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_q.weight"]);
+            (kPtr, kQt, kM, kK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_k.weight"]);
+            (vPtr, vQt, vM, vK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_v.weight"]);
+        }
+
         var (oPtr, oQt, oM, oK) = LoadLinear(dataBase, tensors[$"{prefix}.attn_output.weight"]);
 
-        // Optional biases (e.g. Bielik). Null when absent (standard Llama/Mistral).
-        float[]? qBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_q.bias");
-        float[]? kBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_k.bias");
-        float[]? vBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_v.bias");
+        // Optional biases — check for fused attn_qkv.bias (Phi-3 style)
+        float[]? qBias, kBias, vBias;
+        if (tensors.TryGetValue($"{prefix}.attn_qkv.bias", out var qkvBiasDesc))
+        {
+            // Fused QKV bias — split by element offset
+            nint biasPtr = dataBase + (nint)qkvBiasDesc.DataOffset;
+            int qDim = config.NumAttentionHeads * config.HeadDim;
+            int kvDim = config.NumKvHeads * config.HeadDim;
+
+            qBias = new float[qDim];
+            kBias = new float[kvDim];
+            vBias = new float[kvDim];
+
+            Dequantize.ToFloat32(biasPtr, qDim, qkvBiasDesc.QuantizationType, qBias);
+            Dequantize.ToFloat32(biasPtr + qDim * sizeof(float), kvDim, qkvBiasDesc.QuantizationType, kBias);
+            Dequantize.ToFloat32(biasPtr + (qDim + kvDim) * sizeof(float), kvDim, qkvBiasDesc.QuantizationType, vBias);
+        }
+        else
+        {
+            qBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_q.bias");
+            kBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_k.bias");
+            vBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_v.bias");
+        }
         float[]? oBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_output.bias");
 
         // FFN norm
@@ -233,7 +276,7 @@ internal sealed class LlamaWeights
         float[]? upBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_up.bias");
         float[]? downBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_down.bias");
 
-        return new LlamaLayerWeights(
+        return new TransformerLayerWeights(
             attnNorm,
             qPtr, qQt, qM, qK,
             kPtr, kQt, kM, kK,

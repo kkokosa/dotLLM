@@ -1,6 +1,7 @@
 using BenchmarkDotNet.Attributes;
 using DotLLM.Benchmarks.Columns;
 using DotLLM.Core.Configuration;
+using DotLLM.Core.Models;
 using DotLLM.Engine;
 using DotLLM.HuggingFace;
 using DotLLM.Models.Architectures;
@@ -42,7 +43,7 @@ public class InferenceBenchmarks
     public BenchmarkModel Model { get; set; }
 
     private GgufFile _gguf = null!;
-    private LlamaModel _model = null!;
+    private IModel _model = null!;
     private BpeTokenizer _tokenizer = null!;
     private TextGenerator _generator = null!;
     private string _modelPath = null!;
@@ -92,7 +93,7 @@ public class InferenceBenchmarks
 
         _gguf = GgufFile.Open(_modelPath);
         var config = GgufModelConfigExtractor.Extract(_gguf.Metadata);
-        _model = LlamaModel.LoadFromGguf(_gguf, config, ThreadingConfig.Auto);
+        _model = TransformerModel.LoadFromGguf(_gguf, config, ThreadingConfig.Auto);
         _tokenizer = GgufBpeTokenizerFactory.Load(_gguf.Metadata);
         _generator = new TextGenerator(_model, _tokenizer);
     }

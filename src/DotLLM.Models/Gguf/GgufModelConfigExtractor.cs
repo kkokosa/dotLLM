@@ -31,6 +31,11 @@ public static class GgufModelConfigExtractor
 
         float normEps = metadata.GetFloat32OrDefault($"{arch}.attention.layer_norm_rms_epsilon", 1e-5f);
 
+        int? slidingWindowSize = null;
+        uint swValue = metadata.GetUInt32OrDefault($"{arch}.attention.sliding_window", 0);
+        if (swValue > 0)
+            slidingWindowSize = (int)swValue;
+
         int vocabSize = ResolveVocabSize(metadata, arch);
 
         string? chatTemplate = metadata.GetStringOrDefault("tokenizer.chat_template", null!);
@@ -53,6 +58,7 @@ public static class GgufModelConfigExtractor
             NormEpsilon = normEps,
             RoPEConfig = ropeConfig,
             PositionEncodingType = ropeConfig.HasValue ? PositionEncodingType.RoPE : PositionEncodingType.None,
+            SlidingWindowSize = slidingWindowSize,
             ChatTemplate = chatTemplate,
         };
     }
@@ -115,6 +121,7 @@ public static class GgufModelConfigExtractor
                 "yarn" => RoPEScalingType.YaRN,
                 "ntk" => RoPEScalingType.NTK,
                 "dynamic" or "dynamic_ntk" => RoPEScalingType.DynamicNTK,
+                "su" or "longrope" => RoPEScalingType.Su,
                 _ => RoPEScalingType.None
             };
 

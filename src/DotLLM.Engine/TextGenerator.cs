@@ -2,12 +2,12 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
+using DotLLM.Core.Models;
 using DotLLM.Core.Sampling;
 using DotLLM.Core.Tensors;
 using DotLLM.Engine.KvCache;
 using DotLLM.Engine.Samplers;
 using DotLLM.Engine.Samplers.StopConditions;
-using DotLLM.Models.Architectures;
 using DotLLM.Tokenizers;
 
 namespace DotLLM.Engine;
@@ -18,7 +18,7 @@ namespace DotLLM.Engine;
 /// </summary>
 public sealed class TextGenerator
 {
-    private readonly LlamaModel _model;
+    private readonly IModel _model;
     private readonly ITokenizer _tokenizer;
 
     /// <summary>
@@ -26,7 +26,7 @@ public sealed class TextGenerator
     /// </summary>
     /// <param name="model">The model to use for forward passes.</param>
     /// <param name="tokenizer">The tokenizer for encoding/decoding text.</param>
-    public TextGenerator(LlamaModel model, ITokenizer tokenizer)
+    public TextGenerator(IModel model, ITokenizer tokenizer)
     {
         _model = model;
         _tokenizer = tokenizer;

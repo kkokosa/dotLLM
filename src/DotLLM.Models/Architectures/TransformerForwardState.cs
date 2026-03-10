@@ -4,11 +4,11 @@ using System.Runtime.InteropServices;
 namespace DotLLM.Models.Architectures;
 
 /// <summary>
-/// Pre-allocated scratch buffers for the Llama forward pass. Reused across calls to
+/// Pre-allocated scratch buffers for the transformer forward pass. Reused across calls to
 /// achieve zero per-call allocation on the hot path. Call <see cref="EnsureCapacity"/>
 /// before each forward pass to resize if the sequence length has grown.
 /// </summary>
-internal sealed unsafe class LlamaForwardState : IDisposable
+internal sealed unsafe class TransformerForwardState : IDisposable
 {
     private readonly int _hiddenSize;
     private readonly int _numHeads;
@@ -71,7 +71,7 @@ internal sealed unsafe class LlamaForwardState : IDisposable
     /// <summary>Pre-computed RoPE sine table [maxSeqLen * halfDim].</summary>
     public float[] SinTable { get; }
 
-    public LlamaForwardState(
+    public TransformerForwardState(
         int hiddenSize, int numHeads, int numKvHeads, int headDim,
         int intermediateSize, int vocabSize, int maxSeqLen, int ropeDim,
         float ropeTheta)

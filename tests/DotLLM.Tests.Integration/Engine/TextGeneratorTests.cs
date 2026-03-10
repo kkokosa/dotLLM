@@ -23,11 +23,11 @@ public class TextGeneratorTests
         _fixture = fixture;
     }
 
-    private (LlamaModel model, GgufFile gguf, BpeTokenizer tokenizer) LoadModel()
+    private (TransformerModel model, GgufFile gguf, BpeTokenizer tokenizer) LoadModel()
     {
         var gguf = GgufFile.Open(_fixture.FilePath);
         var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var model = LlamaModel.LoadFromGguf(gguf, config);
+        var model = TransformerModel.LoadFromGguf(gguf, config);
         var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
         return (model, gguf, tokenizer);
     }

@@ -102,7 +102,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         GgufFile? gguf = null;
         ModelConfig? config = null;
         Tokenizers.Bpe.BpeTokenizer? tokenizer = null;
-        LlamaModel? model = null;
+        IModel? model = null;
 
         AnsiConsole.Status()
             .Spinner(Spinner.Known.Dots)
@@ -119,7 +119,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
 
                 var threading = new ThreadingConfig(settings.Threads);
                 ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden, {threading.EffectiveThreadCount} threads)...");
-                model = LlamaModel.LoadFromGguf(gguf, config, threading);
+                model = TransformerModel.LoadFromGguf(gguf, config, threading);
             });
 
         // Create chat template from GGUF metadata, fallback to ChatML

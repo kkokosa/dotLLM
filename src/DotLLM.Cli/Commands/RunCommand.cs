@@ -93,7 +93,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         GgufFile gguf = null!;
         ModelConfig config = null!;
         Tokenizers.Bpe.BpeTokenizer tokenizer = null!;
-        LlamaModel model = null!;
+        IModel model = null!;
 
         var loadSw = Stopwatch.StartNew();
         AnsiConsole.Status()
@@ -111,7 +111,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
                 var threading = new ThreadingConfig(settings.Threads);
                 ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden, {threading.EffectiveThreadCount} threads)...");
-                model = LlamaModel.LoadFromGguf(gguf, config, threading);
+                model = TransformerModel.LoadFromGguf(gguf, config, threading);
             });
         loadSw.Stop();
 

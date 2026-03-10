@@ -40,7 +40,7 @@ Each step is designed to be a discrete unit of work suitable for a single implem
 | 15 | **Mixed quantization + Q8_K** :white_check_mark: | Handle heterogeneous per-tensor quantization types (common in Q4_K_M files: attention Q6_K, FFN Q4_K). Implement Q8_K input quantization (float32 scale, 256-element super-blocks) for K-quant fused vec_dot kernels. Re-enable Q4_K×Q8_K, Q5_K×Q8_K, Q6_K×Q8_K fused GEMV/GEMM paths. True 4-row kernels with shared activation loading. | 14 |
 | 16 | **Chat template engine** :white_check_mark: | Jinja2-subset interpreter. Parse `chat_template` from GGUF metadata or `tokenizer_config.json`. Compile to `IChatTemplate`. | 4 |
 | 17 | **Streaming generation** :white_check_mark: | `IAsyncEnumerable<string>` token-by-token output. Yield each decoded token as it's generated. | 8 |
-| 20 | **Additional architectures** | Mistral (add sliding window attention mask), Phi, Qwen. Should be mostly `ModelConfig` parameterization, minimal new code. | 6 |
+| 20 | **Additional architectures** :white_check_mark: | Mistral (add sliding window attention mask), Phi, Qwen. Should be mostly `ModelConfig` parameterization, minimal new code. | 6 |
 | 22 | **Multi-threaded CPU inference** :white_check_mark: | Parallelize GEMV/GEMM, attention, and FFN across cores. Custom zero-alloc `ComputeThreadPool` with `delegate*` dispatch for compute-bound loops in `MatMul`, `Attention`, per-layer token processing. Thread count configurable via `--threads` CLI option and `ThreadingConfig`. Target: ~4-8× speedup on multi-core CPUs. | 6 |
 
 **Milestone**: Chat interactively with Q4_K_M models, stream responses, support multiple model architectures.

@@ -20,7 +20,7 @@ string prompt = args.Length > 1 ? string.Join(' ', args.Skip(1)) : "The capital 
 Console.WriteLine($"Loading model: {modelPath}");
 using var gguf = GgufFile.Open(modelPath);
 var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-using var model = LlamaModel.LoadFromGguf(gguf, config);
+using var model = TransformerModel.LoadFromGguf(gguf, config);
 var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
 Console.WriteLine($"Model: {config.Architecture}, {config.NumLayers} layers, {config.VocabSize} vocab");

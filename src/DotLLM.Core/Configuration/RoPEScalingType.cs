@@ -18,5 +18,8 @@ public enum RoPEScalingType
     NTK,
 
     /// <summary>Dynamic NTK-aware scaling.</summary>
-    DynamicNTK
+    DynamicNTK,
+
+    /// <summary>SU/LongRoPE scaling (deferred implementation — logged as warning).</summary>
+    Su
 }
