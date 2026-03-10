@@ -129,7 +129,7 @@ TEST_CASES: list[TestCase] = [
     TestCase(
         name="Qwen2.5-0.5B-Instruct",
         repo="Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-        quant="q8_0",
+        quant="Q8_0",
         arch="Qwen",
         prompt="The capital of France is",
         expected="Paris",
@@ -197,16 +197,14 @@ TEST_CASES: list[TestCase] = [
 
 
 def _find_cli() -> Path:
-    """Find the dotLLM CLI executable."""
-    script_dir = Path(__file__).resolve().parent
-    repo_root = script_dir.parent
-    # Prefer Release build
-    release = repo_root / "src" / "DotLLM.Cli" / "bin" / "Release" / "net10.0" / "DotLLM.Cli.exe"
-    if release.exists():
-        return release
-    debug = repo_root / "src" / "DotLLM.Cli" / "bin" / "Debug" / "net10.0" / "DotLLM.Cli.exe"
-    if debug.exists():
-        return debug
+    """Find the dotLLM CLI executable (works on Windows, Linux, and macOS)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    bin_dir = repo_root / "src" / "DotLLM.Cli" / "bin"
+    for config in ("Release", "Debug"):
+        for ext in (".exe", ""):
+            p = bin_dir / config / "net10.0" / f"DotLLM.Cli{ext}"
+            if p.exists():
+                return p
     return Path("dotnet")  # fallback to dotnet run
 
 

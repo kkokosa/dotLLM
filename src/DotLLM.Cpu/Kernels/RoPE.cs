@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
@@ -124,6 +125,10 @@ public static class RoPE
 
         if (Avx2.IsSupported && halfDim >= 4)
         {
+            ref float vecRef = ref MemoryMarshal.GetReference(vec);
+            ref float cosRef = ref Unsafe.AsRef(in MemoryMarshal.GetReference(cos));
+            ref float sinRef = ref Unsafe.AsRef(in MemoryMarshal.GetReference(sin));
+
             // Process 4 dimension pairs (8 floats) per iteration.
             // Deinterleave even/odd via a single permute, apply rotation, re-interleave.
             var deinterleaveIdx = Vector256.Create(DeinterleaveIndices);
@@ -133,7 +138,7 @@ public static class RoPE
                 int vecOffset = i * 2;
 
                 // Load 8 interleaved floats: [e0, o0, e1, o1, e2, o2, e3, o3]
-                var interleaved = Vector256.LoadUnsafe(ref vec[vecOffset]);
+                var interleaved = Vector256.LoadUnsafe(ref Unsafe.Add(ref vecRef, vecOffset));
 
                 // Single permute — extract lower (evens) and upper (odds) from same result.
                 var permuted = Avx2.PermuteVar8x32(interleaved.AsSingle(), deinterleaveIdx);
@@ -141,8 +146,8 @@ public static class RoPE
                 var odd  = permuted.GetUpper(); // [o0, o1, o2, o3]
 
                 // Load cos/sin for these 4 pairs
-                var cosVec = Vector128.LoadUnsafe(in cos[i]);
-                var sinVec = Vector128.LoadUnsafe(in sin[i]);
+                var cosVec = Vector128.LoadUnsafe(ref Unsafe.Add(ref cosRef, i));
+                var sinVec = Vector128.LoadUnsafe(ref Unsafe.Add(ref sinRef, i));
 
                 // Rotation: even' = even*cos - odd*sin = -(odd*sin) + even*cos
                 //           odd'  = even*sin + odd*cos
@@ -166,7 +171,7 @@ public static class RoPE
                 var hi = Sse.UnpackHigh(newEven, newOdd);  // [ne2, no2, ne3, no3]
                 var result = Vector256.Create(lo, hi);
 
-                result.StoreUnsafe(ref vec[vecOffset]);
+                result.StoreUnsafe(ref Unsafe.Add(ref vecRef, vecOffset));
             }
         }
 
@@ -211,14 +216,18 @@ public static class RoPE
 
         if (Avx2.IsSupported && halfDim >= 8)
         {
+            ref float vecRef = ref MemoryMarshal.GetReference(vec);
+            ref float cosRef = ref Unsafe.AsRef(in MemoryMarshal.GetReference(cos));
+            ref float sinRef = ref Unsafe.AsRef(in MemoryMarshal.GetReference(sin));
+
             // Process 8 dimension pairs per iteration: vec[i..i+8] paired with vec[i+halfDim..i+halfDim+8]
             for (; i + 8 <= halfDim; i += 8)
             {
-                var even = Vector256.LoadUnsafe(ref vec[i]);
-                var odd  = Vector256.LoadUnsafe(ref vec[i + halfDim]);
+                var even = Vector256.LoadUnsafe(ref Unsafe.Add(ref vecRef, i));
+                var odd  = Vector256.LoadUnsafe(ref Unsafe.Add(ref vecRef, i + halfDim));
 
-                var cosVec = Vector256.LoadUnsafe(in cos[i]);
-                var sinVec = Vector256.LoadUnsafe(in sin[i]);
+                var cosVec = Vector256.LoadUnsafe(ref Unsafe.Add(ref cosRef, i));
+                var sinVec = Vector256.LoadUnsafe(ref Unsafe.Add(ref sinRef, i));
 
                 Vector256<float> newEven, newOdd;
                 if (Fma.IsSupported)
@@ -232,8 +241,8 @@ public static class RoPE
                     newOdd  = even * sinVec + odd * cosVec;
                 }
 
-                newEven.StoreUnsafe(ref vec[i]);
-                newOdd.StoreUnsafe(ref vec[i + halfDim]);
+                newEven.StoreUnsafe(ref Unsafe.Add(ref vecRef, i));
+                newOdd.StoreUnsafe(ref Unsafe.Add(ref vecRef, i + halfDim));
             }
         }
 

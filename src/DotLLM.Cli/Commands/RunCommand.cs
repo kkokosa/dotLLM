@@ -104,33 +104,24 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         Tokenizers.Bpe.BpeTokenizer tokenizer = null!;
         IModel model = null!;
 
-        var loadSw = Stopwatch.StartNew();
-        if (settings.Json)
+        void LoadModel()
         {
             gguf = GgufFile.Open(resolvedPath);
             config = GgufModelConfigExtractor.Extract(gguf.Metadata);
             tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
             model = TransformerModel.LoadFromGguf(gguf, config, new ThreadingConfig(settings.Threads));
         }
+
+        var loadSw = Stopwatch.StartNew();
+        if (settings.Json)
+        {
+            LoadModel();
+        }
         else
         {
             AnsiConsole.Status()
                 .Spinner(Spinner.Known.Dots)
-                .Start("Loading model...", ctx =>
-                {
-                    ctx.Status("Opening GGUF file...");
-                    gguf = GgufFile.Open(resolvedPath);
-
-                    ctx.Status("Extracting model config...");
-                    config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-
-                    ctx.Status("Loading tokenizer...");
-                    tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-
-                    var threading = new ThreadingConfig(settings.Threads);
-                    ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden, {threading.EffectiveThreadCount} threads)...");
-                    model = TransformerModel.LoadFromGguf(gguf, config, threading);
-                });
+                .Start("Loading model...", _ => LoadModel());
         }
         loadSw.Stop();
 
@@ -170,12 +161,12 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             int generated = 0;
             InferenceTimings timings = default;
             FinishReason finishReason = FinishReason.Length;
-            var generatedText = settings.Json ? new System.Text.StringBuilder() : null;
+            var generatedText = new System.Text.StringBuilder();
 
             await foreach (var token in generator.GenerateStreamingTokensAsync(settings.Prompt, inferenceOptions))
             {
                 if (settings.Json)
-                    generatedText!.Append(token.Text);
+                    generatedText.Append(token.Text);
                 else
                     Console.Write(token.Text);
 
@@ -218,7 +209,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             {
                 var result = new
                 {
-                    text = generatedText!.ToString(),
+                    text = generatedText.ToString(),
                     prompt = settings.Prompt,
                     model = Path.GetFileName(resolvedPath),
                     architecture = config.Architecture.ToString(),

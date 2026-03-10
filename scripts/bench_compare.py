@@ -187,10 +187,11 @@ def _download_with_progress(url: str, dest: Path, total_size: int | None = None)
 
 
 def _apply_quant_filter(files: list[str], quant: str | None) -> list[str]:
-    """Filter filenames by quant substring if specified."""
+    """Filter filenames by quant substring if specified (case-insensitive)."""
     if not quant:
         return files
-    return [f for f in files if quant in f]
+    quant_lower = quant.lower()
+    return [f for f in files if quant_lower in f.lower()]
 
 
 def resolve_model(model_arg: str, quant: str | None) -> Path:
