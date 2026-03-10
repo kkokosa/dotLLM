@@ -72,7 +72,7 @@ public static class GgufModelConfigExtractor
         return archString.ToLowerInvariant() switch
         {
             "llama" => Architecture.Llama,
-            "mistral" => Architecture.Mistral,
+            "mistral" or "mistral3" => Architecture.Mistral,
             "phi" or "phi2" or "phi3" => Architecture.Phi,
             "qwen" or "qwen2" or "qwen3" => Architecture.Qwen,
             "deepseek" or "deepseek2" => Architecture.DeepSeek,

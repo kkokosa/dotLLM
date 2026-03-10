@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using DotLLM.Cli.Helpers;
 using DotLLM.Core.Configuration;
@@ -76,13 +77,21 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [CommandOption("--quant|-q")]
         [Description("Quantization filter when multiple GGUF files exist (e.g., Q4_K_M, Q8_0).")]
         public string? Quant { get; set; }
+
+        [CommandOption("--json")]
+        [Description("Output result as a single JSON object (suppresses all formatted output).")]
+        [DefaultValue(false)]
+        public bool Json { get; set; }
     }
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
     {
         if (string.IsNullOrEmpty(settings.Prompt))
         {
-            AnsiConsole.MarkupLine("[red]--prompt|-p is required.[/]");
+            if (settings.Json)
+                Console.Error.WriteLine("Error: --prompt|-p is required.");
+            else
+                AnsiConsole.MarkupLine("[red]--prompt|-p is required.[/]");
             return 1;
         }
 
@@ -96,23 +105,33 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         IModel model = null!;
 
         var loadSw = Stopwatch.StartNew();
-        AnsiConsole.Status()
-            .Spinner(Spinner.Known.Dots)
-            .Start("Loading model...", ctx =>
-            {
-                ctx.Status("Opening GGUF file...");
-                gguf = GgufFile.Open(resolvedPath);
+        if (settings.Json)
+        {
+            gguf = GgufFile.Open(resolvedPath);
+            config = GgufModelConfigExtractor.Extract(gguf.Metadata);
+            tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+            model = TransformerModel.LoadFromGguf(gguf, config, new ThreadingConfig(settings.Threads));
+        }
+        else
+        {
+            AnsiConsole.Status()
+                .Spinner(Spinner.Known.Dots)
+                .Start("Loading model...", ctx =>
+                {
+                    ctx.Status("Opening GGUF file...");
+                    gguf = GgufFile.Open(resolvedPath);
 
-                ctx.Status("Extracting model config...");
-                config = GgufModelConfigExtractor.Extract(gguf.Metadata);
+                    ctx.Status("Extracting model config...");
+                    config = GgufModelConfigExtractor.Extract(gguf.Metadata);
 
-                ctx.Status("Loading tokenizer...");
-                tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+                    ctx.Status("Loading tokenizer...");
+                    tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
-                var threading = new ThreadingConfig(settings.Threads);
-                ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden, {threading.EffectiveThreadCount} threads)...");
-                model = TransformerModel.LoadFromGguf(gguf, config, threading);
-            });
+                    var threading = new ThreadingConfig(settings.Threads);
+                    ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden, {threading.EffectiveThreadCount} threads)...");
+                    model = TransformerModel.LoadFromGguf(gguf, config, threading);
+                });
+        }
         loadSw.Stop();
 
         var threadingInfo = new ThreadingConfig(settings.Threads);
@@ -131,27 +150,35 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             Threading = new ThreadingConfig(settings.Threads)
         };
 
-        // Build compact pre-gen header rule
-        var quantLabel = InferQuantLabel(resolvedPath, settings.Quant);
-        var samplingLabel = BuildSamplingLabel(settings);
-        var segments = $"{config.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {threadingInfo.EffectiveThreadCount} threads | {samplingLabel}";
-        AnsiConsole.Write(new Rule($"[grey]dotllm | {Markup.Escape(segments)}[/]").LeftJustified());
-        AnsiConsole.WriteLine();
+        if (!settings.Json)
+        {
+            // Build compact pre-gen header rule
+            var quantLabel = InferQuantLabel(resolvedPath, settings.Quant);
+            var samplingLabel = BuildSamplingLabel(settings);
+            var segments = $"{config.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {threadingInfo.EffectiveThreadCount} threads | {samplingLabel}";
+            AnsiConsole.Write(new Rule($"[grey]dotllm | {Markup.Escape(segments)}[/]").LeftJustified());
+            AnsiConsole.WriteLine();
+        }
 
         try
         {
-            // Print prompt echo
-            Console.Write(settings.Prompt);
+            if (!settings.Json)
+                Console.Write(settings.Prompt);
 
             var generator = new TextGenerator(model, tokenizer);
             var totalSw = Stopwatch.StartNew();
             int generated = 0;
             InferenceTimings timings = default;
             FinishReason finishReason = FinishReason.Length;
+            var generatedText = settings.Json ? new System.Text.StringBuilder() : null;
 
             await foreach (var token in generator.GenerateStreamingTokensAsync(settings.Prompt, inferenceOptions))
             {
-                Console.Write(token.Text);
+                if (settings.Json)
+                    generatedText!.Append(token.Text);
+                else
+                    Console.Write(token.Text);
+
                 if (token.FinishReason is null || token.Text.Length > 0)
                     generated++;
                 if (token.FinishReason.HasValue)
@@ -162,8 +189,6 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             }
 
             totalSw.Stop();
-            Console.WriteLine();
-            AnsiConsole.WriteLine();
 
             // Read timings from streaming result
             double loadMs = loadSw.Elapsed.TotalMilliseconds;
@@ -189,48 +214,92 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 * config.NumKvHeads * config.HeadDim * sizeof(float);
             long totalMemory = modelWeightsBytes + computeBytes + kvCacheBytes;
 
-            // Header grid: title left, hero metric right
-            var headerGrid = new Grid();
-            headerGrid.AddColumn(new GridColumn().NoWrap());
-            headerGrid.AddColumn(new GridColumn().NoWrap().RightAligned());
-            headerGrid.AddRow(
-                new Markup("[bold]Generation Complete[/]"),
-                new Markup($"[bold green]{decodeTokPerSec:F2} tok/s[/]"));
+            if (settings.Json)
+            {
+                var result = new
+                {
+                    text = generatedText!.ToString(),
+                    prompt = settings.Prompt,
+                    model = Path.GetFileName(resolvedPath),
+                    architecture = config.Architecture.ToString(),
+                    finish_reason = finishReason.ToString().ToLowerInvariant(),
+                    usage = new
+                    {
+                        prompt_tokens = promptLen,
+                        generated_tokens = generated,
+                    },
+                    timings = new
+                    {
+                        load_ms = Math.Round(loadMs, 1),
+                        prefill_ms = Math.Round(promptEvalMs, 1),
+                        decode_ms = Math.Round(evalMs, 1),
+                        sampling_ms = Math.Round(samplerMs, 1),
+                        total_ms = Math.Round(totalMs, 1),
+                        prefill_tok_s = Math.Round(prefillTokPerSec, 2),
+                        decode_tok_s = Math.Round(decodeTokPerSec, 2),
+                    },
+                    memory = new
+                    {
+                        weights_bytes = modelWeightsBytes,
+                        compute_bytes = computeBytes,
+                        kv_cache_bytes = kvCacheBytes,
+                        total_bytes = totalMemory,
+                    },
+                };
+                Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions
+                {
+                    WriteIndented = false,
+                    PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+                }));
+            }
+            else
+            {
+                Console.WriteLine();
+                AnsiConsole.WriteLine();
 
-            // Build body lines
-            var bodyLines = new List<IRenderable>();
-            bodyLines.Add(new Markup("  [bold]Performance[/]"));
-            bodyLines.Add(new Markup(PerfLine("Prefill", promptEvalMs, promptLen, prefillTokPerSec)));
-            bodyLines.Add(new Markup(PerfLine("Decode", evalMs, evalSteps, decodeTokPerSec)));
-            bodyLines.Add(new Markup(PerfLine("Sampling", samplerMs, generated, null)));
-            bodyLines.Add(new Markup("  [dim]──────────────────────────────────────────────────────[/]"));
-            bodyLines.Add(new Markup(PerfLine("Total", totalMs, totalTokens, totalTokPerSec)));
-            bodyLines.Add(new Markup(PerfLine("Load", loadMs, null, null)));
-            bodyLines.Add(new Text(""));
-            bodyLines.Add(new Markup("  [bold]Memory[/]"));
-            bodyLines.Add(new Markup(MemLine("Weights", modelWeightsBytes, "(memory-mapped)")));
-            bodyLines.Add(new Markup(MemLine("Compute", computeBytes, null)));
-            bodyLines.Add(new Markup(MemLine("KV Cache", kvCacheBytes, $"({cacheSize} slots)")));
-            bodyLines.Add(new Markup("  [dim]──────────────────────────────────────────────────────[/]"));
-            bodyLines.Add(new Markup(MemLine("Total", totalMemory, null)));
-            bodyLines.Add(new Text(""));
+                // Header grid: title left, hero metric right
+                var headerGrid = new Grid();
+                headerGrid.AddColumn(new GridColumn().NoWrap());
+                headerGrid.AddColumn(new GridColumn().NoWrap().RightAligned());
+                headerGrid.AddRow(
+                    new Markup("[bold]Generation Complete[/]"),
+                    new Markup($"[bold green]{decodeTokPerSec:F2} tok/s[/]"));
 
-            var finishReasonStr = finishReason.ToString().ToLowerInvariant();
-            bodyLines.Add(new Markup($"  [dim]{Markup.Escape(finishReasonStr)} | {promptLen} prompt, {generated} generated[/]"));
+                // Build body lines
+                var bodyLines = new List<IRenderable>();
+                bodyLines.Add(new Markup("  [bold]Performance[/]"));
+                bodyLines.Add(new Markup(PerfLine("Prefill", promptEvalMs, promptLen, prefillTokPerSec)));
+                bodyLines.Add(new Markup(PerfLine("Decode", evalMs, evalSteps, decodeTokPerSec)));
+                bodyLines.Add(new Markup(PerfLine("Sampling", samplerMs, generated, null)));
+                bodyLines.Add(new Markup("  [dim]──────────────────────────────────────────────────────[/]"));
+                bodyLines.Add(new Markup(PerfLine("Total", totalMs, totalTokens, totalTokPerSec)));
+                bodyLines.Add(new Markup(PerfLine("Load", loadMs, null, null)));
+                bodyLines.Add(new Text(""));
+                bodyLines.Add(new Markup("  [bold]Memory[/]"));
+                bodyLines.Add(new Markup(MemLine("Weights", modelWeightsBytes, "(memory-mapped)")));
+                bodyLines.Add(new Markup(MemLine("Compute", computeBytes, null)));
+                bodyLines.Add(new Markup(MemLine("KV Cache", kvCacheBytes, $"({cacheSize} slots)")));
+                bodyLines.Add(new Markup("  [dim]──────────────────────────────────────────────────────[/]"));
+                bodyLines.Add(new Markup(MemLine("Total", totalMemory, null)));
+                bodyLines.Add(new Text(""));
 
-            // Assemble panel
-            var panelContent = new Rows(
-                new Text(""),
-                headerGrid,
-                new Text(""),
-                new Rows(bodyLines),
-                new Text(""));
+                var finishReasonStr = finishReason.ToString().ToLowerInvariant();
+                bodyLines.Add(new Markup($"  [dim]{Markup.Escape(finishReasonStr)} | {promptLen} prompt, {generated} generated[/]"));
 
-            var panel = new Panel(panelContent)
-                .Border(BoxBorder.Rounded)
-                .Padding(2, 0);
+                // Assemble panel
+                var panelContent = new Rows(
+                    new Text(""),
+                    headerGrid,
+                    new Text(""),
+                    new Rows(bodyLines),
+                    new Text(""));
 
-            AnsiConsole.Write(panel);
+                var panel = new Panel(panelContent)
+                    .Border(BoxBorder.Rounded)
+                    .Padding(2, 0);
+
+                AnsiConsole.Write(panel);
+            }
         }
         finally
         {
