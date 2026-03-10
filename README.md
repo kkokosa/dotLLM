@@ -14,7 +14,7 @@
 
 dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around llama.cpp or Python libraries. All orchestration, model loading, tokenization, sampling, and CPU compute are implemented in pure C#, with a thin C/CUDA native library for GPU kernels. It targets transformer-based models (Llama, Mistral, Phi, Qwen, DeepSeek) with SIMD-optimized CPU and CUDA GPU backends.
 
-> **Status**: Phase 1 complete — dotLLM can load a GGUF model, tokenize a prompt, run the full Llama forward pass with KV-cache, sample tokens, and generate coherent multi-token output on CPU. See [Roadmap](#roadmap) for Phase 2 (Q4_K_M, chat templates, streaming, hooks).
+> **Status**: Phase 2 complete — dotLLM supports Q4_K_M quantization, chat templates, streaming generation, multi-threaded CPU inference, and multiple architectures (Llama, Mistral, Phi, Qwen). See [Roadmap](#roadmap) for Phase 3 (CPU performance optimization).
 
 ## Key Features
 
