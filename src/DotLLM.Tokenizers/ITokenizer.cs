@@ -15,6 +15,17 @@ public interface ITokenizer
     /// <returns>Decoded text.</returns>
     string Decode(ReadOnlySpan<int> tokenIds);
 
+    /// <summary>
+    /// Decodes a sequence of token IDs back to text, optionally preserving the leading space
+    /// that SentencePiece tokenizers normally strip (the inverse of BOS ▁ prepending).
+    /// Use <paramref name="stripBosSpace"/> = <c>false</c> when decoding generated continuation
+    /// tokens that were NOT encoded with BOS space prepending.
+    /// </summary>
+    /// <param name="tokenIds">Token IDs to decode.</param>
+    /// <param name="stripBosSpace">When true (default), strips the leading space introduced by BOS ▁ prepending.</param>
+    /// <returns>Decoded text.</returns>
+    string Decode(ReadOnlySpan<int> tokenIds, bool stripBosSpace) => Decode(tokenIds);
+
     /// <summary>Decodes a single token ID to its string representation.</summary>
     /// <param name="tokenId">Token ID to decode.</param>
     /// <returns>String representation of the token.</returns>

@@ -56,13 +56,14 @@ public class QwenTextGeneratorTests
         using var __ = model;
 
         var generator = new TextGenerator(model, tokenizer);
-        var options = new InferenceOptions { Temperature = 0f, MaxTokens = 5 };
+        // Instruct models may emit special/whitespace tokens before the answer,
+        // so generate several tokens and check the full text.
+        var options = new InferenceOptions { Temperature = 0f, MaxTokens = 10 };
 
         var response = generator.Generate("The capital of France is", options);
 
         Assert.True(response.GeneratedTokenIds.Length > 0);
-        string firstToken = tokenizer.DecodeToken(response.GeneratedTokenIds[0]).Trim();
-        Assert.Equal("Paris", firstToken);
+        Assert.Contains("Paris", response.Text);
     }
 
     [Fact]

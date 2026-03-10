@@ -16,6 +16,11 @@ internal readonly struct TransformerLayerWeights
     /// <summary>Pre-attention RMSNorm weight [hiddenSize].</summary>
     public readonly float[] AttnNormWeight;
 
+    /// <summary>Optional QK-norm weight [headDim]. Applied per-head to Q after projection, before RoPE. Null when absent (e.g. Qwen2, Llama).</summary>
+    public readonly float[]? QNormWeight;
+    /// <summary>Optional QK-norm weight [headDim]. Applied per-head to K after projection, before RoPE. Null when absent.</summary>
+    public readonly float[]? KNormWeight;
+
     /// <summary>Q projection pointer, quantType, output dim, input dim.</summary>
     public readonly nint QWeight;
     public readonly QuantizationType QQuantType;
@@ -86,9 +91,12 @@ internal readonly struct TransformerLayerWeights
         nint upWeight, QuantizationType upQuantType, int upOutputDim, int upInputDim,
         nint downWeight, QuantizationType downQuantType, int downOutputDim, int downInputDim,
         float[]? qBias = null, float[]? kBias = null, float[]? vBias = null, float[]? oBias = null,
-        float[]? gateBias = null, float[]? upBias = null, float[]? downBias = null)
+        float[]? gateBias = null, float[]? upBias = null, float[]? downBias = null,
+        float[]? qNormWeight = null, float[]? kNormWeight = null)
     {
         AttnNormWeight = attnNormWeight;
+        QNormWeight = qNormWeight;
+        KNormWeight = kNormWeight;
         QWeight = qWeight; QQuantType = qQuantType; QOutputDim = qOutputDim; QInputDim = qInputDim; QBias = qBias;
         KWeight = kWeight; KQuantType = kQuantType; KOutputDim = kOutputDim; KInputDim = kInputDim; KBias = kBias;
         VWeight = vWeight; VQuantType = vQuantType; VOutputDim = vOutputDim; VInputDim = vInputDim; VBias = vBias;
@@ -263,18 +271,60 @@ internal sealed class TransformerWeights
         }
         float[]? oBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.attn_output.bias");
 
+        // Optional QK-norms (Qwen3-style): per-head RMSNorm applied to Q/K after projection, before RoPE
+        float[]? qNormWeight = LoadOptionalNorm(dataBase, tensors, $"{prefix}.attn_q_norm.weight", config.HeadDim);
+        float[]? kNormWeight = LoadOptionalNorm(dataBase, tensors, $"{prefix}.attn_k_norm.weight", config.HeadDim);
+
         // FFN norm
         var ffnNormDesc = tensors[$"{prefix}.ffn_norm.weight"];
         float[] ffnNorm = DequantizeNorm(dataBase, ffnNormDesc, hiddenSize);
 
-        // FFN projections
-        var (gatePtr, gateQt, gateM, gateK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_gate.weight"]);
-        var (upPtr, upQt, upM, upK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_up.weight"]);
-        var (downPtr, downQt, downM, downK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_down.weight"]);
+        // FFN projections — check for fused gate+up (Phi-3 style: ffn_up.weight has 2x intermediate rows)
+        nint gatePtr, upPtr, downPtr;
+        QuantizationType gateQt, upQt, downQt;
+        int gateM, gateK, upM, upK, downM, downK;
+        float[]? gateBias, upBias, downBias;
 
-        float[]? gateBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_gate.bias");
-        float[]? upBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_up.bias");
-        float[]? downBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_down.bias");
+        (downPtr, downQt, downM, downK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_down.weight"]);
+        downBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_down.bias");
+
+        if (tensors.TryGetValue($"{prefix}.ffn_gate.weight", out var gateDesc))
+        {
+            // Standard separate gate/up (Llama, Mistral, Qwen)
+            (gatePtr, gateQt, gateM, gateK) = LoadLinear(dataBase, gateDesc);
+            (upPtr, upQt, upM, upK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_up.weight"]);
+            gateBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_gate.bias");
+            upBias = LoadOptionalBias(dataBase, tensors, $"{prefix}.ffn_up.bias");
+        }
+        else
+        {
+            // Fused gate+up in ffn_up.weight (Phi-3 style): output dim = 2 * intermediate_size
+            // Split: first intermediate_size rows = gate, next intermediate_size rows = up
+            var fusedDesc = tensors[$"{prefix}.ffn_up.weight"];
+            nint fusedPtr = dataBase + (nint)fusedDesc.DataOffset;
+            int inputDim = fusedDesc.Shape[0]; // hidden_size
+            int fusedOutputDim = fusedDesc.Shape[1]; // 2 * intermediate_size
+            int halfDim = fusedOutputDim / 2;
+            long rowBytes = Dequantize.RowByteSize(inputDim, fusedDesc.QuantizationType);
+
+            gatePtr = fusedPtr; gateQt = fusedDesc.QuantizationType; gateM = halfDim; gateK = inputDim;
+            upPtr = fusedPtr + (nint)(halfDim * rowBytes); upQt = fusedDesc.QuantizationType; upM = halfDim; upK = inputDim;
+
+            // Fused bias split (if present)
+            if (tensors.TryGetValue($"{prefix}.ffn_up.bias", out var fusedBiasDesc))
+            {
+                nint biasPtr = dataBase + (nint)fusedBiasDesc.DataOffset;
+                gateBias = new float[halfDim];
+                upBias = new float[halfDim];
+                Dequantize.ToFloat32(biasPtr, halfDim, fusedBiasDesc.QuantizationType, gateBias);
+                Dequantize.ToFloat32(biasPtr + halfDim * sizeof(float), halfDim, fusedBiasDesc.QuantizationType, upBias);
+            }
+            else
+            {
+                gateBias = null;
+                upBias = null;
+            }
+        }
 
         return new TransformerLayerWeights(
             attnNorm,
@@ -287,7 +337,8 @@ internal sealed class TransformerWeights
             upPtr, upQt, upM, upK,
             downPtr, downQt, downM, downK,
             qBias, kBias, vBias, oBias,
-            gateBias, upBias, downBias);
+            gateBias, upBias, downBias,
+            qNormWeight, kNormWeight);
     }
 
     private static (nint ptr, QuantizationType qt, int outputDim, int inputDim) LoadLinear(
@@ -306,6 +357,16 @@ internal sealed class TransformerWeights
         float[] result = new float[expectedSize];
         Dequantize.ToFloat32(ptr, expectedSize, desc.QuantizationType, result);
         return result;
+    }
+
+    /// <summary>
+    /// Loads an optional norm weight tensor. Returns null when the tensor is absent.
+    /// </summary>
+    private static float[]? LoadOptionalNorm(nint dataBase,
+        IReadOnlyDictionary<string, GgufTensorDescriptor> tensors, string name, int expectedSize)
+    {
+        if (!tensors.TryGetValue(name, out var desc)) return null;
+        return DequantizeNorm(dataBase, desc, expectedSize);
     }
 
     /// <summary>

@@ -26,7 +26,11 @@ public static class GgufModelConfigExtractor
         int intermediateSize = (int)metadata.GetUInt32($"{arch}.feed_forward_length");
         int numAttentionHeads = (int)metadata.GetUInt32($"{arch}.attention.head_count");
         int numKvHeads = (int)metadata.GetUInt32OrDefault($"{arch}.attention.head_count_kv", (uint)numAttentionHeads);
-        int headDim = hiddenSize / numAttentionHeads;
+
+        // Head dimension: prefer explicit GGUF key (needed for models like Qwen3 where
+        // head_dim != hidden_size / num_heads), fall back to derived value.
+        int headDim = (int)metadata.GetUInt32OrDefault($"{arch}.attention.key_length",
+                                                        (uint)(hiddenSize / numAttentionHeads));
         int maxSeqLen = (int)metadata.GetUInt32OrDefault($"{arch}.context_length", 2048);
 
         float normEps = metadata.GetFloat32OrDefault($"{arch}.attention.layer_norm_rms_epsilon", 1e-5f);
@@ -42,7 +46,7 @@ public static class GgufModelConfigExtractor
         if (string.IsNullOrEmpty(chatTemplate))
             chatTemplate = null;
 
-        RoPEConfig? ropeConfig = ExtractRoPEConfig(metadata, arch, headDim);
+        RoPEConfig? ropeConfig = ExtractRoPEConfig(metadata, arch, headDim, architecture);
 
         return new ModelConfig
         {
@@ -69,7 +73,7 @@ public static class GgufModelConfigExtractor
         {
             "llama" => Architecture.Llama,
             "mistral" => Architecture.Mistral,
-            "phi" => Architecture.Phi,
+            "phi" or "phi2" or "phi3" => Architecture.Phi,
             "qwen" or "qwen2" or "qwen3" => Architecture.Qwen,
             "deepseek" or "deepseek2" => Architecture.DeepSeek,
             _ => throw new InvalidDataException($"Unsupported GGUF architecture: '{archString}'.")
@@ -93,7 +97,8 @@ public static class GgufModelConfigExtractor
             "Cannot determine vocabulary size: neither '{arch}.vocab_size' nor 'tokenizer.ggml.tokens' found.");
     }
 
-    private static RoPEConfig? ExtractRoPEConfig(GgufMetadata metadata, string arch, int headDim)
+    private static RoPEConfig? ExtractRoPEConfig(GgufMetadata metadata, string arch, int headDim,
+        Architecture architecture)
     {
         // If no rope keys exist at all, this model may not use RoPE.
         string freqBaseKey = $"{arch}.rope.freq_base";
@@ -103,6 +108,15 @@ public static class GgufModelConfigExtractor
 
         float theta = metadata.GetFloat32OrDefault(freqBaseKey, 10000.0f);
         int dimCount = (int)metadata.GetUInt32OrDefault(dimCountKey, (uint)headDim);
+
+        // Determine RoPE element-pairing convention. Must match the GGUF Q/K weight layout:
+        // - Llama/Mistral: converter permutes Q/K weights → interleaved (Norm)
+        // - Qwen/Phi: weights kept in HuggingFace order → non-interleaved (NeoX)
+        RoPEType ropeType = architecture switch
+        {
+            Architecture.Qwen or Architecture.Phi => RoPEType.NeoX,
+            _ => RoPEType.Norm,
+        };
 
         RoPEScalingType scalingType = RoPEScalingType.None;
         float scalingFactor = 1.0f;
@@ -135,6 +149,7 @@ public static class GgufModelConfigExtractor
         return new RoPEConfig(
             Theta: theta,
             DimensionCount: dimCount,
+            Type: ropeType,
             ScalingType: scalingType,
             ScalingFactor: scalingFactor,
             OrigMaxSeqLen: origMaxSeqLen,

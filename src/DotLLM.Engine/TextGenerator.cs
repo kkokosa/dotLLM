@@ -127,7 +127,7 @@ public sealed class TextGenerator
 
         // Check stop conditions for first token
         generatedIds.Add(firstTokenId);
-        string decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds));
+        string decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
 
         var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds, decodedText);
         if (stopResult != StopResult.Continue)
@@ -169,7 +169,7 @@ public sealed class TextGenerator
             }
 
             generatedIds.Add(nextTokenId);
-            decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds));
+            decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
 
             stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
             if (stopResult != StopResult.Continue)
@@ -280,7 +280,7 @@ public sealed class TextGenerator
 
         // Check stop conditions for first token
         generatedIds.Add(firstTokenId);
-        string decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds));
+        string decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
 
         var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds, decodedText);
         if (stopResult != StopResult.Continue)
@@ -345,7 +345,7 @@ public sealed class TextGenerator
             }
 
             generatedIds.Add(nextTokenId);
-            decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds));
+            decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
 
             stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
             if (stopResult != StopResult.Continue)
@@ -417,7 +417,7 @@ public sealed class TextGenerator
         FinishReason finishReason, long prefillTicks, long decodeTicks, long samplerTicks)
     {
         string text = generatedIds.Count > 0
-            ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds))
+            ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false)
             : string.Empty;
 
         return new InferenceResponse

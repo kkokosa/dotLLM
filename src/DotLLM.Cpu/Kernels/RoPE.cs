@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using DotLLM.Core.Configuration;
 
 namespace DotLLM.Cpu.Kernels;
 
@@ -197,6 +198,73 @@ public static class RoPE
     }
 
     /// <summary>
+    /// Applies non-interleaved (GPT-NeoX / HuggingFace "rotate_half") rotation to a single head vector in-place.
+    /// Pairs <c>(vec[i], vec[i + halfDim])</c> for each <c>i in [0, halfDim)</c>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    [SkipLocalsInit]
+    public static void ApplyRotationNeoX(Span<float> vec, ReadOnlySpan<float> cos,
+                                          ReadOnlySpan<float> sin, int headDim)
+    {
+        int halfDim = headDim / 2;
+        int i = 0;
+
+        if (Avx2.IsSupported && halfDim >= 8)
+        {
+            // Process 8 dimension pairs per iteration: vec[i..i+8] paired with vec[i+halfDim..i+halfDim+8]
+            for (; i + 8 <= halfDim; i += 8)
+            {
+                var even = Vector256.LoadUnsafe(ref vec[i]);
+                var odd  = Vector256.LoadUnsafe(ref vec[i + halfDim]);
+
+                var cosVec = Vector256.LoadUnsafe(in cos[i]);
+                var sinVec = Vector256.LoadUnsafe(in sin[i]);
+
+                Vector256<float> newEven, newOdd;
+                if (Fma.IsSupported)
+                {
+                    newEven = Fma.MultiplyAddNegated(odd, sinVec, even * cosVec);
+                    newOdd  = Fma.MultiplyAdd(even, sinVec, odd * cosVec);
+                }
+                else
+                {
+                    newEven = even * cosVec - odd * sinVec;
+                    newOdd  = even * sinVec + odd * cosVec;
+                }
+
+                newEven.StoreUnsafe(ref vec[i]);
+                newOdd.StoreUnsafe(ref vec[i + halfDim]);
+            }
+        }
+
+        // Scalar remainder / fallback
+        for (; i < halfDim; i++)
+        {
+            float e = vec[i];
+            float o = vec[i + halfDim];
+            vec[i] = e * cos[i] - o * sin[i];
+            vec[i + halfDim] = e * sin[i] + o * cos[i];
+        }
+    }
+
+    /// <summary>
+    /// Scalar reference implementation of <see cref="ApplyRotationNeoX"/> for correctness verification.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void ApplyRotationNeoXScalar(Span<float> vec, ReadOnlySpan<float> cos,
+                                                  ReadOnlySpan<float> sin, int headDim)
+    {
+        int halfDim = headDim / 2;
+        for (int i = 0; i < halfDim; i++)
+        {
+            float e = vec[i];
+            float o = vec[i + halfDim];
+            vec[i] = e * cos[i] - o * sin[i];
+            vec[i + halfDim] = e * sin[i] + o * cos[i];
+        }
+    }
+
+    /// <summary>
     /// Applies RoPE to query and key tensors. Data layout: <c>[seqLen, numHeads * headDim]</c> —
     /// one row per token, all heads concatenated. Convenience overload that rotates all <paramref name="headDim"/> dimensions.
     /// </summary>
@@ -208,11 +276,13 @@ public static class RoPE
     /// <param name="headDim">Dimension per head (must be even).</param>
     /// <param name="cosTable">Pre-computed cosine table from <see cref="PrecomputeFrequencyTable"/>.</param>
     /// <param name="sinTable">Pre-computed sine table from <see cref="PrecomputeFrequencyTable"/>.</param>
+    /// <param name="ropeType">Element-pairing convention: Norm (interleaved) or NeoX (non-interleaved).</param>
     [SkipLocalsInit]
     public static void Execute(Span<float> q, Span<float> k, ReadOnlySpan<int> positions,
                                 int numHeads, int numKvHeads, int headDim,
-                                ReadOnlySpan<float> cosTable, ReadOnlySpan<float> sinTable)
-        => Execute(q, k, positions, numHeads, numKvHeads, headDim, headDim, cosTable, sinTable);
+                                ReadOnlySpan<float> cosTable, ReadOnlySpan<float> sinTable,
+                                RoPEType ropeType = RoPEType.Norm)
+        => Execute(q, k, positions, numHeads, numKvHeads, headDim, headDim, cosTable, sinTable, ropeType);
 
     /// <summary>
     /// Applies RoPE to query and key tensors with partial rotation support. Data layout:
@@ -229,15 +299,20 @@ public static class RoPE
     /// <param name="ropeDim">Number of dimensions to rotate (must be even, &lt;= <paramref name="headDim"/>). Cos/sin tables must be sized for this value.</param>
     /// <param name="cosTable">Pre-computed cosine table from <see cref="PrecomputeFrequencyTable"/>.</param>
     /// <param name="sinTable">Pre-computed sine table from <see cref="PrecomputeFrequencyTable"/>.</param>
+    /// <param name="ropeType">Element-pairing convention: Norm (interleaved) or NeoX (non-interleaved).</param>
     [SkipLocalsInit]
     public static void Execute(Span<float> q, Span<float> k, ReadOnlySpan<int> positions,
                                 int numHeads, int numKvHeads, int headDim, int ropeDim,
-                                ReadOnlySpan<float> cosTable, ReadOnlySpan<float> sinTable)
+                                ReadOnlySpan<float> cosTable, ReadOnlySpan<float> sinTable,
+                                RoPEType ropeType = RoPEType.Norm)
     {
         int halfRopeDim = ropeDim / 2;
         int qStride = numHeads * headDim;
         int kStride = numKvHeads * headDim;
         int seqLen = positions.Length;
+
+        // Select rotation function based on RoPE type (branch once, not per head)
+        bool isNeoX = ropeType == RoPEType.NeoX;
 
         for (int t = 0; t < seqLen; t++)
         {
@@ -249,20 +324,26 @@ public static class RoPE
             for (int h = 0; h < numHeads; h++)
             {
                 var headSlice = q.Slice(t * qStride + h * headDim, ropeDim);
-                ApplyRotation(headSlice, cos, sin, ropeDim);
+                if (isNeoX)
+                    ApplyRotationNeoX(headSlice, cos, sin, ropeDim);
+                else
+                    ApplyRotation(headSlice, cos, sin, ropeDim);
             }
 
             // Rotate all K heads for this token.
             for (int h = 0; h < numKvHeads; h++)
             {
                 var headSlice = k.Slice(t * kStride + h * headDim, ropeDim);
-                ApplyRotation(headSlice, cos, sin, ropeDim);
+                if (isNeoX)
+                    ApplyRotationNeoX(headSlice, cos, sin, ropeDim);
+                else
+                    ApplyRotation(headSlice, cos, sin, ropeDim);
             }
         }
     }
 
     /// <summary>
-    /// Scalar reference implementation of <see cref="Execute(Span{float}, Span{float}, ReadOnlySpan{int}, int, int, int, ReadOnlySpan{float}, ReadOnlySpan{float})"/> for correctness verification.
+    /// Scalar reference implementation for correctness verification.
     /// </summary>
     [SkipLocalsInit]
     internal static void ExecuteScalar(Span<float> q, Span<float> k, ReadOnlySpan<int> positions,
@@ -271,7 +352,7 @@ public static class RoPE
         => ExecuteScalar(q, k, positions, numHeads, numKvHeads, headDim, headDim, cosTable, sinTable);
 
     /// <summary>
-    /// Scalar reference implementation of <see cref="Execute(Span{float}, Span{float}, ReadOnlySpan{int}, int, int, int, int, ReadOnlySpan{float}, ReadOnlySpan{float})"/> for correctness verification.
+    /// Scalar reference implementation for correctness verification.
     /// </summary>
     [SkipLocalsInit]
     internal static void ExecuteScalar(Span<float> q, Span<float> k, ReadOnlySpan<int> positions,

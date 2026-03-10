@@ -84,7 +84,9 @@ internal sealed class SentencePieceEncoding : IBpeEncoding
         }
     }
 
-    public string Decode(ReadOnlySpan<int> tokenIds)
+    public string Decode(ReadOnlySpan<int> tokenIds) => Decode(tokenIds, stripBosSpace: true);
+
+    public string Decode(ReadOnlySpan<int> tokenIds, bool stripBosSpace)
     {
         var sb = new StringBuilder(tokenIds.Length * 4);
         byte[]? byteBuffer = null;
@@ -121,7 +123,8 @@ internal sealed class SentencePieceEncoding : IBpeEncoding
             ArrayPool<byte>.Shared.Return(byteBuffer);
 
         // Strip the single leading space introduced by ▁ prepending (matches HF tokeniser behaviour).
-        bool stripLeading = _addBosSpace && sb.Length > 0 && sb[0] == ' ';
+        // Only strip when stripBosSpace is true — continuation decoding must preserve it.
+        bool stripLeading = stripBosSpace && _addBosSpace && sb.Length > 0 && sb[0] == ' ';
         return stripLeading ? sb.ToString(1, sb.Length - 1) : sb.ToString();
     }
 

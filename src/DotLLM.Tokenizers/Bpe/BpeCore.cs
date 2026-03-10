@@ -18,6 +18,7 @@ internal interface IBpeEncoding
     /// </summary>
     int[] EncodeSegment(string text) => Encode(text);
     string Decode(ReadOnlySpan<int> tokenIds);
+    string Decode(ReadOnlySpan<int> tokenIds, bool stripBosSpace) => Decode(tokenIds);
     string DecodeToken(int tokenId);
 }
 

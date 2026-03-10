@@ -28,6 +28,7 @@ public sealed unsafe class TransformerModel : IModel
     private readonly TransformerForwardState _state;
     private readonly GgufFile _gguf; // prevent premature GC of mmap
     private readonly int _ropeDim;
+    private readonly RoPEType _ropeType;
     private readonly int? _slidingWindowSize;
     private readonly ComputeThreadPool? _threadPool;
     private readonly bool _ownsThreadPool;
@@ -39,13 +40,15 @@ public sealed unsafe class TransformerModel : IModel
     public long ComputeMemoryBytes => _state.AllocatedBytes;
 
     private TransformerModel(ModelConfig config, TransformerWeights weights, TransformerForwardState state,
-                       GgufFile gguf, int ropeDim, ComputeThreadPool? threadPool, bool ownsPool)
+                       GgufFile gguf, int ropeDim, RoPEType ropeType,
+                       ComputeThreadPool? threadPool, bool ownsPool)
     {
         Config = config;
         _weights = weights;
         _state = state;
         _gguf = gguf;
         _ropeDim = ropeDim;
+        _ropeType = ropeType;
         _slidingWindowSize = config.SlidingWindowSize;
         _threadPool = threadPool;
         _ownsThreadPool = ownsPool;
@@ -70,6 +73,7 @@ public sealed unsafe class TransformerModel : IModel
         int ropeDim = config.RoPEConfig?.DimensionCount ?? config.HeadDim;
         if (ropeDim == 0) ropeDim = config.HeadDim;
         float ropeTheta = config.RoPEConfig?.Theta ?? 10000.0f;
+        RoPEType ropeType = config.RoPEConfig?.Type ?? RoPEType.Norm;
 
         var state = new TransformerForwardState(
             config.HiddenSize,
@@ -86,7 +90,7 @@ public sealed unsafe class TransformerModel : IModel
             ? new ComputeThreadPool(threading.EffectiveThreadCount)
             : null;
 
-        return new TransformerModel(config, weights, state, gguf, ropeDim, pool, ownsPool: pool is not null);
+        return new TransformerModel(config, weights, state, gguf, ropeDim, ropeType, pool, ownsPool: pool is not null);
     }
 
     /// <inheritdoc/>
@@ -176,13 +180,19 @@ public sealed unsafe class TransformerModel : IModel
             AddBias(lw.KBias, k, lw.KOutputDim, seqLen);
             AddBias(lw.VBias, v, lw.VOutputDim, seqLen);
 
+            // Optional QK-norms (Qwen3-style): per-head RMSNorm on Q/K after projection, before RoPE
+            if (lw.QNormWeight is not null)
+                ApplyPerHeadNorm(lw.QNormWeight, q, numHeads, headDim, seqLen, eps);
+            if (lw.KNormWeight is not null)
+                ApplyPerHeadNorm(lw.KNormWeight, k, numKvHeads, headDim, seqLen, eps);
+
             // d. RoPE (in-place on Q and K for all tokens)
             RoPE.Execute(
                 new Span<float>(q, seqLen * numHeads * headDim),
                 new Span<float>(k, seqLen * kvStride),
                 positions,
                 numHeads, numKvHeads, headDim, _ropeDim,
-                _state.CosTable, _state.SinTable);
+                _state.CosTable, _state.SinTable, _ropeType);
 
             // e. Attention — with or without KV-cache
             if (kvCache is not null)
@@ -307,6 +317,28 @@ public sealed unsafe class TransformerModel : IModel
             new Span<float>((void*)result.DataPointer, vocabSize));
 
         return result;
+    }
+
+    /// <summary>
+    /// Applies RMSNorm per attention head to a Q or K tensor [seqLen, numHeads * headDim].
+    /// Used for QK-norm (Qwen3-style) where each head vector is independently normalized
+    /// after projection and before RoPE.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ApplyPerHeadNorm(float[] normWeight, float* qk,
+        int numHeads, int headDim, int seqLen, float eps)
+    {
+        int stride = numHeads * headDim;
+        for (int t = 0; t < seqLen; t++)
+        {
+            for (int h = 0; h < numHeads; h++)
+            {
+                float* head = qk + t * stride + h * headDim;
+                var input = new ReadOnlySpan<float>(head, headDim);
+                var output = new Span<float>(head, headDim);
+                RmsNorm.Execute(input, normWeight, eps, output);
+            }
+        }
     }
 
     /// <summary>

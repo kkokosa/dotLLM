@@ -7,6 +7,7 @@ namespace DotLLM.Core.PositionEncoding;
 /// </summary>
 /// <param name="Theta">Base frequency. Default 10000.0, Llama 3 uses 500000.0.</param>
 /// <param name="DimensionCount">Number of dimensions for the rotation.</param>
+/// <param name="Type">Element-pairing convention. Must match GGUF Q/K weight layout.</param>
 /// <param name="ScalingType">Context-length scaling strategy.</param>
 /// <param name="ScalingFactor">Scaling factor for Linear/NTK methods.</param>
 /// <param name="OrigMaxSeqLen">Original max sequence length before scaling.</param>
@@ -16,6 +17,7 @@ namespace DotLLM.Core.PositionEncoding;
 public readonly record struct RoPEConfig(
     float Theta = 10000.0f,
     int DimensionCount = 0,
+    RoPEType Type = RoPEType.Norm,
     RoPEScalingType ScalingType = RoPEScalingType.None,
     float ScalingFactor = 1.0f,
     int OrigMaxSeqLen = 0,

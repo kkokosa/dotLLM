@@ -57,7 +57,30 @@ internal sealed class DebugForwardPassCommand : Command<DebugForwardPassCommand.
         if (gguf.TensorsByName.TryGetValue("output.weight", out var outDesc))
             configTable.AddRow("Output quant", outDesc.QuantizationType.ToString());
 
+        configTable.AddRow("Head dim", config.HeadDim.ToString());
+        configTable.AddRow("RoPE theta", config.RoPEConfig?.Theta.ToString("F1") ?? "null");
+        configTable.AddRow("RoPE dim", config.RoPEConfig?.DimensionCount.ToString() ?? "null");
+        configTable.AddRow("RoPE scaling", config.RoPEConfig?.ScalingType.ToString() ?? "null");
+        configTable.AddRow("Norm eps", config.NormEpsilon.ToString("E2"));
+        configTable.AddRow("Sliding window", config.SlidingWindowSize?.ToString() ?? "null");
+
         AnsiConsole.Write(configTable);
+
+        // Dump tensor shapes for key architecture tensors
+        AnsiConsole.Write(new Rule("[bold yellow]Key Tensors[/]").LeftJustified());
+        AnsiConsole.WriteLine();
+        var tensorNames = new[] {
+            "token_embd.weight", "output.weight", "output_norm.weight",
+            "blk.0.attn_q.weight", "blk.0.attn_k.weight", "blk.0.attn_v.weight",
+            "blk.0.attn_q.bias", "blk.0.attn_k.bias", "blk.0.attn_v.bias",
+            "blk.0.attn_output.weight",
+            "blk.0.ffn_gate.weight", "blk.0.ffn_up.weight", "blk.0.ffn_down.weight",
+        };
+        foreach (var tensorName in tensorNames)
+        {
+            if (gguf.TensorsByName.TryGetValue(tensorName, out var tdesc))
+                AnsiConsole.WriteLine($"  {tensorName}: {tdesc.Shape} {tdesc.QuantizationType}");
+        }
         AnsiConsole.WriteLine();
 
         // Tokenize prompt
@@ -66,6 +89,13 @@ internal sealed class DebugForwardPassCommand : Command<DebugForwardPassCommand.
         {
             tokenIds = [tokenizer.BosTokenId];
             AnsiConsole.MarkupLine("[grey]No prompt specified — using BOS token only.[/]");
+        }
+        else if (settings.Prompt.StartsWith("[") && settings.Prompt.EndsWith("]"))
+        {
+            // Direct token IDs: [151644, 872, 198, ...]
+            tokenIds = settings.Prompt.Trim('[', ']').Split(',')
+                .Select(s => int.Parse(s.Trim())).ToArray();
+            AnsiConsole.MarkupLine("[grey]Using explicit token IDs.[/]");
         }
         else
         {
