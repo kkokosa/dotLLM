@@ -605,6 +605,30 @@ public static unsafe partial class MatMul
         }
     }
 
+    /// <summary>
+    /// Parallel R4-interleaved Q5_0 ComputeRows. Partitions groups across threads.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void ComputeRowsQ5_0Interleaved(byte* repackedWeights, byte* xQ8, float* result,
+        int fullGroups, int tailRows, int blockCount, ComputeThreadPool? pool)
+    {
+        int m = fullGroups * 4 + tailRows;
+        if (pool is null || m < ParallelMinRows)
+        {
+            ComputeRowsQ5_0Interleaved(repackedWeights, xQ8, result, fullGroups, tailRows, blockCount);
+            return;
+        }
+
+        var ctx = new ComputeRowsR4Ctx
+        {
+            RepackedWeights = repackedWeights, XQ = xQ8, Result = result,
+            M = m, FullGroups = fullGroups, TailRows = tailRows,
+            BlockCount = blockCount, BlockBytes = Q5_0BlockBytes
+        };
+        pool.Dispatch((nint)(&ctx), &ComputeRowsQ5_0R4Worker);
+    }
+
     // ──────────────────── GemvQ5_0 ────────────────────
 
     /// <summary>
@@ -869,6 +893,40 @@ public static unsafe partial class MatMul
         int rowBytes = ctx.BlockCount * Q5_0BlockBytes;
         ComputeRowsQ5_0(ctx.Weights + (long)start * rowBytes, ctx.XQ8,
             ctx.Result + start, count, ctx.BlockCount);
+    }
+
+    private static void ComputeRowsQ5_0R4Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<ComputeRowsR4Ctx>((void*)ctxPtr);
+        PartitionRows(ctx.M, threadIdx, threadCount, out int start, out int count);
+        if (count == 0) return;
+
+        int groupBytes = 4 * ctx.BlockCount * Q5_0BlockBytes;
+        int rowBytes = ctx.BlockCount * Q5_0BlockBytes;
+        int end = start + count;
+
+        int startGroup = start / 4;
+        int endGroup = Math.Min(end / 4, ctx.FullGroups);
+        for (int g = startGroup; g < endGroup; g++)
+        {
+            byte* groupBase = ctx.RepackedWeights + (long)g * groupBytes;
+            if (Avx2.IsSupported)
+                VecDotQ5_0Q8_1Avx2_4RowsR4(groupBase, ctx.XQ, ctx.BlockCount, ctx.Result + g * 4);
+            else
+                for (int r = 0; r < 4; r++)
+                    ctx.Result[g * 4 + r] = VecDotQ5_0Q8_1ScalarR4(groupBase, r, ctx.XQ, ctx.BlockCount);
+        }
+
+        if (ctx.TailRows > 0 && end > ctx.FullGroups * 4)
+        {
+            int tailStart = Math.Max(start, ctx.FullGroups * 4) - ctx.FullGroups * 4;
+            int tailEnd = Math.Min(end, ctx.M) - ctx.FullGroups * 4;
+            byte* tailBase = ctx.RepackedWeights + (long)ctx.FullGroups * groupBytes;
+            for (int r = tailStart; r < tailEnd; r++)
+                ctx.Result[ctx.FullGroups * 4 + r] = Avx2.IsSupported
+                    ? VecDotQ5_0Q8_1Avx2(tailBase + (long)r * rowBytes, ctx.XQ, ctx.BlockCount)
+                    : VecDotQ5_0Q8_1Scalar(tailBase + (long)r * rowBytes, ctx.XQ, ctx.BlockCount);
+        }
     }
 
     private static void GemmTiledQ5_0Worker(nint ctxPtr, int threadIdx, int threadCount)

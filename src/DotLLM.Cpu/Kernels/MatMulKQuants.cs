@@ -1282,6 +1282,71 @@ public static unsafe partial class MatMul
         }
     }
 
+    /// <summary>
+    /// Parallel R4-interleaved K-quant ComputeRows. Partitions groups across threads.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void ComputeRowsQ4_KInterleaved(byte* repackedWeights, byte* xQ8K, float* result,
+        int fullGroups, int tailRows, int superBlockCount, ComputeThreadPool? pool)
+    {
+        int m = fullGroups * 4 + tailRows;
+        if (pool is null || m < ParallelMinRows)
+        {
+            ComputeRowsQ4_KInterleaved(repackedWeights, xQ8K, result, fullGroups, tailRows, superBlockCount);
+            return;
+        }
+        var ctx = new ComputeRowsR4Ctx
+        {
+            RepackedWeights = repackedWeights, XQ = xQ8K, Result = result,
+            M = m, FullGroups = fullGroups, TailRows = tailRows,
+            BlockCount = superBlockCount, BlockBytes = Q4_K_BlockBytes
+        };
+        pool.Dispatch((nint)(&ctx), &ComputeRowsQ4_KR4Worker);
+    }
+
+    /// <inheritdoc cref="ComputeRowsQ4_KInterleaved(byte*, byte*, float*, int, int, int, ComputeThreadPool?)"/>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void ComputeRowsQ5_KInterleaved(byte* repackedWeights, byte* xQ8K, float* result,
+        int fullGroups, int tailRows, int superBlockCount, ComputeThreadPool? pool)
+    {
+        int m = fullGroups * 4 + tailRows;
+        if (pool is null || m < ParallelMinRows)
+        {
+            ComputeRowsQ5_KInterleaved(repackedWeights, xQ8K, result, fullGroups, tailRows, superBlockCount);
+            return;
+        }
+        var ctx = new ComputeRowsR4Ctx
+        {
+            RepackedWeights = repackedWeights, XQ = xQ8K, Result = result,
+            M = m, FullGroups = fullGroups, TailRows = tailRows,
+            BlockCount = superBlockCount, BlockBytes = Q5_K_BlockBytes
+        };
+        pool.Dispatch((nint)(&ctx), &ComputeRowsQ5_KR4Worker);
+    }
+
+    /// <inheritdoc cref="ComputeRowsQ4_KInterleaved(byte*, byte*, float*, int, int, int, ComputeThreadPool?)"/>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void ComputeRowsQ6_KInterleaved(byte* repackedWeights, byte* xQ8K, float* result,
+        int fullGroups, int tailRows, int superBlockCount, ComputeThreadPool? pool)
+    {
+        int m = fullGroups * 4 + tailRows;
+        if (pool is null || m < ParallelMinRows)
+        {
+            ComputeRowsQ6_KInterleaved(repackedWeights, xQ8K, result, fullGroups, tailRows, superBlockCount);
+            return;
+        }
+        var ctx = new ComputeRowsR4Ctx
+        {
+            RepackedWeights = repackedWeights, XQ = xQ8K, Result = result,
+            M = m, FullGroups = fullGroups, TailRows = tailRows,
+            BlockCount = superBlockCount, BlockBytes = Q6_K_BlockBytes
+        };
+        pool.Dispatch((nint)(&ctx), &ComputeRowsQ6_KR4Worker);
+    }
+
     // ──────────────────── Gemv for K-quants ────────────────────
 
     /// <summary>
@@ -1730,6 +1795,90 @@ public static unsafe partial class MatMul
     }
 
     // ──────────────────── Context structs and workers ────────────────────
+
+    private static void ComputeRowsQ4_KR4Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<ComputeRowsR4Ctx>((void*)ctxPtr);
+        PartitionRows(ctx.M, threadIdx, threadCount, out int start, out int count);
+        if (count == 0) return;
+        ComputeKQuantR4Range(ref ctx, start, count, Q4_K_BlockBytes,
+            &VecDotQ4_K_Q8_K_4Rows, &VecDotQ4_K_Q8_KAvx2, &VecDotQ4_K_Q8_KScalar);
+    }
+
+    private static void ComputeRowsQ5_KR4Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<ComputeRowsR4Ctx>((void*)ctxPtr);
+        PartitionRows(ctx.M, threadIdx, threadCount, out int start, out int count);
+        if (count == 0) return;
+        ComputeKQuantR4Range(ref ctx, start, count, Q5_K_BlockBytes,
+            &VecDotQ5_K_Q8_K_4Rows, &VecDotQ5_K_Q8_KAvx2, &VecDotQ5_K_Q8_KScalar);
+    }
+
+    private static void ComputeRowsQ6_KR4Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<ComputeRowsR4Ctx>((void*)ctxPtr);
+        PartitionRows(ctx.M, threadIdx, threadCount, out int start, out int count);
+        if (count == 0) return;
+        ComputeKQuantR4Range(ref ctx, start, count, Q6_K_BlockBytes,
+            &VecDotQ6_K_Q8_K_4Rows, &VecDotQ6_K_Q8_KAvx2, &VecDotQ6_K_Q8_KScalar);
+    }
+
+    /// <summary>
+    /// Processes a range of rows from R4-interleaved K-quant weights.
+    /// Handles full groups (4-row batches), and tail rows in [start, start+count).
+    /// </summary>
+    [SkipLocalsInit]
+    private static void ComputeKQuantR4Range(ref ComputeRowsR4Ctx ctx, int start, int count,
+        int kBlockBytes,
+        delegate*<byte*, byte*, byte*, byte*, byte*, int, float*, void> vecDot4Rows,
+        delegate*<byte*, byte*, int, float> vecDotAvx2,
+        delegate*<byte*, byte*, int, float> vecDotScalar)
+    {
+        int groupBytes = 4 * ctx.BlockCount * kBlockBytes;
+        int rowBytes = ctx.BlockCount * kBlockBytes;
+        int end = start + count;
+
+        int startGroup = start / 4;
+        int endGroup = Math.Min(end / 4, ctx.FullGroups);
+
+        for (int g = startGroup; g < endGroup; g++)
+        {
+            byte* groupBase = ctx.RepackedWeights + (long)g * groupBytes;
+            if (Avx2.IsSupported)
+            {
+                float r0 = 0, r1 = 0, r2 = 0, r3 = 0;
+                int wStride = 4 * kBlockBytes;
+                float* tmp = ctx.Result + g * 4;
+                for (int sb = 0; sb < ctx.BlockCount; sb++)
+                {
+                    byte* sbBase = groupBase + sb * wStride;
+                    vecDot4Rows(sbBase, sbBase + kBlockBytes,
+                        sbBase + 2 * kBlockBytes, sbBase + 3 * kBlockBytes,
+                        ctx.XQ + sb * Q8_K_BlockBytes, 1, tmp);
+                    r0 += tmp[0]; r1 += tmp[1]; r2 += tmp[2]; r3 += tmp[3];
+                }
+                ctx.Result[g * 4] = r0; ctx.Result[g * 4 + 1] = r1;
+                ctx.Result[g * 4 + 2] = r2; ctx.Result[g * 4 + 3] = r3;
+            }
+            else
+            {
+                for (int r = 0; r < 4; r++)
+                    ctx.Result[g * 4 + r] = VecDotKQuantScalarR4(groupBase, r, ctx.XQ,
+                        ctx.BlockCount, kBlockBytes, vecDotScalar);
+            }
+        }
+
+        if (ctx.TailRows > 0 && end > ctx.FullGroups * 4)
+        {
+            int tailStart = Math.Max(start, ctx.FullGroups * 4) - ctx.FullGroups * 4;
+            int tailEnd = Math.Min(end, ctx.M) - ctx.FullGroups * 4;
+            byte* tailBase = ctx.RepackedWeights + (long)ctx.FullGroups * groupBytes;
+            for (int r = tailStart; r < tailEnd; r++)
+                ctx.Result[ctx.FullGroups * 4 + r] = Avx2.IsSupported
+                    ? vecDotAvx2(tailBase + (long)r * rowBytes, ctx.XQ, ctx.BlockCount)
+                    : vecDotScalar(tailBase + (long)r * rowBytes, ctx.XQ, ctx.BlockCount);
+        }
+    }
 
     private struct ComputeRowsKQuantCtx
     {

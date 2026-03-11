@@ -326,6 +326,31 @@ public static unsafe partial class MatMul
         }
     }
 
+    /// <summary>
+    /// Parallel R4-interleaved Q8_0 ComputeRows. Partitions groups across threads.
+    /// Falls back to single-threaded when pool is null or M is small.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void ComputeRowsQ8_0Interleaved(byte* repackedWeights, byte* xQ8, float* result,
+        int fullGroups, int tailRows, int blockCount, ComputeThreadPool? pool)
+    {
+        int m = fullGroups * 4 + tailRows;
+        if (pool is null || m < ParallelMinRows)
+        {
+            ComputeRowsQ8_0Interleaved(repackedWeights, xQ8, result, fullGroups, tailRows, blockCount);
+            return;
+        }
+
+        var ctx = new ComputeRowsR4Ctx
+        {
+            RepackedWeights = repackedWeights, XQ = xQ8, Result = result,
+            M = m, FullGroups = fullGroups, TailRows = tailRows,
+            BlockCount = blockCount, BlockBytes = Q8_0BlockBytes
+        };
+        pool.Dispatch((nint)(&ctx), &ComputeRowsQ8_0R4Worker);
+    }
+
     // ──────────────────── Scalar reference ────────────────────
 
     /// <summary>
@@ -1312,7 +1337,55 @@ public static unsafe partial class MatMul
         public nint* ScratchPtrs;
     }
 
+    private struct ComputeRowsR4Ctx
+    {
+        public byte* RepackedWeights;
+        public byte* XQ;
+        public float* Result;
+        public int M;
+        public int FullGroups;
+        public int TailRows;
+        public int BlockCount;
+        public int BlockBytes;
+    }
+
     // ── Worker methods ──
+
+    private static void ComputeRowsQ8_0R4Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<ComputeRowsR4Ctx>((void*)ctxPtr);
+        PartitionRows(ctx.M, threadIdx, threadCount, out int start, out int count);
+        if (count == 0) return;
+
+        int groupBytes = 4 * ctx.BlockCount * Q8_0BlockBytes;
+        int rowBytes = ctx.BlockCount * Q8_0BlockBytes;
+        int end = start + count;
+
+        // Process full groups in [start, end)
+        int startGroup = start / 4;
+        int endGroup = Math.Min(end / 4, ctx.FullGroups);
+        for (int g = startGroup; g < endGroup; g++)
+        {
+            byte* groupBase = ctx.RepackedWeights + (long)g * groupBytes;
+            if (Avx2.IsSupported)
+                VecDotQ8_0Avx2_4RowsR4(groupBase, ctx.XQ, ctx.BlockCount, ctx.Result + g * 4);
+            else
+                for (int r = 0; r < 4; r++)
+                    ctx.Result[g * 4 + r] = VecDotQ8_0ScalarR4(groupBase, r, ctx.XQ, ctx.BlockCount);
+        }
+
+        // Process tail rows if they fall within this thread's range
+        if (ctx.TailRows > 0 && end > ctx.FullGroups * 4)
+        {
+            int tailStart = Math.Max(start, ctx.FullGroups * 4) - ctx.FullGroups * 4;
+            int tailEnd = Math.Min(end, ctx.M) - ctx.FullGroups * 4;
+            byte* tailBase = ctx.RepackedWeights + (long)ctx.FullGroups * groupBytes;
+            for (int r = tailStart; r < tailEnd; r++)
+                ctx.Result[ctx.FullGroups * 4 + r] = Avx2.IsSupported
+                    ? VecDotQ8_0Avx2(tailBase + (long)r * rowBytes, ctx.XQ, ctx.BlockCount)
+                    : VecDotQ8_0Scalar(tailBase + (long)r * rowBytes, ctx.XQ, ctx.BlockCount);
+        }
+    }
 
     private static void ComputeRowsWorker(nint ctxPtr, int threadIdx, int threadCount)
     {

@@ -480,14 +480,23 @@ public sealed unsafe class TransformerModel : IModel
     }
 
     /// <summary>
+    /// Minimum row byte stride for R4 interleaving to be beneficial.
+    /// Below this, 4 rows span &lt; 4KB (1 page) and the hardware prefetcher
+    /// handles the original stride efficiently. Above this, R4 contiguity
+    /// avoids cross-page TLB misses and prefetcher stride-limit failures.
+    /// </summary>
+    private const int InterleavedMinRowBytes = 1024;
+
+    /// <summary>
     /// GEMV using R4-interleaved repacked weights for improved cache locality.
-    /// Falls back to original Gemv when repacked weight is default (Ptr == 0).
+    /// Falls back to original Gemv when repacked weight is default (Ptr == 0)
+    /// or when row stride is too small for interleaving to help.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void GemvInterleaved(nint origWeights, QuantizationType qt, float* x, float* y,
                                  int m, int k, in WeightRepacking.RepackedWeight rw)
     {
-        if (rw.Ptr == 0)
+        if (rw.Ptr == 0 || rw.RowBytes < InterleavedMinRowBytes)
         {
             Gemv(origWeights, qt, x, y, m, k);
             return;
@@ -501,7 +510,7 @@ public sealed unsafe class TransformerModel : IModel
             int xQ8Bytes = blockCount * Q8_0BlockBytes;
             byte* xQ8 = (byte*)(_threadPool?.GetWorkerScratch(0, xQ8Bytes) ?? (nint)inputQ8Scratch);
             MatMul.QuantizeF32ToQ8_0(x, xQ8, k);
-            MatMul.ComputeRowsQ8_0Interleaved((byte*)rw.Ptr, xQ8, y, rw.FullGroupCount, rw.TailRows, blockCount);
+            MatMul.ComputeRowsQ8_0Interleaved((byte*)rw.Ptr, xQ8, y, rw.FullGroupCount, rw.TailRows, blockCount, _threadPool);
         }
         else if (qt == QuantizationType.Q5_0)
         {
@@ -509,7 +518,7 @@ public sealed unsafe class TransformerModel : IModel
             int xQ8Bytes = blockCount * MatMul.Q8_1BlockBytes;
             byte* xQ8 = (byte*)(_threadPool?.GetWorkerScratch(0, xQ8Bytes) ?? (nint)inputQ8Scratch);
             MatMul.QuantizeF32ToQ8_1(x, xQ8, k);
-            MatMul.ComputeRowsQ5_0Interleaved((byte*)rw.Ptr, xQ8, y, rw.FullGroupCount, rw.TailRows, blockCount);
+            MatMul.ComputeRowsQ5_0Interleaved((byte*)rw.Ptr, xQ8, y, rw.FullGroupCount, rw.TailRows, blockCount, _threadPool);
         }
         else if (qt is QuantizationType.Q4_K or QuantizationType.Q5_K or QuantizationType.Q6_K)
         {
@@ -518,11 +527,11 @@ public sealed unsafe class TransformerModel : IModel
             byte* xQ8K = (byte*)(_threadPool?.GetWorkerScratch(0, xQ8KBytes) ?? (nint)inputQ8Scratch);
             MatMul.QuantizeF32ToQ8_K(x, xQ8K, k);
             if (qt == QuantizationType.Q4_K)
-                MatMul.ComputeRowsQ4_KInterleaved((byte*)rw.Ptr, xQ8K, y, rw.FullGroupCount, rw.TailRows, superBlockCount);
+                MatMul.ComputeRowsQ4_KInterleaved((byte*)rw.Ptr, xQ8K, y, rw.FullGroupCount, rw.TailRows, superBlockCount, _threadPool);
             else if (qt == QuantizationType.Q5_K)
-                MatMul.ComputeRowsQ5_KInterleaved((byte*)rw.Ptr, xQ8K, y, rw.FullGroupCount, rw.TailRows, superBlockCount);
+                MatMul.ComputeRowsQ5_KInterleaved((byte*)rw.Ptr, xQ8K, y, rw.FullGroupCount, rw.TailRows, superBlockCount, _threadPool);
             else
-                MatMul.ComputeRowsQ6_KInterleaved((byte*)rw.Ptr, xQ8K, y, rw.FullGroupCount, rw.TailRows, superBlockCount);
+                MatMul.ComputeRowsQ6_KInterleaved((byte*)rw.Ptr, xQ8K, y, rw.FullGroupCount, rw.TailRows, superBlockCount, _threadPool);
         }
         else
         {
@@ -539,9 +548,9 @@ public sealed unsafe class TransformerModel : IModel
                                  int m, int k, int n, byte* preQuantizedInput,
                                  in WeightRepacking.RepackedWeight rw)
     {
-        if (rw.Ptr == 0 || n > 1)
+        if (rw.Ptr == 0 || n > 1 || rw.RowBytes < InterleavedMinRowBytes)
         {
-            // Multi-token: interleaved tiled GEMM deferred to Step 26 (outer-product tiling)
+            // Multi-token or small row stride: use original path
             Gemm(origWeights, qt, b, c, m, k, n, preQuantizedInput);
             return;
         }
@@ -562,24 +571,24 @@ public sealed unsafe class TransformerModel : IModel
     /// Dispatches interleaved ComputeRows for a given quant type with pre-quantized input.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void DispatchInterleavedComputeRows(QuantizationType qt, byte* repackedWeights,
+    private void DispatchInterleavedComputeRows(QuantizationType qt, byte* repackedWeights,
         byte* preQuantInput, float* result, int fullGroups, int tailRows, int k)
     {
         if (qt == QuantizationType.Q8_0)
             MatMul.ComputeRowsQ8_0Interleaved(repackedWeights, preQuantInput, result,
-                fullGroups, tailRows, k / 32);
+                fullGroups, tailRows, k / 32, _threadPool);
         else if (qt == QuantizationType.Q5_0)
             MatMul.ComputeRowsQ5_0Interleaved(repackedWeights, preQuantInput, result,
-                fullGroups, tailRows, k / 32);
+                fullGroups, tailRows, k / 32, _threadPool);
         else if (qt == QuantizationType.Q4_K)
             MatMul.ComputeRowsQ4_KInterleaved(repackedWeights, preQuantInput, result,
-                fullGroups, tailRows, k / 256);
+                fullGroups, tailRows, k / 256, _threadPool);
         else if (qt == QuantizationType.Q5_K)
             MatMul.ComputeRowsQ5_KInterleaved(repackedWeights, preQuantInput, result,
-                fullGroups, tailRows, k / 256);
+                fullGroups, tailRows, k / 256, _threadPool);
         else if (qt == QuantizationType.Q6_K)
             MatMul.ComputeRowsQ6_KInterleaved(repackedWeights, preQuantInput, result,
-                fullGroups, tailRows, k / 256);
+                fullGroups, tailRows, k / 256, _threadPool);
     }
 
     /// <summary>
