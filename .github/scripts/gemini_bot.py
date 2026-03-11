@@ -99,10 +99,20 @@ def call_gemini(api_key: str, prompt: str) -> str:
     print(f'Using model: {model}')
     url = ('https://generativelanguage.googleapis.com/v1beta/'
            f'models/{model}:generateContent?key={api_key}')
+    gen_config: dict = {
+        'maxOutputTokens': 65535,
+        'temperature': 0.2,
+    }
+    # Thinking models (2.5+, 3.x) use thinking tokens that eat into maxOutputTokens.
+    # Cap thinking budget so the actual response isn't truncated.
+    # thinkingBudget works on both 2.5 and 3.x series.
+    if any(tag in model for tag in ('2.5', '3.0', '3.1', '3.5')):
+        gen_config['thinkingConfig'] = {'thinkingBudget': 4096}
+
     payload = {
         'system_instruction': {'parts': [{'text': SYSTEM_PROMPT}]},
         'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
-        'generationConfig': {'maxOutputTokens': 8192, 'temperature': 0.2},
+        'generationConfig': gen_config,
     }
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -114,7 +124,17 @@ def call_gemini(api_key: str, prompt: str) -> str:
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 body = json.loads(resp.read())
-            return body['candidates'][0]['content']['parts'][0]['text']
+            candidate = body['candidates'][0]
+            finish_reason = candidate.get('finishReason', 'UNKNOWN')
+            if finish_reason not in ('STOP', 'UNKNOWN'):
+                print(f'WARNING: Gemini finish_reason={finish_reason} — response may be truncated')
+            # Thinking models return multiple parts; extract the last text part
+            # (thinking parts have no 'text' key or have a 'thought' flag).
+            parts = candidate['content']['parts']
+            for part in reversed(parts):
+                if 'text' in part and not part.get('thought'):
+                    return part['text']
+            return parts[-1].get('text', '')
         except urllib.error.HTTPError as e:
             error_body = e.read().decode()
             if e.code == 503 and attempt < 2:
