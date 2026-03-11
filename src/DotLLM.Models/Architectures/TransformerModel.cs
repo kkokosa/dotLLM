@@ -24,6 +24,9 @@ public sealed unsafe class TransformerModel : IModel
     /// <summary>Elements per Q8_0 block.</summary>
     private const int Q8_0GroupSize = 32;
 
+    /// <summary>Elements per Q8_1 block.</summary>
+    private const int Q8_1GroupSize = 32;
+
     private readonly TransformerWeights _weights;
     private readonly TransformerForwardState _state;
     private readonly GgufFile _gguf; // prevent premature GC of mmap
@@ -500,7 +503,7 @@ public sealed unsafe class TransformerModel : IModel
 
         if (qt == QuantizationType.Q5_0)
         {
-            int blockCount = dim / Q8_0GroupSize;
+            int blockCount = dim / Q8_1GroupSize;
             int q8_1RowBytes = blockCount * MatMul.Q8_1BlockBytes;
             for (int t = 0; t < seqLen; t++)
                 MatMul.QuantizeF32ToQ8_1(input + t * dim, scratch + t * q8_1RowBytes, dim);

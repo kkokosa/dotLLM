@@ -144,13 +144,14 @@ public static unsafe partial class MatMul
     [SkipLocalsInit]
     internal static float VecDotQ5_0Q8_1Avx2(byte* q5, byte* q8, int blockCount)
     {
-        Vector256<float> acc = Vector256<float>.Zero;
+        Vector256<float> accA = Vector256<float>.Zero;
+        Vector256<float> accB = Vector256<float>.Zero;
         Vector256<short> ones = Vector256.Create((short)1);
         float offsetSum = 0;
 
         int block = 0;
 
-        // 2-block unrolled loop for better ILP
+        // 2-block unrolled loop — dual accumulators break the FMA dependency chain for ILP
         for (; block + 1 < blockCount; block += 2)
         {
             // Block A
@@ -197,26 +198,29 @@ public static unsafe partial class MatMul
             Vector256<short> prodB = Avx2.MultiplyAddAdjacent(q5valsB, q8ValsB);
             Vector256<int> prodSumB = Avx2.MultiplyAddAdjacent(prodB, ones);
 
-            // FMA accumulate both blocks
+            // FMA into separate accumulators — block B's FMA can issue without waiting for A
             float scaleA = d5A * d8A;
             float scaleB = d5B * d8B;
             if (Fma.IsSupported)
             {
-                acc = Fma.MultiplyAdd(Vector256.Create(scaleA),
-                    Avx.ConvertToVector256Single(prodSumA), acc);
-                acc = Fma.MultiplyAdd(Vector256.Create(scaleB),
-                    Avx.ConvertToVector256Single(prodSumB), acc);
+                accA = Fma.MultiplyAdd(Vector256.Create(scaleA),
+                    Avx.ConvertToVector256Single(prodSumA), accA);
+                accB = Fma.MultiplyAdd(Vector256.Create(scaleB),
+                    Avx.ConvertToVector256Single(prodSumB), accB);
             }
             else
             {
-                acc = Avx.Add(acc, Avx.Multiply(Vector256.Create(scaleA),
+                accA = Avx.Add(accA, Avx.Multiply(Vector256.Create(scaleA),
                     Avx.ConvertToVector256Single(prodSumA)));
-                acc = Avx.Add(acc, Avx.Multiply(Vector256.Create(scaleB),
+                accB = Avx.Add(accB, Avx.Multiply(Vector256.Create(scaleB),
                     Avx.ConvertToVector256Single(prodSumB)));
             }
 
             offsetSum += d5A * s8A + d5B * s8B;
         }
+
+        // Merge dual accumulators
+        Vector256<float> acc = Avx.Add(accA, accB);
 
         // Single-block tail for odd block count
         if (block < blockCount)

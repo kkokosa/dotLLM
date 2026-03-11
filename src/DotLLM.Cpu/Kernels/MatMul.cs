@@ -840,9 +840,19 @@ public static unsafe partial class MatMul
                 Vector256<int> i3 = Avx.ConvertToVector256Int32(
                     Avx.Multiply(Avx.LoadVector256(blockSrc + 24), vInvScale));
 
-                // Sum all 32 int32 values before packing (2 vpaddd + hsum)
+                // Clamp int32 to [-127, 127] before summing so the stored sum
+                // matches the saturated qs values (cvtps2dq can produce out-of-range
+                // values for non-finite inputs).
+                Vector256<int> clampMin = Vector256.Create(-127);
+                Vector256<int> clampMax = Vector256.Create(127);
+                i0 = Avx2.Min(Avx2.Max(i0, clampMin), clampMax);
+                i1 = Avx2.Min(Avx2.Max(i1, clampMin), clampMax);
+                i2 = Avx2.Min(Avx2.Max(i2, clampMin), clampMax);
+                i3 = Avx2.Min(Avx2.Max(i3, clampMin), clampMax);
+
+                // Sum all 32 int32 values (2 vpaddd + Vector256.Sum)
                 Vector256<int> isum = Avx2.Add(Avx2.Add(i0, i1), Avx2.Add(i2, i3));
-                int sum = HorizontalSumAvx2Int32(isum);
+                int sum = Vector256.Sum(isum);
 
                 Unsafe.WriteUnaligned(blockDst + 2, (Half)(scale * sum));
 
@@ -860,22 +870,6 @@ public static unsafe partial class MatMul
                 permuted.AsByte().StoreUnsafe(ref Unsafe.AsRef<byte>((byte*)qs));
             }
         }
-    }
-
-    /// <summary>
-    /// Horizontally sums all 8 int32 lanes in a <see cref="Vector256{Int32}"/>.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int HorizontalSumAvx2Int32(Vector256<int> v)
-    {
-        Vector128<int> lo = v.GetLower();
-        Vector128<int> hi = v.GetUpper();
-        Vector128<int> sum128 = Sse2.Add(lo, hi);           // [a+e, b+f, c+g, d+h]
-        Vector128<int> shuf = Sse2.Shuffle(sum128, 0b_01_00_11_10); // [c+g, d+h, a+e, b+f]
-        sum128 = Sse2.Add(sum128, shuf);                    // [a+e+c+g, ...]
-        shuf = Sse2.Shuffle(sum128, 0b_00_01_00_01);        // [b+f+d+h, ...]
-        sum128 = Sse2.Add(sum128, shuf);
-        return sum128.ToScalar();
     }
 
     // ──────────────────── Tiled GEMM helpers ────────────────────
