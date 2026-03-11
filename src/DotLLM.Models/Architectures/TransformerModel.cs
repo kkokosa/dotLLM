@@ -167,13 +167,20 @@ public sealed unsafe class TransformerModel : IModel
             byte* inputQ8Scratch = (byte*)_state.InputQ8Scratch;
             byte* preQuantNorm = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, lw.QQuantType);
 
-            // Batched Q/K/V projections (GEMM)
-            // Guard: only reuse preQuantNorm when target quant type is in the same family as QQuantType
-            Gemm(lw.QWeight, lw.QQuantType, normOut, q, lw.QOutputDim, lw.QInputDim, seqLen, preQuantNorm);
-            Gemm(lw.KWeight, lw.KQuantType, normOut, k, lw.KOutputDim, lw.KInputDim, seqLen,
-                 IsCompatiblePreQuant(lw.QQuantType, lw.KQuantType) ? preQuantNorm : null);
-            Gemm(lw.VWeight, lw.VQuantType, normOut, v, lw.VOutputDim, lw.VInputDim, seqLen,
-                 IsCompatiblePreQuant(lw.QQuantType, lw.VQuantType) ? preQuantNorm : null);
+            // Batched Q/K/V projections — fused dispatch for decode (seqLen=1)
+            if (seqLen == 1 && _threadPool != null)
+            {
+                FusedQkvDecode(in lw, normOut, preQuantNorm, q, k, v);
+            }
+            else
+            {
+                // Guard: only reuse preQuantNorm when target quant type is in the same family as QQuantType
+                Gemm(lw.QWeight, lw.QQuantType, normOut, q, lw.QOutputDim, lw.QInputDim, seqLen, preQuantNorm);
+                Gemm(lw.KWeight, lw.KQuantType, normOut, k, lw.KOutputDim, lw.KInputDim, seqLen,
+                     IsCompatiblePreQuant(lw.QQuantType, lw.KQuantType) ? preQuantNorm : null);
+                Gemm(lw.VWeight, lw.VQuantType, normOut, v, lw.VOutputDim, lw.VInputDim, seqLen,
+                     IsCompatiblePreQuant(lw.QQuantType, lw.VQuantType) ? preQuantNorm : null);
+            }
 
             // Optional bias: y = Wx + b (no-op when null)
             AddBias(lw.QBias, q, lw.QOutputDim, seqLen);
@@ -248,10 +255,17 @@ public sealed unsafe class TransformerModel : IModel
             // j. Pre-quantize normOutput once, reuse across Gate/Up projections
             byte* preQuantFfn = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, lw.GateQuantType);
 
-            // Batched Gate + Up projections
-            Gemm(lw.GateWeight, lw.GateQuantType, normOut, ffnGate, lw.GateOutputDim, lw.GateInputDim, seqLen, preQuantFfn);
-            Gemm(lw.UpWeight, lw.UpQuantType, normOut, ffnUp, lw.UpOutputDim, lw.UpInputDim, seqLen,
-                 IsCompatiblePreQuant(lw.GateQuantType, lw.UpQuantType) ? preQuantFfn : null);
+            // Batched Gate + Up projections — fused dispatch for decode (seqLen=1)
+            if (seqLen == 1 && _threadPool != null)
+            {
+                FusedGateUpDecode(in lw, normOut, preQuantFfn, ffnGate, ffnUp);
+            }
+            else
+            {
+                Gemm(lw.GateWeight, lw.GateQuantType, normOut, ffnGate, lw.GateOutputDim, lw.GateInputDim, seqLen, preQuantFfn);
+                Gemm(lw.UpWeight, lw.UpQuantType, normOut, ffnUp, lw.UpOutputDim, lw.UpInputDim, seqLen,
+                     IsCompatiblePreQuant(lw.GateQuantType, lw.UpQuantType) ? preQuantFfn : null);
+            }
             AddBias(lw.GateBias, ffnGate, lw.GateOutputDim, seqLen);
             AddBias(lw.UpBias, ffnUp, lw.UpOutputDim, seqLen);
 
@@ -549,6 +563,44 @@ public sealed unsafe class TransformerModel : IModel
                 Dequantize.ToFloat32(rowPtr, hiddenSize, qt, destSpan);
             }
         }
+    }
+
+    /// <summary>
+    /// Fused Q/K/V decode: dispatches all three projections in a single pool.Dispatch() call
+    /// when they share the same quant family, saving 2 dispatch overheads per layer.
+    /// Cross-family projections dispatch individually with self-quantizing GEMV.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void FusedQkvDecode(ref readonly TransformerLayerWeights lw,
+        float* normOut, byte* preQuantNorm, float* q, float* k, float* v)
+    {
+        // preQuantNorm was quantized for lw.QQuantType's family.
+        // FusedDecodeGemv3 handles cross-family by dispatching those projections
+        // individually with self-quantizing GEMV (null preQuant).
+        MatMul.FusedDecodeGemv3(
+            (byte*)lw.QWeight, lw.QQuantType, q, lw.QOutputDim,
+            (byte*)lw.KWeight, lw.KQuantType, k, lw.KOutputDim,
+            (byte*)lw.VWeight, lw.VQuantType, v, lw.VOutputDim,
+            normOut, preQuantNorm, lw.QInputDim,
+            _threadPool!);
+    }
+
+    /// <summary>
+    /// Fused Gate/Up decode: dispatches both projections in a single pool.Dispatch() call
+    /// when they share the same quant family, saving 1 dispatch overhead per layer.
+    /// Cross-family projections dispatch individually with self-quantizing GEMV.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void FusedGateUpDecode(ref readonly TransformerLayerWeights lw,
+        float* normOut, byte* preQuantFfn, float* ffnGate, float* ffnUp)
+    {
+        // preQuantFfn was quantized for lw.GateQuantType's family.
+        // FusedDecodeGemv2 handles cross-family by dispatching separately.
+        MatMul.FusedDecodeGemv2(
+            (byte*)lw.GateWeight, lw.GateQuantType, ffnGate, lw.GateOutputDim,
+            (byte*)lw.UpWeight, lw.UpQuantType, ffnUp, lw.UpOutputDim,
+            normOut, preQuantFfn, lw.GateInputDim,
+            _threadPool!);
     }
 
     /// <inheritdoc/>
