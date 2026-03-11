@@ -251,6 +251,15 @@ public static unsafe partial class MatMul
         float* input, byte* preQuantInput, int k,
         ComputeThreadPool pool)
     {
+        // No pre-quantized input → fall back to individual dispatches (self-quantizing GEMV)
+        if (preQuantInput == null)
+        {
+            DispatchSingle(w0, qt0, r0, m0, input, null, k, pool);
+            DispatchSingle(w1, qt1, r1, m1, input, null, k, pool);
+            DispatchSingle(w2, qt2, r2, m2, input, null, k, pool);
+            return;
+        }
+
         var f0 = GetQuantFamily(qt0);
         var f1 = GetQuantFamily(qt1);
         var f2 = GetQuantFamily(qt2);
@@ -279,22 +288,7 @@ public static unsafe partial class MatMul
         bool f1MatchesF0 = f1 == f0;
         bool f2MatchesF0 = f2 == f0;
 
-        if (f0 != QuantFamily.None && f1MatchesF0 && f2MatchesF0)
-        {
-            // Shouldn't reach here (handled above), but safety net
-            int blockCount = GetBlockCount(k, qt0);
-            var ctx = new FusedDecode3Ctx
-            {
-                Proj0 = MakeProjection(w0, qt0, r0, m0, k),
-                Proj1 = MakeProjection(w1, qt1, r1, m1, k),
-                Proj2 = MakeProjection(w2, qt2, r2, m2, k),
-                PreQuantInput = preQuantInput,
-                BlockCount = blockCount,
-                TotalRows = m0 + m1 + m2,
-            };
-            pool.Dispatch((nint)(&ctx), &FusedDecode3Worker);
-        }
-        else if (f0 != QuantFamily.None && f1MatchesF0)
+        if (f0 != QuantFamily.None && f1MatchesF0)
         {
             // Fuse proj0 + proj1 (same family as preQuantInput), dispatch proj2 individually
             int blockCount = GetBlockCount(k, qt0);
@@ -344,6 +338,14 @@ public static unsafe partial class MatMul
         float* input, byte* preQuantInput, int k,
         ComputeThreadPool pool)
     {
+        // No pre-quantized input → fall back to individual dispatches (self-quantizing GEMV)
+        if (preQuantInput == null)
+        {
+            DispatchSingle(w0, qt0, r0, m0, input, null, k, pool);
+            DispatchSingle(w1, qt1, r1, m1, input, null, k, pool);
+            return;
+        }
+
         var f0 = GetQuantFamily(qt0);
         var f1 = GetQuantFamily(qt1);
 
@@ -419,6 +421,9 @@ public static unsafe partial class MatMul
                 case QuantizationType.Q4_K: GemvQ4_K(weights, input, result, m, k, pool); break;
                 case QuantizationType.Q5_K: GemvQ5_K(weights, input, result, m, k, pool); break;
                 case QuantizationType.Q6_K: GemvQ6_K(weights, input, result, m, k, pool); break;
+                default:
+                    throw new NotSupportedException(
+                        $"Fused decode does not support {qt}. Use standard Gemm path.");
             }
         }
     }
