@@ -109,11 +109,27 @@ internal readonly struct TransformerLayerWeights
 }
 
 /// <summary>
+/// Holds R4-interleaved weight buffers for all projections in a single transformer layer.
+/// Disposed when the parent <see cref="TransformerWeights"/> is disposed.
+/// </summary>
+internal sealed class RepackedLayerWeights : IDisposable
+{
+    public WeightRepacking.RepackedWeight Q, K, V, O, Gate, Up, Down;
+
+    public void Dispose()
+    {
+        Q.Dispose(); K.Dispose(); V.Dispose(); O.Dispose();
+        Gate.Dispose(); Up.Dispose(); Down.Dispose();
+    }
+}
+
+/// <summary>
 /// Organizes all weight tensor references from a loaded GGUF file for a transformer-family model.
 /// Norm weights are dequantized to managed <c>float[]</c> at load time.
 /// Linear projections remain as raw mmap pointers for zero-copy inference.
+/// Optionally holds R4-interleaved weight buffers for improved cache locality in 4-row SIMD kernels.
 /// </summary>
-internal sealed class TransformerWeights
+internal sealed class TransformerWeights : IDisposable
 {
     /// <summary>Token embedding pointer and metadata.</summary>
     public nint TokenEmbedWeight { get; }
@@ -132,6 +148,12 @@ internal sealed class TransformerWeights
     public QuantizationType OutputQuantType { get; }
     public int OutputOutputDim { get; }
     public int OutputInputDim { get; }
+
+    /// <summary>Per-layer R4-interleaved weights. Null until <see cref="RepackWeights"/> is called.</summary>
+    public RepackedLayerWeights[]? RepackedLayers { get; private set; }
+
+    /// <summary>R4-interleaved LM head weights. Null until <see cref="RepackWeights"/> is called or if type is not repackable.</summary>
+    public WeightRepacking.RepackedWeight? RepackedOutput { get; private set; }
 
     private TransformerWeights(
         nint tokenEmbedWeight, QuantizationType tokenEmbedQuantType, int vocabSize, int hiddenSize,
@@ -202,6 +224,54 @@ internal sealed class TransformerWeights
             layers,
             outputNormWeight,
             outputPtr, outputQt, outputM, outputK);
+    }
+
+    /// <summary>
+    /// Repacks all linear projection weights into R4 interleaved layout for improved
+    /// cache locality in 4-row SIMD kernels. Skips token embeddings (random row access)
+    /// and non-block-structured types (F32, F16).
+    /// </summary>
+    public void RepackWeights()
+    {
+        var repacked = new RepackedLayerWeights[Layers.Length];
+        for (int i = 0; i < Layers.Length; i++)
+        {
+            ref readonly var lw = ref Layers[i];
+            repacked[i] = new RepackedLayerWeights
+            {
+                Q = TryRepack(lw.QWeight, lw.QQuantType, lw.QOutputDim, lw.QInputDim),
+                K = TryRepack(lw.KWeight, lw.KQuantType, lw.KOutputDim, lw.KInputDim),
+                V = TryRepack(lw.VWeight, lw.VQuantType, lw.VOutputDim, lw.VInputDim),
+                O = TryRepack(lw.OWeight, lw.OQuantType, lw.OOutputDim, lw.OInputDim),
+                Gate = TryRepack(lw.GateWeight, lw.GateQuantType, lw.GateOutputDim, lw.GateInputDim),
+                Up = TryRepack(lw.UpWeight, lw.UpQuantType, lw.UpOutputDim, lw.UpInputDim),
+                Down = TryRepack(lw.DownWeight, lw.DownQuantType, lw.DownOutputDim, lw.DownInputDim),
+            };
+        }
+        RepackedLayers = repacked;
+
+        if (WeightRepacking.IsRepackable(OutputQuantType))
+            RepackedOutput = WeightRepacking.RepackR4(OutputWeight, OutputQuantType, OutputOutputDim, OutputInputDim);
+    }
+
+    private static WeightRepacking.RepackedWeight TryRepack(nint ptr, QuantizationType qt, int m, int k)
+    {
+        if (!WeightRepacking.IsRepackable(qt))
+            return default;
+        return WeightRepacking.RepackR4(ptr, qt, m, k);
+    }
+
+    /// <summary>Frees all R4-interleaved weight buffers.</summary>
+    public void Dispose()
+    {
+        if (RepackedLayers is not null)
+        {
+            foreach (var rl in RepackedLayers)
+                rl.Dispose();
+            RepackedLayers = null;
+        }
+        RepackedOutput?.Dispose();
+        RepackedOutput = null;
     }
 
     private static TransformerLayerWeights LoadLayer(

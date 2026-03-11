@@ -72,6 +72,7 @@ public sealed unsafe class TransformerModel : IModel
     public static TransformerModel LoadFromGguf(GgufFile gguf, ModelConfig config, ThreadingConfig threading)
     {
         var weights = TransformerWeights.LoadFromGguf(gguf, config);
+        weights.RepackWeights();
 
         int ropeDim = config.RoPEConfig?.DimensionCount ?? config.HeadDim;
         if (ropeDim == 0) ropeDim = config.HeadDim;
@@ -149,9 +150,11 @@ public sealed unsafe class TransformerModel : IModel
         EmbeddingLookup(tokenIds, hidden, hiddenSize);
 
         // 2. TRANSFORMER LAYERS
+        var repackedLayers = _weights.RepackedLayers;
         for (int layer = 0; layer < Config.NumLayers; layer++)
         {
             ref readonly var lw = ref _weights.Layers[layer];
+            var rl = repackedLayers?[layer];
 
             // a. Copy hiddenState → residual
             new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
@@ -178,11 +181,15 @@ public sealed unsafe class TransformerModel : IModel
             else
             {
                 // Guard: only reuse preQuantNorm when target quant type is in the same family as QQuantType
-                Gemm(lw.QWeight, lw.QQuantType, normOut, q, lw.QOutputDim, lw.QInputDim, seqLen, preQuantNorm);
-                Gemm(lw.KWeight, lw.KQuantType, normOut, k, lw.KOutputDim, lw.KInputDim, seqLen,
-                     IsCompatiblePreQuant(lw.QQuantType, lw.KQuantType) ? preQuantNorm : null);
-                Gemm(lw.VWeight, lw.VQuantType, normOut, v, lw.VOutputDim, lw.VInputDim, seqLen,
-                     IsCompatiblePreQuant(lw.QQuantType, lw.VQuantType) ? preQuantNorm : null);
+                var rwQ = rl?.Q ?? default;
+                var rwK = rl?.K ?? default;
+                var rwV = rl?.V ?? default;
+                GemmInterleaved(lw.QWeight, lw.QQuantType, normOut, q, lw.QOutputDim, lw.QInputDim, seqLen,
+                    preQuantNorm, in rwQ);
+                GemmInterleaved(lw.KWeight, lw.KQuantType, normOut, k, lw.KOutputDim, lw.KInputDim, seqLen,
+                    IsCompatiblePreQuant(lw.QQuantType, lw.KQuantType) ? preQuantNorm : null, in rwK);
+                GemmInterleaved(lw.VWeight, lw.VQuantType, normOut, v, lw.VOutputDim, lw.VInputDim, seqLen,
+                    IsCompatiblePreQuant(lw.QQuantType, lw.VQuantType) ? preQuantNorm : null, in rwV);
             }
 
             // Optional bias: y = Wx + b (no-op when null)
@@ -230,7 +237,9 @@ public sealed unsafe class TransformerModel : IModel
 
             // f. Batched O projection
             byte* preQuantAttn = QuantizeInput(attnOut, inputQ8Scratch, numHeads * headDim, seqLen, lw.OQuantType);
-            Gemm(lw.OWeight, lw.OQuantType, attnOut, normOut, lw.OOutputDim, lw.OInputDim, seqLen, preQuantAttn);
+            var rwO = rl?.O ?? default;
+            GemmInterleaved(lw.OWeight, lw.OQuantType, attnOut, normOut, lw.OOutputDim, lw.OInputDim, seqLen,
+                preQuantAttn, in rwO);
             AddBias(lw.OBias, normOut, lw.OOutputDim, seqLen);
 
             // g. Residual add (per token)
@@ -265,9 +274,12 @@ public sealed unsafe class TransformerModel : IModel
             }
             else
             {
-                Gemm(lw.GateWeight, lw.GateQuantType, normOut, ffnGate, lw.GateOutputDim, lw.GateInputDim, seqLen, preQuantFfn);
-                Gemm(lw.UpWeight, lw.UpQuantType, normOut, ffnUp, lw.UpOutputDim, lw.UpInputDim, seqLen,
-                     IsCompatiblePreQuant(lw.GateQuantType, lw.UpQuantType) ? preQuantFfn : null);
+                var rwGate = rl?.Gate ?? default;
+                var rwUp = rl?.Up ?? default;
+                GemmInterleaved(lw.GateWeight, lw.GateQuantType, normOut, ffnGate, lw.GateOutputDim, lw.GateInputDim, seqLen,
+                    preQuantFfn, in rwGate);
+                GemmInterleaved(lw.UpWeight, lw.UpQuantType, normOut, ffnUp, lw.UpOutputDim, lw.UpInputDim, seqLen,
+                    IsCompatiblePreQuant(lw.GateQuantType, lw.UpQuantType) ? preQuantFfn : null, in rwUp);
             }
             AddBias(lw.GateBias, ffnGate, lw.GateOutputDim, seqLen);
             AddBias(lw.UpBias, ffnUp, lw.UpOutputDim, seqLen);
@@ -293,7 +305,9 @@ public sealed unsafe class TransformerModel : IModel
             byte* preQuantSilu = QuantizeInput(siluOut, inputQ8Scratch, intermediateSize, seqLen, lw.DownQuantType);
 
             // Batched Down projection (output into normOut as scratch)
-            Gemm(lw.DownWeight, lw.DownQuantType, siluOut, normOut, lw.DownOutputDim, lw.DownInputDim, seqLen, preQuantSilu);
+            var rwDown = rl?.Down ?? default;
+            GemmInterleaved(lw.DownWeight, lw.DownQuantType, siluOut, normOut, lw.DownOutputDim, lw.DownInputDim, seqLen,
+                preQuantSilu, in rwDown);
             AddBias(lw.DownBias, normOut, lw.DownOutputDim, seqLen);
 
             // k. Residual add (per token)
@@ -324,8 +338,11 @@ public sealed unsafe class TransformerModel : IModel
 
         // 4. LM HEAD — only last token
         float* lastHidden = hidden + (seqLen - 1) * hiddenSize;
-        Gemv(_weights.OutputWeight, _weights.OutputQuantType,
-             lastHidden, logits, _weights.OutputOutputDim, _weights.OutputInputDim);
+        {
+            var rwOutput = _weights.RepackedOutput ?? default;
+            GemvInterleaved(_weights.OutputWeight, _weights.OutputQuantType,
+                lastHidden, logits, _weights.OutputOutputDim, _weights.OutputInputDim, in rwOutput);
+        }
 
         // 5. RETURN [1, vocabSize] — copy logits to new tensor (caller owns disposal)
         var shape = new TensorShape(1, vocabSize);
@@ -460,6 +477,109 @@ public sealed unsafe class TransformerModel : IModel
         {
             GemvDequantFallback(weights, qt, b + t * k, c + t * m, m, k);
         }
+    }
+
+    /// <summary>
+    /// GEMV using R4-interleaved repacked weights for improved cache locality.
+    /// Falls back to original Gemv when repacked weight is default (Ptr == 0).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void GemvInterleaved(nint origWeights, QuantizationType qt, float* x, float* y,
+                                 int m, int k, in WeightRepacking.RepackedWeight rw)
+    {
+        if (rw.Ptr == 0)
+        {
+            Gemv(origWeights, qt, x, y, m, k);
+            return;
+        }
+
+        // Quantize input for the interleaved ComputeRows variant
+        byte* inputQ8Scratch = (byte*)_state.InputQ8Scratch;
+        if (qt == QuantizationType.Q8_0)
+        {
+            int blockCount = k / Q8_0GroupSize;
+            int xQ8Bytes = blockCount * Q8_0BlockBytes;
+            byte* xQ8 = (byte*)(_threadPool?.GetWorkerScratch(0, xQ8Bytes) ?? (nint)inputQ8Scratch);
+            MatMul.QuantizeF32ToQ8_0(x, xQ8, k);
+            MatMul.ComputeRowsQ8_0Interleaved((byte*)rw.Ptr, xQ8, y, rw.FullGroupCount, rw.TailRows, blockCount);
+        }
+        else if (qt == QuantizationType.Q5_0)
+        {
+            int blockCount = k / Q8_0GroupSize;
+            int xQ8Bytes = blockCount * MatMul.Q8_1BlockBytes;
+            byte* xQ8 = (byte*)(_threadPool?.GetWorkerScratch(0, xQ8Bytes) ?? (nint)inputQ8Scratch);
+            MatMul.QuantizeF32ToQ8_1(x, xQ8, k);
+            MatMul.ComputeRowsQ5_0Interleaved((byte*)rw.Ptr, xQ8, y, rw.FullGroupCount, rw.TailRows, blockCount);
+        }
+        else if (qt is QuantizationType.Q4_K or QuantizationType.Q5_K or QuantizationType.Q6_K)
+        {
+            int superBlockCount = k / 256;
+            int xQ8KBytes = superBlockCount * MatMul.Q8_K_BlockBytes;
+            byte* xQ8K = (byte*)(_threadPool?.GetWorkerScratch(0, xQ8KBytes) ?? (nint)inputQ8Scratch);
+            MatMul.QuantizeF32ToQ8_K(x, xQ8K, k);
+            if (qt == QuantizationType.Q4_K)
+                MatMul.ComputeRowsQ4_KInterleaved((byte*)rw.Ptr, xQ8K, y, rw.FullGroupCount, rw.TailRows, superBlockCount);
+            else if (qt == QuantizationType.Q5_K)
+                MatMul.ComputeRowsQ5_KInterleaved((byte*)rw.Ptr, xQ8K, y, rw.FullGroupCount, rw.TailRows, superBlockCount);
+            else
+                MatMul.ComputeRowsQ6_KInterleaved((byte*)rw.Ptr, xQ8K, y, rw.FullGroupCount, rw.TailRows, superBlockCount);
+        }
+        else
+        {
+            Gemv(origWeights, qt, x, y, m, k);
+        }
+    }
+
+    /// <summary>
+    /// GEMM using R4-interleaved repacked weights. For single-token (n=1) uses interleaved ComputeRows.
+    /// Multi-token falls back to original Gemm (tiled GEMM integration deferred to Step 26).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void GemmInterleaved(nint origWeights, QuantizationType qt, float* b, float* c,
+                                 int m, int k, int n, byte* preQuantizedInput,
+                                 in WeightRepacking.RepackedWeight rw)
+    {
+        if (rw.Ptr == 0 || n > 1)
+        {
+            // Multi-token: interleaved tiled GEMM deferred to Step 26 (outer-product tiling)
+            Gemm(origWeights, qt, b, c, m, k, n, preQuantizedInput);
+            return;
+        }
+
+        // Single-token with pre-quantized input: use interleaved ComputeRows directly
+        if (preQuantizedInput != null)
+        {
+            DispatchInterleavedComputeRows(qt, (byte*)rw.Ptr, preQuantizedInput, c,
+                rw.FullGroupCount, rw.TailRows, k);
+            return;
+        }
+
+        // Single-token without pre-quantized: quantize + interleaved dispatch
+        GemvInterleaved(origWeights, qt, b, c, m, k, in rw);
+    }
+
+    /// <summary>
+    /// Dispatches interleaved ComputeRows for a given quant type with pre-quantized input.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void DispatchInterleavedComputeRows(QuantizationType qt, byte* repackedWeights,
+        byte* preQuantInput, float* result, int fullGroups, int tailRows, int k)
+    {
+        if (qt == QuantizationType.Q8_0)
+            MatMul.ComputeRowsQ8_0Interleaved(repackedWeights, preQuantInput, result,
+                fullGroups, tailRows, k / 32);
+        else if (qt == QuantizationType.Q5_0)
+            MatMul.ComputeRowsQ5_0Interleaved(repackedWeights, preQuantInput, result,
+                fullGroups, tailRows, k / 32);
+        else if (qt == QuantizationType.Q4_K)
+            MatMul.ComputeRowsQ4_KInterleaved(repackedWeights, preQuantInput, result,
+                fullGroups, tailRows, k / 256);
+        else if (qt == QuantizationType.Q5_K)
+            MatMul.ComputeRowsQ5_KInterleaved(repackedWeights, preQuantInput, result,
+                fullGroups, tailRows, k / 256);
+        else if (qt == QuantizationType.Q6_K)
+            MatMul.ComputeRowsQ6_KInterleaved(repackedWeights, preQuantInput, result,
+                fullGroups, tailRows, k / 256);
     }
 
     /// <summary>
@@ -615,6 +735,7 @@ public sealed unsafe class TransformerModel : IModel
         if (_ownsThreadPool)
             _threadPool?.Dispose();
         _state.Dispose();
-        // _weights and _gguf are not owned by us — caller manages GgufFile lifetime.
+        _weights.Dispose(); // free R4-interleaved weight buffers
+        // _gguf is not owned by us — caller manages GgufFile lifetime.
     }
 }

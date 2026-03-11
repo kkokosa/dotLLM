@@ -1109,6 +1109,179 @@ public static unsafe partial class MatMul
         }
     }
 
+    // ──────────────────── R4 Interleaved ComputeRows for K-quants ────────────────────
+
+    /// <summary>
+    /// Scalar K-quant dot product for a single row within an R4-interleaved group.
+    /// Super-blocks from 4 rows are interleaved; block stride is 4 * blockBytes.
+    /// Extracts per-super-block pointers with R4 addressing and delegates to the scalar kernel.
+    /// </summary>
+    [SkipLocalsInit]
+    private static float VecDotKQuantScalarR4(
+        byte* groupBase, int rowInGroup, byte* q8k, int superBlockCount,
+        int blockBytes,
+        delegate*<byte*, byte*, int, float> scalarFn)
+    {
+        // Cannot call scalar VecDot directly since it expects contiguous super-blocks.
+        // Instead, accumulate per-super-block results with R4 addressing.
+        float sumf = 0;
+        int wStride = 4 * blockBytes;
+        for (int sb = 0; sb < superBlockCount; sb++)
+        {
+            byte* wSb = groupBase + sb * wStride + rowInGroup * blockBytes;
+            byte* q8Sb = q8k + sb * Q8_K_BlockBytes;
+            sumf += scalarFn(wSb, q8Sb, 1);
+        }
+        return sumf;
+    }
+
+    /// <summary>
+    /// Processes R4-interleaved Q4_K weights. For full groups, extracts 4 row pointers
+    /// from the R4 layout and delegates to existing 4-row VecDot with R4 block stride.
+    /// K-quant super-blocks are large enough (144+ bytes) that the R4 adjacency
+    /// (4 super-blocks within 576+ bytes vs rowBytes apart) provides significant cache benefit.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    internal static void ComputeRowsQ4_KInterleaved(byte* repackedWeights, byte* xQ8K, float* result,
+        int fullGroups, int tailRows, int superBlockCount)
+    {
+        int groupBytes = 4 * superBlockCount * Q4_K_BlockBytes;
+
+        for (int g = 0; g < fullGroups; g++)
+        {
+            byte* groupBase = repackedWeights + (long)g * groupBytes;
+            if (Avx2.IsSupported)
+            {
+                float r0 = 0, r1 = 0, r2 = 0, r3 = 0;
+                int wStride = 4 * Q4_K_BlockBytes;
+                float* tmp = result + g * 4; // reuse output as scratch
+                for (int sb = 0; sb < superBlockCount; sb++)
+                {
+                    byte* sbBase = groupBase + sb * wStride;
+                    VecDotQ4_K_Q8_K_4Rows(sbBase, sbBase + Q4_K_BlockBytes,
+                        sbBase + 2 * Q4_K_BlockBytes, sbBase + 3 * Q4_K_BlockBytes,
+                        xQ8K + sb * Q8_K_BlockBytes, 1, tmp);
+                    r0 += tmp[0]; r1 += tmp[1]; r2 += tmp[2]; r3 += tmp[3];
+                }
+                result[g * 4] = r0; result[g * 4 + 1] = r1;
+                result[g * 4 + 2] = r2; result[g * 4 + 3] = r3;
+            }
+            else
+            {
+                for (int r = 0; r < 4; r++)
+                    result[g * 4 + r] = VecDotKQuantScalarR4(groupBase, r, xQ8K,
+                        superBlockCount, Q4_K_BlockBytes, &VecDotQ4_K_Q8_KScalar);
+            }
+        }
+
+        if (tailRows > 0)
+        {
+            int rowBytes = superBlockCount * Q4_K_BlockBytes;
+            byte* tailBase = repackedWeights + (long)fullGroups * groupBytes;
+            for (int r = 0; r < tailRows; r++)
+                result[fullGroups * 4 + r] = Avx2.IsSupported
+                    ? VecDotQ4_K_Q8_KAvx2(tailBase + (long)r * rowBytes, xQ8K, superBlockCount)
+                    : VecDotQ4_K_Q8_KScalar(tailBase + (long)r * rowBytes, xQ8K, superBlockCount);
+        }
+    }
+
+    /// <summary>
+    /// Processes R4-interleaved Q5_K weights.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    internal static void ComputeRowsQ5_KInterleaved(byte* repackedWeights, byte* xQ8K, float* result,
+        int fullGroups, int tailRows, int superBlockCount)
+    {
+        int groupBytes = 4 * superBlockCount * Q5_K_BlockBytes;
+
+        for (int g = 0; g < fullGroups; g++)
+        {
+            byte* groupBase = repackedWeights + (long)g * groupBytes;
+            if (Avx2.IsSupported)
+            {
+                float r0 = 0, r1 = 0, r2 = 0, r3 = 0;
+                int wStride = 4 * Q5_K_BlockBytes;
+                float* tmp = result + g * 4;
+                for (int sb = 0; sb < superBlockCount; sb++)
+                {
+                    byte* sbBase = groupBase + sb * wStride;
+                    VecDotQ5_K_Q8_K_4Rows(sbBase, sbBase + Q5_K_BlockBytes,
+                        sbBase + 2 * Q5_K_BlockBytes, sbBase + 3 * Q5_K_BlockBytes,
+                        xQ8K + sb * Q8_K_BlockBytes, 1, tmp);
+                    r0 += tmp[0]; r1 += tmp[1]; r2 += tmp[2]; r3 += tmp[3];
+                }
+                result[g * 4] = r0; result[g * 4 + 1] = r1;
+                result[g * 4 + 2] = r2; result[g * 4 + 3] = r3;
+            }
+            else
+            {
+                for (int r = 0; r < 4; r++)
+                    result[g * 4 + r] = VecDotKQuantScalarR4(groupBase, r, xQ8K,
+                        superBlockCount, Q5_K_BlockBytes, &VecDotQ5_K_Q8_KScalar);
+            }
+        }
+
+        if (tailRows > 0)
+        {
+            int rowBytes = superBlockCount * Q5_K_BlockBytes;
+            byte* tailBase = repackedWeights + (long)fullGroups * groupBytes;
+            for (int r = 0; r < tailRows; r++)
+                result[fullGroups * 4 + r] = Avx2.IsSupported
+                    ? VecDotQ5_K_Q8_KAvx2(tailBase + (long)r * rowBytes, xQ8K, superBlockCount)
+                    : VecDotQ5_K_Q8_KScalar(tailBase + (long)r * rowBytes, xQ8K, superBlockCount);
+        }
+    }
+
+    /// <summary>
+    /// Processes R4-interleaved Q6_K weights.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    internal static void ComputeRowsQ6_KInterleaved(byte* repackedWeights, byte* xQ8K, float* result,
+        int fullGroups, int tailRows, int superBlockCount)
+    {
+        int groupBytes = 4 * superBlockCount * Q6_K_BlockBytes;
+
+        for (int g = 0; g < fullGroups; g++)
+        {
+            byte* groupBase = repackedWeights + (long)g * groupBytes;
+            if (Avx2.IsSupported)
+            {
+                float r0 = 0, r1 = 0, r2 = 0, r3 = 0;
+                int wStride = 4 * Q6_K_BlockBytes;
+                float* tmp = result + g * 4;
+                for (int sb = 0; sb < superBlockCount; sb++)
+                {
+                    byte* sbBase = groupBase + sb * wStride;
+                    VecDotQ6_K_Q8_K_4Rows(sbBase, sbBase + Q6_K_BlockBytes,
+                        sbBase + 2 * Q6_K_BlockBytes, sbBase + 3 * Q6_K_BlockBytes,
+                        xQ8K + sb * Q8_K_BlockBytes, 1, tmp);
+                    r0 += tmp[0]; r1 += tmp[1]; r2 += tmp[2]; r3 += tmp[3];
+                }
+                result[g * 4] = r0; result[g * 4 + 1] = r1;
+                result[g * 4 + 2] = r2; result[g * 4 + 3] = r3;
+            }
+            else
+            {
+                for (int r = 0; r < 4; r++)
+                    result[g * 4 + r] = VecDotKQuantScalarR4(groupBase, r, xQ8K,
+                        superBlockCount, Q6_K_BlockBytes, &VecDotQ6_K_Q8_KScalar);
+            }
+        }
+
+        if (tailRows > 0)
+        {
+            int rowBytes = superBlockCount * Q6_K_BlockBytes;
+            byte* tailBase = repackedWeights + (long)fullGroups * groupBytes;
+            for (int r = 0; r < tailRows; r++)
+                result[fullGroups * 4 + r] = Avx2.IsSupported
+                    ? VecDotQ6_K_Q8_KAvx2(tailBase + (long)r * rowBytes, xQ8K, superBlockCount)
+                    : VecDotQ6_K_Q8_KScalar(tailBase + (long)r * rowBytes, xQ8K, superBlockCount);
+        }
+    }
+
     // ──────────────────── Gemv for K-quants ────────────────────
 
     /// <summary>

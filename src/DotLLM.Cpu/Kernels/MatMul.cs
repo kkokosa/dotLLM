@@ -176,6 +176,156 @@ public static unsafe partial class MatMul
         }
     }
 
+    // ──────────────────── R4 Interleaved VecDot + ComputeRows for Q8_0 ────────────────────
+
+    /// <summary>
+    /// Scalar Q8_0 dot product for a single row within an R4-interleaved group.
+    /// Block stride is 4 * Q8_0BlockBytes (blocks from 4 rows are interleaved).
+    /// </summary>
+    [SkipLocalsInit]
+    internal static float VecDotQ8_0ScalarR4(byte* groupBase, int rowInGroup, byte* xQ8, int blockCount)
+    {
+        float sumf = 0;
+        const int wStride = 4 * Q8_0BlockBytes;
+
+        for (int block = 0; block < blockCount; block++)
+        {
+            byte* wBlock = groupBase + block * wStride + rowInGroup * Q8_0BlockBytes;
+            byte* xBlock = xQ8 + block * Q8_0BlockBytes;
+
+            float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
+            float dx = (float)Unsafe.ReadUnaligned<Half>(xBlock);
+
+            sbyte* qw = (sbyte*)(wBlock + 2);
+            sbyte* qx = (sbyte*)(xBlock + 2);
+
+            int sumi = 0;
+            for (int i = 0; i < Q8_0GroupSize; i++)
+                sumi += qw[i] * qx[i];
+
+            sumf += dw * dx * sumi;
+        }
+        return sumf;
+    }
+
+    /// <summary>
+    /// AVX2 4-row Q8_0 dot product for R4-interleaved layout.
+    /// Blocks from 4 rows are interleaved: [r0_b0][r1_b0][r2_b0][r3_b0][r0_b1]...
+    /// Block stride is 4 * Q8_0BlockBytes, so all 4 blocks for a column fit in 136 bytes (2-3 cache lines).
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void VecDotQ8_0Avx2_4RowsR4(
+        byte* groupBase, byte* x, int blockCount, float* results)
+    {
+        Vector256<float> acc0 = Vector256<float>.Zero;
+        Vector256<float> acc1 = Vector256<float>.Zero;
+        Vector256<float> acc2 = Vector256<float>.Zero;
+        Vector256<float> acc3 = Vector256<float>.Zero;
+        Vector256<short> ones = Vector256.Create((short)1);
+        const int wStride = 4 * Q8_0BlockBytes;
+
+        for (int block = 0; block < blockCount; block++)
+        {
+            byte* xBlock = x + block * Q8_0BlockBytes;
+            float dx = (float)Unsafe.ReadUnaligned<Half>(xBlock);
+            Vector256<sbyte> vx = Unsafe.ReadUnaligned<Vector256<sbyte>>(xBlock + 2);
+            Vector256<sbyte> absX = Avx2.Sign(vx, vx);
+
+            byte* blockBase = groupBase + block * wStride;
+
+            // Row 0
+            {
+                byte* wBlock = blockBase;
+                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
+                Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
+                Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
+                acc0 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+            }
+
+            // Row 1
+            {
+                byte* wBlock = blockBase + Q8_0BlockBytes;
+                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
+                Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
+                Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
+                acc1 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+            }
+
+            // Row 2
+            {
+                byte* wBlock = blockBase + 2 * Q8_0BlockBytes;
+                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
+                Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
+                Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
+                acc2 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+            }
+
+            // Row 3
+            {
+                byte* wBlock = blockBase + 3 * Q8_0BlockBytes;
+                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
+                Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
+                Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
+                acc3 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+            }
+        }
+
+        results[0] = HorizontalSumAvx2Float(acc0);
+        results[1] = HorizontalSumAvx2Float(acc1);
+        results[2] = HorizontalSumAvx2Float(acc2);
+        results[3] = HorizontalSumAvx2Float(acc3);
+    }
+
+    /// <summary>
+    /// Processes R4-interleaved Q8_0 weights where groups of 4 rows have their blocks
+    /// stored contiguously: [r0_b0][r1_b0][r2_b0][r3_b0][r0_b1][r1_b1]...
+    /// Reads sequentially instead of striding, improving cache and prefetch behavior.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    internal static void ComputeRowsQ8_0Interleaved(byte* repackedWeights, byte* xQ8, float* result,
+        int fullGroups, int tailRows, int blockCount)
+    {
+        int groupBytes = 4 * blockCount * Q8_0BlockBytes;
+
+        if (Avx2.IsSupported)
+        {
+            for (int g = 0; g < fullGroups; g++)
+            {
+                byte* groupBase = repackedWeights + (long)g * groupBytes;
+                VecDotQ8_0Avx2_4RowsR4(groupBase, xQ8, blockCount, result + g * 4);
+            }
+        }
+        else
+        {
+            for (int g = 0; g < fullGroups; g++)
+            {
+                byte* groupBase = repackedWeights + (long)g * groupBytes;
+                for (int r = 0; r < 4; r++)
+                    result[g * 4 + r] = VecDotQ8_0ScalarR4(groupBase, r, xQ8, blockCount);
+            }
+        }
+
+        // Tail rows (row-major, after interleaved data)
+        if (tailRows > 0)
+        {
+            int rowBytes = blockCount * Q8_0BlockBytes;
+            byte* tailBase = repackedWeights + (long)fullGroups * groupBytes;
+            for (int r = 0; r < tailRows; r++)
+                result[fullGroups * 4 + r] = Avx2.IsSupported
+                    ? VecDotQ8_0Avx2(tailBase + (long)r * rowBytes, xQ8, blockCount)
+                    : VecDotQ8_0Scalar(tailBase + (long)r * rowBytes, xQ8, blockCount);
+        }
+    }
+
     // ──────────────────── Scalar reference ────────────────────
 
     /// <summary>

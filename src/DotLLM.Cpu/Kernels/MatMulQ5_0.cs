@@ -443,6 +443,168 @@ public static unsafe partial class MatMul
         }
     }
 
+    // ──────────────────── R4 Interleaved VecDot + ComputeRows for Q5_0 ────────────────────
+
+    /// <summary>
+    /// Scalar Q5_0 × Q8_1 dot product for a single row within an R4-interleaved group.
+    /// Block stride is 4 * Q5_0BlockBytes.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static float VecDotQ5_0Q8_1ScalarR4(byte* groupBase, int rowInGroup, byte* q8, int blockCount)
+    {
+        float sumf = 0;
+        float offsetSum = 0;
+        const int wStride = 4 * Q5_0BlockBytes;
+
+        for (int block = 0; block < blockCount; block++)
+        {
+            byte* q5Block = groupBase + block * wStride + rowInGroup * Q5_0BlockBytes;
+            byte* q8Block = q8 + block * Q8_1BlockBytes;
+
+            float d5 = (float)Unsafe.ReadUnaligned<Half>(q5Block);
+            float d8 = (float)Unsafe.ReadUnaligned<Half>(q8Block);
+            float s8 = (float)Unsafe.ReadUnaligned<Half>(q8Block + 2);
+
+            uint qh = Unsafe.ReadUnaligned<uint>(q5Block + 2);
+            byte* qs = q5Block + 6;
+            sbyte* q8v = (sbyte*)(q8Block + 4);
+
+            int sumi = 0;
+            for (int j = 0; j < 16; j++)
+            {
+                int x0 = (qs[j] & 0xF) | (((int)((qh >> j) & 1)) << 4);
+                int x1 = ((qs[j] >> 4) & 0xF) | (((int)((qh >> (j + 16)) & 1)) << 4);
+                sumi += x0 * q8v[j] + x1 * q8v[j + 16];
+            }
+
+            sumf += d5 * d8 * sumi;
+            offsetSum += d5 * s8;
+        }
+
+        return sumf - 16.0f * offsetSum;
+    }
+
+    /// <summary>
+    /// AVX2 4-row Q5_0 × Q8_1 dot product for R4-interleaved layout.
+    /// Block stride is 4 * Q5_0BlockBytes. Uses shared Q8_1 loads and precomputed block sums.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void VecDotQ5_0Q8_1Avx2_4RowsR4(
+        byte* groupBase, byte* q8, int blockCount, float* results)
+    {
+        Vector256<float> acc0 = Vector256<float>.Zero;
+        Vector256<float> acc1 = Vector256<float>.Zero;
+        Vector256<float> acc2 = Vector256<float>.Zero;
+        Vector256<float> acc3 = Vector256<float>.Zero;
+        Vector256<short> ones = Vector256.Create((short)1);
+        float off0 = 0, off1 = 0, off2 = 0, off3 = 0;
+        const int wStride = 4 * Q5_0BlockBytes;
+
+        for (int block = 0; block < blockCount; block++)
+        {
+            byte* q8Block = q8 + block * Q8_1BlockBytes;
+            float d8 = (float)Unsafe.ReadUnaligned<Half>(q8Block);
+            float s8 = (float)Unsafe.ReadUnaligned<Half>(q8Block + 2);
+
+            // Shared Q8_1 load
+            Vector256<sbyte> q8Vals = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8Block + 4);
+            byte* blockBase = groupBase + block * wStride;
+
+            // Row 0
+            {
+                byte* w = blockBase;
+                float d5 = (float)Unsafe.ReadUnaligned<Half>(w);
+                Vector256<int> dot = Q5_0BlockDotQ8_1(w, q8Vals, ones);
+                if (Fma.IsSupported)
+                    acc0 = Fma.MultiplyAdd(Vector256.Create(d5 * d8), Avx.ConvertToVector256Single(dot), acc0);
+                else
+                    acc0 = Avx.Add(acc0, Avx.Multiply(Vector256.Create(d5 * d8), Avx.ConvertToVector256Single(dot)));
+                off0 += d5 * s8;
+            }
+
+            // Row 1
+            {
+                byte* w = blockBase + Q5_0BlockBytes;
+                float d5 = (float)Unsafe.ReadUnaligned<Half>(w);
+                Vector256<int> dot = Q5_0BlockDotQ8_1(w, q8Vals, ones);
+                if (Fma.IsSupported)
+                    acc1 = Fma.MultiplyAdd(Vector256.Create(d5 * d8), Avx.ConvertToVector256Single(dot), acc1);
+                else
+                    acc1 = Avx.Add(acc1, Avx.Multiply(Vector256.Create(d5 * d8), Avx.ConvertToVector256Single(dot)));
+                off1 += d5 * s8;
+            }
+
+            // Row 2
+            {
+                byte* w = blockBase + 2 * Q5_0BlockBytes;
+                float d5 = (float)Unsafe.ReadUnaligned<Half>(w);
+                Vector256<int> dot = Q5_0BlockDotQ8_1(w, q8Vals, ones);
+                if (Fma.IsSupported)
+                    acc2 = Fma.MultiplyAdd(Vector256.Create(d5 * d8), Avx.ConvertToVector256Single(dot), acc2);
+                else
+                    acc2 = Avx.Add(acc2, Avx.Multiply(Vector256.Create(d5 * d8), Avx.ConvertToVector256Single(dot)));
+                off2 += d5 * s8;
+            }
+
+            // Row 3
+            {
+                byte* w = blockBase + 3 * Q5_0BlockBytes;
+                float d5 = (float)Unsafe.ReadUnaligned<Half>(w);
+                Vector256<int> dot = Q5_0BlockDotQ8_1(w, q8Vals, ones);
+                if (Fma.IsSupported)
+                    acc3 = Fma.MultiplyAdd(Vector256.Create(d5 * d8), Avx.ConvertToVector256Single(dot), acc3);
+                else
+                    acc3 = Avx.Add(acc3, Avx.Multiply(Vector256.Create(d5 * d8), Avx.ConvertToVector256Single(dot)));
+                off3 += d5 * s8;
+            }
+        }
+
+        results[0] = HorizontalSumAvx2Float(acc0) - 16.0f * off0;
+        results[1] = HorizontalSumAvx2Float(acc1) - 16.0f * off1;
+        results[2] = HorizontalSumAvx2Float(acc2) - 16.0f * off2;
+        results[3] = HorizontalSumAvx2Float(acc3) - 16.0f * off3;
+    }
+
+    /// <summary>
+    /// Processes R4-interleaved Q5_0 weights. Uses R4-aware block stride for optimal cache access.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    internal static void ComputeRowsQ5_0Interleaved(byte* repackedWeights, byte* xQ8, float* result,
+        int fullGroups, int tailRows, int blockCount)
+    {
+        int groupBytes = 4 * blockCount * Q5_0BlockBytes;
+
+        if (Avx2.IsSupported)
+        {
+            for (int g = 0; g < fullGroups; g++)
+            {
+                byte* groupBase = repackedWeights + (long)g * groupBytes;
+                VecDotQ5_0Q8_1Avx2_4RowsR4(groupBase, xQ8, blockCount, result + g * 4);
+            }
+        }
+        else
+        {
+            for (int g = 0; g < fullGroups; g++)
+            {
+                byte* groupBase = repackedWeights + (long)g * groupBytes;
+                for (int r = 0; r < 4; r++)
+                    result[g * 4 + r] = VecDotQ5_0Q8_1ScalarR4(groupBase, r, xQ8, blockCount);
+            }
+        }
+
+        // Tail rows (row-major)
+        if (tailRows > 0)
+        {
+            int rowBytes = blockCount * Q5_0BlockBytes;
+            byte* tailBase = repackedWeights + (long)fullGroups * groupBytes;
+            for (int r = 0; r < tailRows; r++)
+                result[fullGroups * 4 + r] = Avx2.IsSupported
+                    ? VecDotQ5_0Q8_1Avx2(tailBase + (long)r * rowBytes, xQ8, blockCount)
+                    : VecDotQ5_0Q8_1Scalar(tailBase + (long)r * rowBytes, xQ8, blockCount);
+        }
+    }
+
     // ──────────────────── GemvQ5_0 ────────────────────
 
     /// <summary>
