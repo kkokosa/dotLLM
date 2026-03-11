@@ -14,13 +14,18 @@ public static unsafe partial class MatMul
 {
     // ──────────────────── Quant family classification ────────────────────
 
-    /// <summary>Quant family grouping for pre-quantization reuse.</summary>
-    private enum QuantFamily { None, Q8Family, KQuantFamily }
+    /// <summary>
+    /// Quant family grouping for pre-quantization reuse.
+    /// Q8_0 uses Q8_0 input quantization, Q5_0 uses Q8_1 (precomputed block sums),
+    /// K-quants use Q8_K. Cross-family projections cannot share pre-quantized input.
+    /// </summary>
+    private enum QuantFamily { None, Q8_0Family, Q8_1Family, KQuantFamily }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static QuantFamily GetQuantFamily(QuantizationType qt) => qt switch
     {
-        QuantizationType.Q8_0 or QuantizationType.Q5_0 => QuantFamily.Q8Family,
+        QuantizationType.Q8_0 => QuantFamily.Q8_0Family,
+        QuantizationType.Q5_0 => QuantFamily.Q8_1Family,
         QuantizationType.Q4_K or QuantizationType.Q5_K or QuantizationType.Q6_K => QuantFamily.KQuantFamily,
         _ => QuantFamily.None,
     };
@@ -62,7 +67,7 @@ public static unsafe partial class MatMul
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int GetBlockCount(int k, QuantizationType qt) => GetQuantFamily(qt) switch
     {
-        QuantFamily.Q8Family => k / Q8_0GroupSize,
+        QuantFamily.Q8_0Family or QuantFamily.Q8_1Family => k / Q8_0GroupSize,
         QuantFamily.KQuantFamily => k / KQuantGroupSize,
         _ => 0,
     };
@@ -74,7 +79,7 @@ public static unsafe partial class MatMul
         int blockBytes = GetWeightBlockBytes(qt);
         return GetQuantFamily(qt) switch
         {
-            QuantFamily.Q8Family => (k / Q8_0GroupSize) * blockBytes,
+            QuantFamily.Q8_0Family or QuantFamily.Q8_1Family => (k / Q8_0GroupSize) * blockBytes,
             QuantFamily.KQuantFamily => (k / KQuantGroupSize) * blockBytes,
             _ => 0,
         };

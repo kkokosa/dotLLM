@@ -462,8 +462,8 @@ public sealed unsafe class TransformerModel : IModel
     /// <summary>
     /// Returns true when a pre-quantized buffer produced for <paramref name="preQuantSource"/>
     /// can be safely reused for a GEMM targeting <paramref name="target"/>.
-    /// K-quant types share Q8_K layout; Q8_0/Q5_0 share Q8_0 layout. Cross-family reuse
-    /// would misinterpret block layout (different sizes, missing bsums), corrupting output.
+    /// K-quant types share Q8_K layout. Q8_0 and Q5_0 each use different input quantization
+    /// (Q8_0 and Q8_1 respectively) and cannot share pre-quantized buffers.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool IsCompatiblePreQuant(QuantizationType preQuantSource, QuantizationType target)
@@ -474,46 +474,49 @@ public sealed unsafe class TransformerModel : IModel
         bool targetIsKQuant = target is QuantizationType.Q4_K or QuantizationType.Q5_K or QuantizationType.Q6_K;
         if (sourceIsKQuant && targetIsKQuant) return true;
 
-        bool sourceIsQ8Family = preQuantSource is QuantizationType.Q8_0 or QuantizationType.Q5_0;
-        bool targetIsQ8Family = target is QuantizationType.Q8_0 or QuantizationType.Q5_0;
-        return sourceIsQ8Family && targetIsQ8Family;
+        // Q8_0 and Q5_0 no longer share input format — Q8_0 uses Q8_0, Q5_0 uses Q8_1.
+        return false;
     }
 
     /// <summary>
     /// Pre-quantizes [seqLen, dim] f32 input for GEMM reuse across Q/K/V or Gate/Up projections.
     /// K-quant types (Q4_K, Q5_K, Q6_K) use Q8_K (float32 scale, 256 elements/block).
-    /// Q8_0 and Q5_0 types use Q8_0 (Half scale, 32 elements/block).
+    /// Q8_0 uses Q8_0 (Half scale, 32 elements/block).
+    /// Q5_0 uses Q8_1 (Half d + Half s, 32 elements/block) with precomputed block sums.
     /// Returns the scratch pointer if quantized, otherwise null.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static byte* QuantizeInput(float* input, byte* scratch, int dim, int seqLen,
                                        QuantizationType qt)
     {
-        bool isKQuant = qt == QuantizationType.Q4_K
-                     || qt == QuantizationType.Q5_K
-                     || qt == QuantizationType.Q6_K;
-        bool isQ8Type = qt == QuantizationType.Q8_0
-                     || qt == QuantizationType.Q5_0;
-
-        if (!isKQuant && !isQ8Type)
-            return null;
-
-        if (isKQuant)
+        if (qt == QuantizationType.Q4_K || qt == QuantizationType.Q5_K || qt == QuantizationType.Q6_K)
         {
             int blockCount = dim / 256; // Q8_K_GroupSize
             int q8kRowBytes = blockCount * MatMul.Q8_K_BlockBytes;
             for (int t = 0; t < seqLen; t++)
                 MatMul.QuantizeF32ToQ8_K(input + t * dim, scratch + t * q8kRowBytes, dim);
+            return scratch;
         }
-        else
+
+        if (qt == QuantizationType.Q5_0)
+        {
+            int blockCount = dim / Q8_0GroupSize;
+            int q8_1RowBytes = blockCount * MatMul.Q8_1BlockBytes;
+            for (int t = 0; t < seqLen; t++)
+                MatMul.QuantizeF32ToQ8_1(input + t * dim, scratch + t * q8_1RowBytes, dim);
+            return scratch;
+        }
+
+        if (qt == QuantizationType.Q8_0)
         {
             int blockCount = dim / Q8_0GroupSize;
             int q8RowBytes = blockCount * Q8_0BlockBytes;
             for (int t = 0; t < seqLen; t++)
                 MatMul.QuantizeF32ToQ8_0(input + t * dim, scratch + t * q8RowBytes, dim);
+            return scratch;
         }
 
-        return scratch;
+        return null;
     }
 
     /// <summary>

@@ -77,47 +77,6 @@ public sealed unsafe class MatMulQ5_0Tests
         }
     }
 
-    // ──────────────────── Q5_0 × Q8_0 4-row matches single row ────────────────────
-
-    [Fact]
-    public void VecDotQ5_0Q8_0_4Row_MatchesSingleRow()
-    {
-        if (!Avx2.IsSupported) return;
-
-        const int blockCount = 18;
-        var rng = new Random(42);
-
-        nint w0 = AllocRandomQ5_0Blocks(blockCount, rng);
-        nint w1 = AllocRandomQ5_0Blocks(blockCount, rng);
-        nint w2 = AllocRandomQ5_0Blocks(blockCount, rng);
-        nint w3 = AllocRandomQ5_0Blocks(blockCount, rng);
-        nint q8 = AllocRandomQ8_0Blocks(blockCount, rng);
-        try
-        {
-            float r0 = MatMul.VecDotQ5_0Q8_0Avx2((byte*)w0, (byte*)q8, blockCount);
-            float r1 = MatMul.VecDotQ5_0Q8_0Avx2((byte*)w1, (byte*)q8, blockCount);
-            float r2 = MatMul.VecDotQ5_0Q8_0Avx2((byte*)w2, (byte*)q8, blockCount);
-            float r3 = MatMul.VecDotQ5_0Q8_0Avx2((byte*)w3, (byte*)q8, blockCount);
-
-            float* results = stackalloc float[4];
-            MatMul.VecDotQ5_0Q8_0Avx2_4Rows((byte*)w0, (byte*)w1, (byte*)w2, (byte*)w3,
-                (byte*)q8, blockCount, results);
-
-            Assert.Equal(r0, results[0], 1e-6f);
-            Assert.Equal(r1, results[1], 1e-6f);
-            Assert.Equal(r2, results[2], 1e-6f);
-            Assert.Equal(r3, results[3], 1e-6f);
-        }
-        finally
-        {
-            NativeMemory.AlignedFree((void*)w0);
-            NativeMemory.AlignedFree((void*)w1);
-            NativeMemory.AlignedFree((void*)w2);
-            NativeMemory.AlignedFree((void*)w3);
-            NativeMemory.AlignedFree((void*)q8);
-        }
-    }
-
     // ──────────────────── GemvQ5_0 cross-verify ────────────────────
 
     [Fact]

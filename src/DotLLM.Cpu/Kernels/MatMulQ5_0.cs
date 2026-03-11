@@ -8,9 +8,10 @@ using DotLLM.Cpu.Threading;
 namespace DotLLM.Cpu.Kernels;
 
 /// <summary>
-/// Q5_0 × Q8_0 matrix multiplication kernels.
+/// Q5_0 × Q8_1 matrix multiplication kernels.
 /// Q5_0 block: 22 bytes = Half(d) + uint32(qh) + byte[16](qs) → 32 elements.
-/// Input is quantized to Q8_0, then fused integer dot product avoids dequant-to-float.
+/// Input is quantized to Q8_1 (precomputed block sums), then fused integer dot product avoids dequant-to-float.
+/// Q8_1 precomputes <c>s = d * sum(qs)</c> per block, eliminating 4 SIMD ops per block from the hot path.
 /// </summary>
 public static unsafe partial class MatMul
 {
@@ -20,7 +21,50 @@ public static unsafe partial class MatMul
     /// <summary>Number of elements per Q5_0 block.</summary>
     private const int Q5_0GroupSize = 32;
 
-    // ──────────────────── Q5_0 × Q8_0 Scalar ────────────────────
+    // ──────────────────── Q5_0 × Q8_1 Scalar ────────────────────
+
+    /// <summary>
+    /// Scalar Q5_0 × Q8_1 dot product.
+    /// Layout: Q5_0: d(Half@0), qh(uint32@2), qs[16]@6.
+    /// Layout: Q8_1: d(Half@0), s(Half@2), qs[32]@4.
+    /// Uses precomputed <c>s = d8 * sum(q8)</c> to eliminate per-block sum computation.
+    /// Formula: <c>sumf += d5 * d8 * sum(q5_unsigned * q8) - 16 * d5 * s8</c>.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static float VecDotQ5_0Q8_1Scalar(byte* q5, byte* q8, int blockCount)
+    {
+        float sumf = 0;
+        float offsetSum = 0;
+
+        for (int block = 0; block < blockCount; block++)
+        {
+            byte* q5Block = q5 + block * Q5_0BlockBytes;
+            byte* q8Block = q8 + block * Q8_1BlockBytes;
+
+            float d5 = (float)Unsafe.ReadUnaligned<Half>(q5Block);
+            float d8 = (float)Unsafe.ReadUnaligned<Half>(q8Block);
+            float s8 = (float)Unsafe.ReadUnaligned<Half>(q8Block + 2);
+
+            uint qh = Unsafe.ReadUnaligned<uint>(q5Block + 2);
+            byte* qs = q5Block + 6;
+            sbyte* q8v = (sbyte*)(q8Block + 4);
+
+            int sumi = 0;
+            for (int j = 0; j < 16; j++)
+            {
+                int x0 = (qs[j] & 0xF) | (((int)((qh >> j) & 1)) << 4);
+                int x1 = ((qs[j] >> 4) & 0xF) | (((int)((qh >> (j + 16)) & 1)) << 4);
+                sumi += x0 * q8v[j] + x1 * q8v[j + 16];
+            }
+
+            sumf += d5 * d8 * sumi;
+            offsetSum += d5 * s8;
+        }
+
+        return sumf - 16.0f * offsetSum;
+    }
+
+    // ──────────────────── Q5_0 × Q8_0 Scalar (kept for cross-verification) ────────────────────
 
     /// <summary>
     /// Scalar Q5_0 × Q8_0 dot product.
@@ -58,7 +102,7 @@ public static unsafe partial class MatMul
         return sumf;
     }
 
-    // ──────────────────── Q5_0 × Q8_0 AVX2 ────────────────────
+    // ──────────────────── Q5_0 × Q8_1 AVX2 ────────────────────
 
     // Pre-computed constants for SIMD bit extraction of Q5_0 high bits.
     // vpshufb mask: replicate each qh byte to 8 positions within its 128-bit lane.
@@ -92,10 +136,128 @@ public static unsafe partial class MatMul
     }
 
     /// <summary>
-    /// AVX2-accelerated Q5_0 × Q8_0 dot product.
-    /// Unpacks 5-bit values using pure SIMD bit extraction (no scalar loop),
-    /// computes <c>sum(q5_unsigned * q8) - 16 * sum(q8)</c> with integer subtraction
-    /// before float conversion (1 conversion per block instead of 2).
+    /// AVX2-accelerated Q5_0 × Q8_1 dot product with 2-block loop unrolling.
+    /// Uses Q8_1 precomputed <c>s = d * sum(qs)</c> to avoid 4 SIMD ops per block
+    /// (vpmaddubsw + vpmaddwd + vpslld + vpsubd) that were needed for runtime q8 sum.
+    /// 2-block unrolling interleaves loads and arithmetic for better ILP.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static float VecDotQ5_0Q8_1Avx2(byte* q5, byte* q8, int blockCount)
+    {
+        Vector256<float> acc = Vector256<float>.Zero;
+        Vector256<short> ones = Vector256.Create((short)1);
+        float offsetSum = 0;
+
+        int block = 0;
+
+        // 2-block unrolled loop for better ILP
+        for (; block + 1 < blockCount; block += 2)
+        {
+            // Block A
+            byte* q5BlockA = q5 + block * Q5_0BlockBytes;
+            byte* q8BlockA = q8 + block * Q8_1BlockBytes;
+
+            float d5A = (float)Unsafe.ReadUnaligned<Half>(q5BlockA);
+            float d8A = (float)Unsafe.ReadUnaligned<Half>(q8BlockA);
+            float s8A = (float)Unsafe.ReadUnaligned<Half>(q8BlockA + 2);
+
+            uint qhA = Unsafe.ReadUnaligned<uint>(q5BlockA + 2);
+            Vector128<byte> qsRawA = Unsafe.ReadUnaligned<Vector128<byte>>(q5BlockA + 6);
+
+            // Block B — interleave loads
+            byte* q5BlockB = q5 + (block + 1) * Q5_0BlockBytes;
+            byte* q8BlockB = q8 + (block + 1) * Q8_1BlockBytes;
+
+            float d5B = (float)Unsafe.ReadUnaligned<Half>(q5BlockB);
+            float d8B = (float)Unsafe.ReadUnaligned<Half>(q8BlockB);
+            float s8B = (float)Unsafe.ReadUnaligned<Half>(q8BlockB + 2);
+
+            uint qhB = Unsafe.ReadUnaligned<uint>(q5BlockB + 2);
+            Vector128<byte> qsRawB = Unsafe.ReadUnaligned<Vector128<byte>>(q5BlockB + 6);
+
+            // Block A: unpack nibbles + high bits
+            Vector128<byte> lo128A = Sse2.And(qsRawA, Vector128.Create((byte)0x0F));
+            Vector128<byte> hi128A = Sse2.And(
+                Sse2.ShiftRightLogical(qsRawA.AsUInt16(), 4).AsByte(),
+                Vector128.Create((byte)0x0F));
+            Vector256<byte> q5valsA = Avx2.Or(Vector256.Create(lo128A, hi128A), ExtractQ5HighBits(qhA));
+
+            Vector256<sbyte> q8ValsA = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8BlockA + 4);
+            Vector256<short> prodA = Avx2.MultiplyAddAdjacent(q5valsA, q8ValsA);
+            Vector256<int> prodSumA = Avx2.MultiplyAddAdjacent(prodA, ones);
+
+            // Block B: unpack nibbles + high bits
+            Vector128<byte> lo128B = Sse2.And(qsRawB, Vector128.Create((byte)0x0F));
+            Vector128<byte> hi128B = Sse2.And(
+                Sse2.ShiftRightLogical(qsRawB.AsUInt16(), 4).AsByte(),
+                Vector128.Create((byte)0x0F));
+            Vector256<byte> q5valsB = Avx2.Or(Vector256.Create(lo128B, hi128B), ExtractQ5HighBits(qhB));
+
+            Vector256<sbyte> q8ValsB = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8BlockB + 4);
+            Vector256<short> prodB = Avx2.MultiplyAddAdjacent(q5valsB, q8ValsB);
+            Vector256<int> prodSumB = Avx2.MultiplyAddAdjacent(prodB, ones);
+
+            // FMA accumulate both blocks
+            float scaleA = d5A * d8A;
+            float scaleB = d5B * d8B;
+            if (Fma.IsSupported)
+            {
+                acc = Fma.MultiplyAdd(Vector256.Create(scaleA),
+                    Avx.ConvertToVector256Single(prodSumA), acc);
+                acc = Fma.MultiplyAdd(Vector256.Create(scaleB),
+                    Avx.ConvertToVector256Single(prodSumB), acc);
+            }
+            else
+            {
+                acc = Avx.Add(acc, Avx.Multiply(Vector256.Create(scaleA),
+                    Avx.ConvertToVector256Single(prodSumA)));
+                acc = Avx.Add(acc, Avx.Multiply(Vector256.Create(scaleB),
+                    Avx.ConvertToVector256Single(prodSumB)));
+            }
+
+            offsetSum += d5A * s8A + d5B * s8B;
+        }
+
+        // Single-block tail for odd block count
+        if (block < blockCount)
+        {
+            byte* q5Block = q5 + block * Q5_0BlockBytes;
+            byte* q8Block = q8 + block * Q8_1BlockBytes;
+
+            float d5 = (float)Unsafe.ReadUnaligned<Half>(q5Block);
+            float d8 = (float)Unsafe.ReadUnaligned<Half>(q8Block);
+            float s8 = (float)Unsafe.ReadUnaligned<Half>(q8Block + 2);
+
+            uint qh = Unsafe.ReadUnaligned<uint>(q5Block + 2);
+            Vector128<byte> qsRaw = Unsafe.ReadUnaligned<Vector128<byte>>(q5Block + 6);
+            Vector128<byte> lo128 = Sse2.And(qsRaw, Vector128.Create((byte)0x0F));
+            Vector128<byte> hi128 = Sse2.And(
+                Sse2.ShiftRightLogical(qsRaw.AsUInt16(), 4).AsByte(),
+                Vector128.Create((byte)0x0F));
+            Vector256<byte> q5vals = Avx2.Or(Vector256.Create(lo128, hi128), ExtractQ5HighBits(qh));
+
+            Vector256<sbyte> q8Vals = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8Block + 4);
+            Vector256<short> prod = Avx2.MultiplyAddAdjacent(q5vals, q8Vals);
+            Vector256<int> prodSum = Avx2.MultiplyAddAdjacent(prod, ones);
+
+            float scale = d5 * d8;
+            if (Fma.IsSupported)
+                acc = Fma.MultiplyAdd(Vector256.Create(scale),
+                    Avx.ConvertToVector256Single(prodSum), acc);
+            else
+                acc = Avx.Add(acc, Avx.Multiply(Vector256.Create(scale),
+                    Avx.ConvertToVector256Single(prodSum)));
+
+            offsetSum += d5 * s8;
+        }
+
+        return HorizontalSumAvx2Float(acc) - 16.0f * offsetSum;
+    }
+
+    // ──────────────────── Q5_0 × Q8_0 AVX2 (kept for cross-verification) ────────────────────
+
+    /// <summary>
+    /// AVX2-accelerated Q5_0 × Q8_0 dot product (legacy — used for cross-verification with Q8_1 path).
     /// </summary>
     [SkipLocalsInit]
     internal static float VecDotQ5_0Q8_0Avx2(byte* q5, byte* q8, int blockCount)
@@ -113,7 +275,6 @@ public static unsafe partial class MatMul
 
             uint qh = Unsafe.ReadUnaligned<uint>(q5Block + 2);
 
-            // Unpack 16 nibble bytes → 32 4-bit values: lo nibbles [0..15], hi nibbles [16..31]
             Vector128<byte> qsRaw = Unsafe.ReadUnaligned<Vector128<byte>>(q5Block + 6);
             Vector128<byte> lo128 = Sse2.And(qsRaw, Vector128.Create((byte)0x0F));
             Vector128<byte> hi128 = Sse2.And(
@@ -121,25 +282,19 @@ public static unsafe partial class MatMul
                 Vector128.Create((byte)0x0F));
             Vector256<byte> nibbles = Vector256.Create(lo128, hi128);
 
-            // SIMD bit extraction: 5 instructions instead of 32-iteration scalar loop
             Vector256<byte> bit5Vec = ExtractQ5HighBits(qh);
-            Vector256<byte> q5vals = Avx2.Or(nibbles, bit5Vec); // 5-bit unsigned [0..31]
+            Vector256<byte> q5vals = Avx2.Or(nibbles, bit5Vec);
 
-            // Load Q8_0 signed values
             Vector256<sbyte> q8Vals = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8Block + 2);
 
-            // ubyte × sbyte → int16 pairs (vpmaddubsw)
             Vector256<short> prod = Avx2.MultiplyAddAdjacent(q5vals, q8Vals);
-            // int16 → int32 (vpmaddwd)
             Vector256<int> prodSum = Avx2.MultiplyAddAdjacent(prod, ones);
 
-            // Sum of Q8 values for the -16 offset: sum((q5-16)*q8) = sum(q5*q8) - 16*sum(q8)
             Vector256<short> q8Sums = Avx2.MultiplyAddAdjacent(Vector256.Create((byte)1), q8Vals);
             Vector256<int> q8Sum = Avx2.MultiplyAddAdjacent(q8Sums, ones);
 
-            // Integer subtraction then single float conversion (saves 1 cvt + 1 mul per block)
             Vector256<int> adjusted = Avx2.Subtract(prodSum,
-                Avx2.ShiftLeftLogical(q8Sum, 4)); // 16 * q8Sum via shift
+                Avx2.ShiftLeftLogical(q8Sum, 4));
 
             float scale = d5 * d8;
             if (Fma.IsSupported)
@@ -153,15 +308,16 @@ public static unsafe partial class MatMul
         return HorizontalSumAvx2Float(acc);
     }
 
-    // ──────────────────── Q5_0 × Q8_0 4-row variant ────────────────────
+    // ──────────────────── Q5_0 × Q8_1 4-row variant ────────────────────
 
     /// <summary>
-    /// Unpacks a single Q5_0 block and computes the integer dot product with shared Q8 values.
-    /// Returns the adjusted sum: <c>sum(q5_unsigned × q8) - 16 × sum(q8)</c> as int32×8.
+    /// Unpacks a single Q5_0 block and computes the unsigned integer dot product with Q8_1 values.
+    /// Returns <c>sum(q5_unsigned × q8)</c> as int32×8 — the -16 offset is handled via
+    /// the precomputed Q8_1 <c>s</c> field by the caller.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector256<int> Q5_0BlockDot(byte* q5Block, Vector256<sbyte> q8Vals,
-        Vector256<int> q8Sum16, Vector256<short> ones)
+    private static Vector256<int> Q5_0BlockDotQ8_1(byte* q5Block, Vector256<sbyte> q8Vals,
+        Vector256<short> ones)
     {
         uint qh = Unsafe.ReadUnaligned<uint>(q5Block + 2);
 
@@ -173,16 +329,17 @@ public static unsafe partial class MatMul
         Vector256<byte> q5vals = Avx2.Or(Vector256.Create(lo128, hi128), ExtractQ5HighBits(qh));
 
         Vector256<short> prod = Avx2.MultiplyAddAdjacent(q5vals, q8Vals);
-        return Avx2.Subtract(Avx2.MultiplyAddAdjacent(prod, ones), q8Sum16);
+        return Avx2.MultiplyAddAdjacent(prod, ones);
     }
 
     /// <summary>
-    /// True 4-row Q5_0 × Q8_0 dot product with shared Q8 loads.
-    /// Loads Q8 data once per block and reuses across all 4 weight rows,
-    /// saving 3 loads of 32 bytes per block. Fully unrolled.
+    /// True 4-row Q5_0 × Q8_1 dot product with shared Q8_1 loads.
+    /// Loads Q8_1 data once per block and reuses across all 4 weight rows,
+    /// saving 3 loads of 32 bytes per block. Uses precomputed Q8_1 <c>s</c> field
+    /// for the -16 offset, eliminating 4 SIMD ops per block per row.
     /// </summary>
     [SkipLocalsInit]
-    internal static void VecDotQ5_0Q8_0Avx2_4Rows(
+    internal static void VecDotQ5_0Q8_1Avx2_4Rows(
         byte* w0, byte* w1, byte* w2, byte* w3,
         byte* q8, int blockCount, float* results)
     {
@@ -191,39 +348,36 @@ public static unsafe partial class MatMul
         Vector256<float> acc2 = Vector256<float>.Zero;
         Vector256<float> acc3 = Vector256<float>.Zero;
         Vector256<short> ones = Vector256.Create((short)1);
+        float off0 = 0, off1 = 0, off2 = 0, off3 = 0;
 
         for (int block = 0; block < blockCount; block++)
         {
-            byte* q8Block = q8 + block * Q8_0BlockBytes;
+            byte* q8Block = q8 + block * Q8_1BlockBytes;
             float d8 = (float)Unsafe.ReadUnaligned<Half>(q8Block);
+            float s8 = (float)Unsafe.ReadUnaligned<Half>(q8Block + 2);
             int blockOff = block * Q5_0BlockBytes;
 
-            // Shared Q8 load — reused across all 4 rows
-            Vector256<sbyte> q8Vals = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8Block + 2);
-
-            // Precompute 16 × sum(q8) for -16 offset (shared)
-            Vector256<short> q8Sums = Avx2.MultiplyAddAdjacent(Vector256.Create((byte)1), q8Vals);
-            Vector256<int> q8Sum16 = Avx2.ShiftLeftLogical(
-                Avx2.MultiplyAddAdjacent(q8Sums, ones).AsUInt32(), 4).AsInt32();
+            // Shared Q8_1 load — reused across all 4 rows
+            Vector256<sbyte> q8Vals = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8Block + 4);
 
             // Row 0
             float d0 = (float)Unsafe.ReadUnaligned<Half>(w0 + blockOff);
-            Vector256<int> dot0 = Q5_0BlockDot(w0 + blockOff, q8Vals, q8Sum16, ones);
+            Vector256<int> dot0 = Q5_0BlockDotQ8_1(w0 + blockOff, q8Vals, ones);
             float s0 = d0 * d8;
 
             // Row 1
             float d1 = (float)Unsafe.ReadUnaligned<Half>(w1 + blockOff);
-            Vector256<int> dot1 = Q5_0BlockDot(w1 + blockOff, q8Vals, q8Sum16, ones);
+            Vector256<int> dot1 = Q5_0BlockDotQ8_1(w1 + blockOff, q8Vals, ones);
             float s1 = d1 * d8;
 
             // Row 2
             float d2 = (float)Unsafe.ReadUnaligned<Half>(w2 + blockOff);
-            Vector256<int> dot2 = Q5_0BlockDot(w2 + blockOff, q8Vals, q8Sum16, ones);
+            Vector256<int> dot2 = Q5_0BlockDotQ8_1(w2 + blockOff, q8Vals, ones);
             float s2 = d2 * d8;
 
             // Row 3
             float d3 = (float)Unsafe.ReadUnaligned<Half>(w3 + blockOff);
-            Vector256<int> dot3 = Q5_0BlockDot(w3 + blockOff, q8Vals, q8Sum16, ones);
+            Vector256<int> dot3 = Q5_0BlockDotQ8_1(w3 + blockOff, q8Vals, ones);
             float s3 = d3 * d8;
 
             // FMA accumulate
@@ -241,12 +395,18 @@ public static unsafe partial class MatMul
                 acc2 = Avx.Add(acc2, Avx.Multiply(Vector256.Create(s2), Avx.ConvertToVector256Single(dot2)));
                 acc3 = Avx.Add(acc3, Avx.Multiply(Vector256.Create(s3), Avx.ConvertToVector256Single(dot3)));
             }
+
+            // Accumulate offset sums: d5 * s8
+            off0 += d0 * s8;
+            off1 += d1 * s8;
+            off2 += d2 * s8;
+            off3 += d3 * s8;
         }
 
-        results[0] = HorizontalSumAvx2Float(acc0);
-        results[1] = HorizontalSumAvx2Float(acc1);
-        results[2] = HorizontalSumAvx2Float(acc2);
-        results[3] = HorizontalSumAvx2Float(acc3);
+        results[0] = HorizontalSumAvx2Float(acc0) - 16.0f * off0;
+        results[1] = HorizontalSumAvx2Float(acc1) - 16.0f * off1;
+        results[2] = HorizontalSumAvx2Float(acc2) - 16.0f * off2;
+        results[3] = HorizontalSumAvx2Float(acc3) - 16.0f * off3;
     }
 
     // ──────────────────── ComputeRows for Q5_0 ────────────────────
@@ -262,7 +422,7 @@ public static unsafe partial class MatMul
             int row = 0;
             for (; row + 3 < m; row += 4)
             {
-                VecDotQ5_0Q8_0Avx2_4Rows(
+                VecDotQ5_0Q8_1Avx2_4Rows(
                     weights + (long)row * rowBytes,
                     weights + (long)(row + 1) * rowBytes,
                     weights + (long)(row + 2) * rowBytes,
@@ -270,12 +430,12 @@ public static unsafe partial class MatMul
                     xQ8, blockCount, result + row);
             }
             for (; row < m; row++)
-                result[row] = VecDotQ5_0Q8_0Avx2(weights + (long)row * rowBytes, xQ8, blockCount);
+                result[row] = VecDotQ5_0Q8_1Avx2(weights + (long)row * rowBytes, xQ8, blockCount);
         }
         else
         {
             for (int row = 0; row < m; row++)
-                result[row] = VecDotQ5_0Q8_0Scalar(weights + (long)row * rowBytes, xQ8, blockCount);
+                result[row] = VecDotQ5_0Q8_1Scalar(weights + (long)row * rowBytes, xQ8, blockCount);
         }
     }
 
@@ -283,7 +443,7 @@ public static unsafe partial class MatMul
 
     /// <summary>
     /// Q5_0 GEMV: weights[M,K] in Q5_0 × f32 input[K] → f32 output[M].
-    /// Quantizes input to Q8_0, then uses fused Q5_0 × Q8_0 vec_dot.
+    /// Quantizes input to Q8_1, then uses fused Q5_0 × Q8_1 vec_dot.
     /// </summary>
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
@@ -293,8 +453,8 @@ public static unsafe partial class MatMul
             throw new ArgumentException(
                 $"k must be a multiple of {Q5_0GroupSize}, got {k}", nameof(k));
 
-        int blockCount = k / Q8_0GroupSize; // same group size as Q8_0
-        int xQ8Bytes = blockCount * Q8_0BlockBytes;
+        int blockCount = k / Q8_1GroupSize;
+        int xQ8Bytes = blockCount * Q8_1BlockBytes;
 
         byte[]? rented = null;
         byte* xQ8;
@@ -310,14 +470,14 @@ public static unsafe partial class MatMul
             fixed (byte* rentedPtr = rented)
             {
                 xQ8 = rentedPtr;
-                QuantizeF32ToQ8_0(x, xQ8, k);
+                QuantizeF32ToQ8_1(x, xQ8, k);
                 ComputeRowsQ5_0(weights, xQ8, result, m, blockCount);
             }
             ArrayPool<byte>.Shared.Return(rented);
             return;
         }
 
-        QuantizeF32ToQ8_0(x, xQ8, k);
+        QuantizeF32ToQ8_1(x, xQ8, k);
         ComputeRowsQ5_0(weights, xQ8, result, m, blockCount);
     }
 
@@ -335,8 +495,8 @@ public static unsafe partial class MatMul
             throw new ArgumentException(
                 $"k must be a multiple of {Q5_0GroupSize}, got {k}", nameof(k));
 
-        int blockCount = k / Q8_0GroupSize;
-        int q8RowBytes = blockCount * Q8_0BlockBytes;
+        int blockCount = k / Q8_1GroupSize;
+        int q8RowBytes = blockCount * Q8_1BlockBytes;
         int q5RowBytes = blockCount * Q5_0BlockBytes;
 
         if (n == 1)
@@ -372,7 +532,7 @@ public static unsafe partial class MatMul
         fixed (byte* inputQ8 = rented)
         {
             for (int t = 0; t < n; t++)
-                QuantizeF32ToQ8_0(b + t * k, inputQ8 + t * q8RowBytes, k);
+                QuantizeF32ToQ8_1(b + t * k, inputQ8 + t * q8RowBytes, k);
 
             int tileM = ComputeTileM(q5RowBytes);
             for (int mStart = 0; mStart < m; mStart += tileM)
@@ -405,11 +565,11 @@ public static unsafe partial class MatMul
             throw new ArgumentException(
                 $"k must be a multiple of {Q5_0GroupSize}, got {k}", nameof(k));
 
-        int blockCount = k / Q8_0GroupSize;
-        int xQ8Bytes = blockCount * Q8_0BlockBytes;
+        int blockCount = k / Q8_1GroupSize;
+        int xQ8Bytes = blockCount * Q8_1BlockBytes;
 
         byte* xQ8 = (byte*)pool.GetWorkerScratch(0, xQ8Bytes);
-        QuantizeF32ToQ8_0(x, xQ8, k);
+        QuantizeF32ToQ8_1(x, xQ8, k);
 
         var ctx = new ComputeRowsQ5_0Ctx
         {
@@ -439,7 +599,7 @@ public static unsafe partial class MatMul
         {
             if (preQuantizedInput != null)
             {
-                int blockCount = k / Q8_0GroupSize;
+                int blockCount = k / Q8_1GroupSize;
                 var ctx = new ComputeRowsQ5_0Ctx
                 {
                     Weights = weights, XQ8 = preQuantizedInput, Result = c,
@@ -454,8 +614,8 @@ public static unsafe partial class MatMul
             return;
         }
 
-        int q8BlockCount = k / Q8_0GroupSize;
-        int q8RowBytes = q8BlockCount * Q8_0BlockBytes;
+        int q8BlockCount = k / Q8_1GroupSize;
+        int q8RowBytes = q8BlockCount * Q8_1BlockBytes;
         int q5RowBytes = q8BlockCount * Q5_0BlockBytes;
         int tileM = ComputeTileM(q5RowBytes);
         int totalTiles = (m + tileM - 1) / tileM;
@@ -484,7 +644,7 @@ public static unsafe partial class MatMul
         fixed (byte* inputQ8 = rented)
         {
             for (int t = 0; t < n; t++)
-                QuantizeF32ToQ8_0(b + t * k, inputQ8 + t * q8RowBytes, k);
+                QuantizeF32ToQ8_1(b + t * k, inputQ8 + t * q8RowBytes, k);
 
             if (totalTiles < 2)
             {

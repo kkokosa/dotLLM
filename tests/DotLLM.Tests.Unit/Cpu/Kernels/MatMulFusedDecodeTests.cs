@@ -53,9 +53,9 @@ public sealed unsafe class MatMulFusedDecodeTests : IDisposable
 
     [Theory]
     [InlineData(256, 256)]
-    public void FusedDecodeGemv3_MixedQ8Family_MatchesIndividual(int m, int k)
+    public void FusedDecodeGemv3_MixedQ8_Q5_CrossFamily_MatchesIndividual(int m, int k)
     {
-        // Q=Q8_0, K/V=Q5_0 — same Q8 family
+        // Q=Q8_0, K/V=Q5_0 — cross-family (Q8_0 uses Q8_0 input, Q5_0 uses Q8_1 input)
         RunFusedDecode3Test(m, m, m, k, QuantizationType.Q8_0, QuantizationType.Q5_0, QuantizationType.Q5_0);
     }
 
@@ -297,19 +297,19 @@ public sealed unsafe class MatMulFusedDecodeTests : IDisposable
 
     private static bool IsSameQuantFamily(QuantizationType a, QuantizationType b)
     {
+        if (a == b) return true;
+
         bool aIsKQuant = a is QuantizationType.Q4_K or QuantizationType.Q5_K or QuantizationType.Q6_K;
         bool bIsKQuant = b is QuantizationType.Q4_K or QuantizationType.Q5_K or QuantizationType.Q6_K;
         if (aIsKQuant && bIsKQuant) return true;
 
-        bool aIsQ8 = a is QuantizationType.Q8_0 or QuantizationType.Q5_0;
-        bool bIsQ8 = b is QuantizationType.Q8_0 or QuantizationType.Q5_0;
-        return aIsQ8 && bIsQ8;
+        // Q8_0 and Q5_0 are no longer in the same family — Q5_0 uses Q8_1 input
+        return false;
     }
 
     private static byte* AllocPreQuant(float* input, int k, QuantizationType qt)
     {
         bool isKQuant = qt is QuantizationType.Q4_K or QuantizationType.Q5_K or QuantizationType.Q6_K;
-        bool isQ8Family = qt is QuantizationType.Q8_0 or QuantizationType.Q5_0;
 
         if (isKQuant)
         {
@@ -320,7 +320,16 @@ public sealed unsafe class MatMulFusedDecodeTests : IDisposable
             return preQuant;
         }
 
-        if (isQ8Family)
+        if (qt == QuantizationType.Q5_0)
+        {
+            int blockCount = k / Q8_0GroupSize;
+            int q8_1Bytes = blockCount * MatMul.Q8_1BlockBytes;
+            byte* preQuant = (byte*)NativeMemory.AlignedAlloc((nuint)q8_1Bytes, 64);
+            MatMul.QuantizeF32ToQ8_1(input, preQuant, k);
+            return preQuant;
+        }
+
+        if (qt == QuantizationType.Q8_0)
         {
             int blockCount = k / Q8_0GroupSize;
             int q8Bytes = blockCount * Q8_0BlockBytes;
