@@ -16,8 +16,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -25,7 +27,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import median
 
@@ -658,6 +660,67 @@ def print_comparison(results: list[EngineResult], prompt: str, max_tokens: int) 
     print()
 
 
+def _get_git_metadata() -> dict:
+    """Capture git commit, branch, and dirty state."""
+    info: dict = {"commit": "unknown", "branch": "unknown", "dirty": True}
+    try:
+        info["commit"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        info["branch"] = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        info["dirty"] = subprocess.call(
+            ["git", "diff", "--quiet"], stderr=subprocess.DEVNULL
+        ) != 0
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pass
+    return info
+
+
+def _get_system_info() -> dict:
+    """Capture system metadata (CPU, cores, RAM, OS)."""
+    info: dict = {
+        "cpu": platform.processor() or platform.machine(),
+        "cores": os.cpu_count() or 0,
+        "os": f"{platform.system()} {platform.release()}",
+    }
+    try:
+        import psutil
+        info["ram_gb"] = round(psutil.virtual_memory().total / (1024**3), 1)
+    except ImportError:
+        info["ram_gb"] = None
+    return info
+
+
+def export_results_json(
+    results: list[EngineResult],
+    path: str,
+    label: str | None,
+    prompt_size: str,
+    max_tokens: int,
+    models: list[str],
+) -> None:
+    """Export benchmark results to a structured JSON file."""
+    export = {
+        "label": label or "unlabeled",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "git": _get_git_metadata(),
+        "system": _get_system_info(),
+        "config": {
+            "prompt_size": prompt_size,
+            "max_tokens": max_tokens,
+            "models": [Path(m).name for m in models],
+        },
+        "results": [asdict(r) for r in results],
+    }
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "w") as f:
+        json.dump(export, f, indent=2)
+    print(f"[export] Results written to {dest}")
+
+
 def _find_llamacpp_bin(explicit: str | None) -> str | None:
     """Resolve llama-completion binary: explicit path > LLAMACPP_BIN env var > PATH lookup."""
     if explicit:
@@ -702,6 +765,10 @@ def main() -> int:
                         help="Path to benchmark .csproj (default: auto-detect)")
     parser.add_argument("--skip-bdn-build", action="store_true",
                         help="Skip BDN build (use existing artifacts)")
+    parser.add_argument("--export-json", type=str, default=None,
+                        help="Export structured results to JSON file")
+    parser.add_argument("--label", type=str, default=None,
+                        help="Human label for this benchmark run (used in --export-json)")
 
     args = parser.parse_args()
 
@@ -794,6 +861,17 @@ def main() -> int:
             all_results.extend(results)
 
     print_comparison(all_results, prompt, args.tokens)
+
+    if args.export_json:
+        export_results_json(
+            all_results,
+            args.export_json,
+            args.label,
+            prompt_size_label,
+            args.tokens,
+            resolved_models,
+        )
+
     return 0
 
 
