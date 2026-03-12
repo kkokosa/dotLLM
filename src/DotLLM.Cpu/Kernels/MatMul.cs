@@ -241,7 +241,10 @@ public static unsafe partial class MatMul
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
-                acc0 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+                if (Fma.IsSupported)
+                    acc0 = Fma.MultiplyAdd(Vector256.Create(dx * dw), Avx.ConvertToVector256Single(isum), acc0);
+                else
+                    acc0 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
             }
 
             // Row 1
@@ -252,7 +255,10 @@ public static unsafe partial class MatMul
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
-                acc1 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+                if (Fma.IsSupported)
+                    acc1 = Fma.MultiplyAdd(Vector256.Create(dx * dw), Avx.ConvertToVector256Single(isum), acc1);
+                else
+                    acc1 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
             }
 
             // Row 2
@@ -263,7 +269,10 @@ public static unsafe partial class MatMul
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
-                acc2 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+                if (Fma.IsSupported)
+                    acc2 = Fma.MultiplyAdd(Vector256.Create(dx * dw), Avx.ConvertToVector256Single(isum), acc2);
+                else
+                    acc2 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
             }
 
             // Row 3
@@ -274,7 +283,10 @@ public static unsafe partial class MatMul
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
-                acc3 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+                if (Fma.IsSupported)
+                    acc3 = Fma.MultiplyAdd(Vector256.Create(dx * dw), Avx.ConvertToVector256Single(isum), acc3);
+                else
+                    acc3 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
             }
         }
 
@@ -462,7 +474,10 @@ public static unsafe partial class MatMul
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
                 Vector256<float> scale = Vector256.Create(dx * dw);
-                acc0 += fsum * scale;
+                if (Fma.IsSupported)
+                    acc0 = Fma.MultiplyAdd(scale, fsum, acc0);
+                else
+                    acc0 += fsum * scale;
             }
 
             // Row 1
@@ -475,7 +490,10 @@ public static unsafe partial class MatMul
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
                 Vector256<float> scale = Vector256.Create(dx * dw);
-                acc1 += fsum * scale;
+                if (Fma.IsSupported)
+                    acc1 = Fma.MultiplyAdd(scale, fsum, acc1);
+                else
+                    acc1 += fsum * scale;
             }
 
             // Row 2
@@ -488,7 +506,10 @@ public static unsafe partial class MatMul
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
                 Vector256<float> scale = Vector256.Create(dx * dw);
-                acc2 += fsum * scale;
+                if (Fma.IsSupported)
+                    acc2 = Fma.MultiplyAdd(scale, fsum, acc2);
+                else
+                    acc2 += fsum * scale;
             }
 
             // Row 3
@@ -501,7 +522,10 @@ public static unsafe partial class MatMul
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
                 Vector256<float> scale = Vector256.Create(dx * dw);
-                acc3 += fsum * scale;
+                if (Fma.IsSupported)
+                    acc3 = Fma.MultiplyAdd(scale, fsum, acc3);
+                else
+                    acc3 += fsum * scale;
             }
         }
 

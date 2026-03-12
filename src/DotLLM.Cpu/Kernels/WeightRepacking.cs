@@ -121,6 +121,9 @@ public static unsafe class WeightRepacking
         int fullGroups = m / InterleaveFactor;
         int tailRows = m % InterleaveFactor;
 
+        if (m == 0)
+            return default;
+
         // Total size = same as original (we're just rearranging blocks)
         long totalBytes = (long)m * rowBytes;
         nint destPtr = (nint)NativeMemory.AlignedAlloc((nuint)totalBytes, 64);
