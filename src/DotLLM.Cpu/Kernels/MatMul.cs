@@ -1284,6 +1284,18 @@ public static unsafe partial class MatMul
     // ──────────────────── Outer-product tiled GEMM (R4 layout) ────────────────────
 
     /// <summary>
+    /// Converts a Half (IEEE 754 binary16) at the given pointer to float.
+    /// Extracted into a tiny helper so RyuJIT reliably emits <c>vcvtph2ps</c> (F16C) for the
+    /// <c>Half→float</c> cast. In large methods with high register pressure, the JIT may fail
+    /// to inline <c>Half.op_Explicit</c> and fall back to a software function call.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float HalfBitsToFloat(byte* ptr)
+    {
+        return (float)Unsafe.ReadUnaligned<Half>(ptr);
+    }
+
+    /// <summary>
     /// Scalar reference outer-product microkernel for Q8_0 R4 layout.
     /// Computes 4 weight rows × 3 tokens simultaneously using R4-interleaved weights.
     /// Output layout: C[token * cStride + row] for token=0..2, row=0..3.
@@ -1353,6 +1365,10 @@ public static unsafe partial class MatMul
         c[2 * cStride + 0] = acc02; c[2 * cStride + 1] = acc12; c[2 * cStride + 2] = acc22; c[2 * cStride + 3] = acc32;
     }
 
+    // TODO: Experiment with 2×3 tile (2 rows × 3 tokens): 6 acc + 6 token + 1 ones + 3 temps = 16 YMM.
+    // This would process rows in pairs instead of individually, reducing token reloads by 2×
+    // while staying within AVX2's 16 YMM register budget. Needs benchmarking.
+
     /// <summary>
     /// AVX2 outer-product microkernel for Q8_0 R4 layout.
     /// Processes 4 weight rows × 3 tokens with 12 YMM accumulators, 1 <c>ones</c>, 3 temporaries = 16 YMM.
@@ -1379,12 +1395,12 @@ public static unsafe partial class MatMul
             for (int b = 0; b < blockCount; b++)
             {
                 byte* wBlock = groupBase + b * wStride + r * Q8_0BlockBytes;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
+                float dw = HalfBitsToFloat(wBlock);
                 Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
 
                 // Token 0
                 byte* xb0 = x0 + b * Q8_0BlockBytes;
-                float dx0 = (float)Unsafe.ReadUnaligned<Half>(xb0);
+                float dx0 = HalfBitsToFloat(xb0);
                 Vector256<sbyte> vx0 = Unsafe.ReadUnaligned<Vector256<sbyte>>(xb0 + 2);
                 Vector256<sbyte> adjW0 = Avx2.Sign(vw, vx0);
                 Vector256<sbyte> absX0 = Avx2.Sign(vx0, vx0);
@@ -1396,7 +1412,7 @@ public static unsafe partial class MatMul
 
                 // Token 1
                 byte* xb1 = x1 + b * Q8_0BlockBytes;
-                float dx1 = (float)Unsafe.ReadUnaligned<Half>(xb1);
+                float dx1 = HalfBitsToFloat(xb1);
                 Vector256<sbyte> vx1 = Unsafe.ReadUnaligned<Vector256<sbyte>>(xb1 + 2);
                 Vector256<sbyte> adjW1 = Avx2.Sign(vw, vx1);
                 Vector256<sbyte> absX1 = Avx2.Sign(vx1, vx1);
@@ -1408,7 +1424,7 @@ public static unsafe partial class MatMul
 
                 // Token 2
                 byte* xb2 = x2 + b * Q8_0BlockBytes;
-                float dx2 = (float)Unsafe.ReadUnaligned<Half>(xb2);
+                float dx2 = HalfBitsToFloat(xb2);
                 Vector256<sbyte> vx2 = Unsafe.ReadUnaligned<Vector256<sbyte>>(xb2 + 2);
                 Vector256<sbyte> adjW2 = Avx2.Sign(vw, vx2);
                 Vector256<sbyte> absX2 = Avx2.Sign(vx2, vx2);
@@ -1469,8 +1485,8 @@ public static unsafe partial class MatMul
             {
                 byte* wb0 = blockBase0;
                 byte* wb1 = blockBase1;
-                float dw0 = (float)Unsafe.ReadUnaligned<Half>(wb0);
-                float dw1 = (float)Unsafe.ReadUnaligned<Half>(wb1);
+                float dw0 = HalfBitsToFloat(wb0);
+                float dw1 = HalfBitsToFloat(wb1);
                 Vector256<sbyte> vwLo = Unsafe.ReadUnaligned<Vector256<sbyte>>(wb0 + 2);
                 Vector256<sbyte> vwHi = Unsafe.ReadUnaligned<Vector256<sbyte>>(wb1 + 2);
 
@@ -1486,8 +1502,8 @@ public static unsafe partial class MatMul
             {
                 byte* wb0 = blockBase0 + Q8_0BlockBytes;
                 byte* wb1 = blockBase1 + Q8_0BlockBytes;
-                float dw0 = (float)Unsafe.ReadUnaligned<Half>(wb0);
-                float dw1 = (float)Unsafe.ReadUnaligned<Half>(wb1);
+                float dw0 = HalfBitsToFloat(wb0);
+                float dw1 = HalfBitsToFloat(wb1);
                 Vector256<sbyte> vwLo = Unsafe.ReadUnaligned<Vector256<sbyte>>(wb0 + 2);
                 Vector256<sbyte> vwHi = Unsafe.ReadUnaligned<Vector256<sbyte>>(wb1 + 2);
 
@@ -1503,8 +1519,8 @@ public static unsafe partial class MatMul
             {
                 byte* wb0 = blockBase0 + 2 * Q8_0BlockBytes;
                 byte* wb1 = blockBase1 + 2 * Q8_0BlockBytes;
-                float dw0 = (float)Unsafe.ReadUnaligned<Half>(wb0);
-                float dw1 = (float)Unsafe.ReadUnaligned<Half>(wb1);
+                float dw0 = HalfBitsToFloat(wb0);
+                float dw1 = HalfBitsToFloat(wb1);
                 Vector256<sbyte> vwLo = Unsafe.ReadUnaligned<Vector256<sbyte>>(wb0 + 2);
                 Vector256<sbyte> vwHi = Unsafe.ReadUnaligned<Vector256<sbyte>>(wb1 + 2);
 
@@ -1520,8 +1536,8 @@ public static unsafe partial class MatMul
             {
                 byte* wb0 = blockBase0 + 3 * Q8_0BlockBytes;
                 byte* wb1 = blockBase1 + 3 * Q8_0BlockBytes;
-                float dw0 = (float)Unsafe.ReadUnaligned<Half>(wb0);
-                float dw1 = (float)Unsafe.ReadUnaligned<Half>(wb1);
+                float dw0 = HalfBitsToFloat(wb0);
+                float dw1 = HalfBitsToFloat(wb1);
                 Vector256<sbyte> vwLo = Unsafe.ReadUnaligned<Vector256<sbyte>>(wb0 + 2);
                 Vector256<sbyte> vwHi = Unsafe.ReadUnaligned<Vector256<sbyte>>(wb1 + 2);
 
@@ -1584,13 +1600,17 @@ public static unsafe partial class MatMul
     {
         byte* xb0 = x + block * Q8_0BlockBytes;
         byte* xb1 = x + (block + 1) * Q8_0BlockBytes;
-        dx0 = (float)Unsafe.ReadUnaligned<Half>(xb0);
-        dx1 = (float)Unsafe.ReadUnaligned<Half>(xb1);
+        dx0 = HalfBitsToFloat(xb0);
+        dx1 = HalfBitsToFloat(xb1);
         vxLo = Unsafe.ReadUnaligned<Vector256<sbyte>>(xb0 + 2);
         vxHi = Unsafe.ReadUnaligned<Vector256<sbyte>>(xb1 + 2);
         absXLo = Avx2.Sign(vxLo, vxLo);
         absXHi = Avx2.Sign(vxHi, vxHi);
     }
+
+    // TODO: Check disasm on AVX-512 hardware — Vector512.Create(vec256, vec256) may emit
+    // unnecessary vinsertf64x4 instead of using ZMM directly. Consider manual Avx512F
+    // intrinsics if overhead is measurable.
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void Avx512DualBlockFma(
@@ -1623,14 +1643,14 @@ public static unsafe partial class MatMul
         Vector256<short> ones, float* c, int cStride, int tokenIdx)
     {
         byte* xBlock = x + block * Q8_0BlockBytes;
-        float dxt = (float)Unsafe.ReadUnaligned<Half>(xBlock);
+        float dxt = HalfBitsToFloat(xBlock);
         Vector256<sbyte> vxt = Unsafe.ReadUnaligned<Vector256<sbyte>>(xBlock + 2);
         Vector256<sbyte> absXt = Avx2.Sign(vxt, vxt);
 
         for (int r = 0; r < 4; r++)
         {
             byte* wb = blockBase + r * Q8_0BlockBytes;
-            float dw = (float)Unsafe.ReadUnaligned<Half>(wb);
+            float dw = HalfBitsToFloat(wb);
             Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wb + 2);
             Vector256<sbyte> adjW = Avx2.Sign(vw, vxt);
             Vector256<short> prod = Avx2.MultiplyAddAdjacent(absXt.AsByte(), adjW);
