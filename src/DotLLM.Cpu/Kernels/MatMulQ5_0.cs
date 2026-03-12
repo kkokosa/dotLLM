@@ -947,4 +947,325 @@ public static unsafe partial class MatMul
                     ctx.C + t * ctx.M + mStart, tileRows, ctx.BlockCount);
         }
     }
+
+    // ──────────────────── Q5_0 Outer-product GEMM (R4 layout) ────────────────────
+
+    /// <summary>
+    /// AVX2 outer-product microkernel for Q5_0 R4 layout.
+    /// Processes 4 weight rows × 3 tokens with 12 YMM accumulators + 12 scalar offsets.
+    /// Weight block is loaded once and Q5_0BlockDotQ8_1 reused across 3 tokens (3× cache reuse).
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void OuterProductQ5_0Avx2_4x3(
+        byte* groupBase, byte* x0, byte* x1, byte* x2,
+        float* c, int blockCount, int cStride)
+    {
+        const int wStride = 4 * Q5_0BlockBytes;
+
+        Vector256<float> acc00 = Vector256<float>.Zero, acc01 = Vector256<float>.Zero, acc02 = Vector256<float>.Zero;
+        Vector256<float> acc10 = Vector256<float>.Zero, acc11 = Vector256<float>.Zero, acc12 = Vector256<float>.Zero;
+        Vector256<float> acc20 = Vector256<float>.Zero, acc21 = Vector256<float>.Zero, acc22 = Vector256<float>.Zero;
+        Vector256<float> acc30 = Vector256<float>.Zero, acc31 = Vector256<float>.Zero, acc32 = Vector256<float>.Zero;
+        Vector256<short> ones = Vector256.Create((short)1);
+        // Scalar offsets for -16 correction: off[row][token]
+        float off00 = 0, off01 = 0, off02 = 0;
+        float off10 = 0, off11 = 0, off12 = 0;
+        float off20 = 0, off21 = 0, off22 = 0;
+        float off30 = 0, off31 = 0, off32 = 0;
+
+        for (int b = 0; b < blockCount; b++)
+        {
+            byte* blockBase = groupBase + b * wStride;
+
+            // Load 3 Q8_1 token blocks (shared across weight rows)
+            byte* q8b0 = x0 + b * Q8_1BlockBytes;
+            byte* q8b1 = x1 + b * Q8_1BlockBytes;
+            byte* q8b2 = x2 + b * Q8_1BlockBytes;
+            float d8_0 = (float)Unsafe.ReadUnaligned<Half>(q8b0);
+            float d8_1 = (float)Unsafe.ReadUnaligned<Half>(q8b1);
+            float d8_2 = (float)Unsafe.ReadUnaligned<Half>(q8b2);
+            float s8_0 = (float)Unsafe.ReadUnaligned<Half>(q8b0 + 2);
+            float s8_1 = (float)Unsafe.ReadUnaligned<Half>(q8b1 + 2);
+            float s8_2 = (float)Unsafe.ReadUnaligned<Half>(q8b2 + 2);
+            Vector256<sbyte> q8v0 = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8b0 + 4);
+            Vector256<sbyte> q8v1 = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8b1 + 4);
+            Vector256<sbyte> q8v2 = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8b2 + 4);
+
+            // Row 0: load weight once, compute for 3 tokens
+            {
+                byte* w = blockBase;
+                float d5 = (float)Unsafe.ReadUnaligned<Half>(w);
+
+                Vector256<int> dot0 = Q5_0BlockDotQ8_1(w, q8v0, ones);
+                if (Fma.IsSupported)
+                    acc00 = Fma.MultiplyAdd(Vector256.Create(d5 * d8_0), Avx.ConvertToVector256Single(dot0), acc00);
+                else
+                    acc00 += Avx.ConvertToVector256Single(dot0) * Vector256.Create(d5 * d8_0);
+                off00 += d5 * s8_0;
+
+                Vector256<int> dot1 = Q5_0BlockDotQ8_1(w, q8v1, ones);
+                if (Fma.IsSupported)
+                    acc01 = Fma.MultiplyAdd(Vector256.Create(d5 * d8_1), Avx.ConvertToVector256Single(dot1), acc01);
+                else
+                    acc01 += Avx.ConvertToVector256Single(dot1) * Vector256.Create(d5 * d8_1);
+                off01 += d5 * s8_1;
+
+                Vector256<int> dot2 = Q5_0BlockDotQ8_1(w, q8v2, ones);
+                if (Fma.IsSupported)
+                    acc02 = Fma.MultiplyAdd(Vector256.Create(d5 * d8_2), Avx.ConvertToVector256Single(dot2), acc02);
+                else
+                    acc02 += Avx.ConvertToVector256Single(dot2) * Vector256.Create(d5 * d8_2);
+                off02 += d5 * s8_2;
+            }
+
+            // Row 1
+            {
+                byte* w = blockBase + Q5_0BlockBytes;
+                float d5 = (float)Unsafe.ReadUnaligned<Half>(w);
+
+                Vector256<int> dot0 = Q5_0BlockDotQ8_1(w, q8v0, ones);
+                acc10 = Fma.IsSupported ? Fma.MultiplyAdd(Vector256.Create(d5 * d8_0), Avx.ConvertToVector256Single(dot0), acc10)
+                    : acc10 + Avx.ConvertToVector256Single(dot0) * Vector256.Create(d5 * d8_0);
+                off10 += d5 * s8_0;
+
+                Vector256<int> dot1 = Q5_0BlockDotQ8_1(w, q8v1, ones);
+                acc11 = Fma.IsSupported ? Fma.MultiplyAdd(Vector256.Create(d5 * d8_1), Avx.ConvertToVector256Single(dot1), acc11)
+                    : acc11 + Avx.ConvertToVector256Single(dot1) * Vector256.Create(d5 * d8_1);
+                off11 += d5 * s8_1;
+
+                Vector256<int> dot2 = Q5_0BlockDotQ8_1(w, q8v2, ones);
+                acc12 = Fma.IsSupported ? Fma.MultiplyAdd(Vector256.Create(d5 * d8_2), Avx.ConvertToVector256Single(dot2), acc12)
+                    : acc12 + Avx.ConvertToVector256Single(dot2) * Vector256.Create(d5 * d8_2);
+                off12 += d5 * s8_2;
+            }
+
+            // Row 2
+            {
+                byte* w = blockBase + 2 * Q5_0BlockBytes;
+                float d5 = (float)Unsafe.ReadUnaligned<Half>(w);
+
+                Vector256<int> dot0 = Q5_0BlockDotQ8_1(w, q8v0, ones);
+                acc20 = Fma.IsSupported ? Fma.MultiplyAdd(Vector256.Create(d5 * d8_0), Avx.ConvertToVector256Single(dot0), acc20)
+                    : acc20 + Avx.ConvertToVector256Single(dot0) * Vector256.Create(d5 * d8_0);
+                off20 += d5 * s8_0;
+
+                Vector256<int> dot1 = Q5_0BlockDotQ8_1(w, q8v1, ones);
+                acc21 = Fma.IsSupported ? Fma.MultiplyAdd(Vector256.Create(d5 * d8_1), Avx.ConvertToVector256Single(dot1), acc21)
+                    : acc21 + Avx.ConvertToVector256Single(dot1) * Vector256.Create(d5 * d8_1);
+                off21 += d5 * s8_1;
+
+                Vector256<int> dot2 = Q5_0BlockDotQ8_1(w, q8v2, ones);
+                acc22 = Fma.IsSupported ? Fma.MultiplyAdd(Vector256.Create(d5 * d8_2), Avx.ConvertToVector256Single(dot2), acc22)
+                    : acc22 + Avx.ConvertToVector256Single(dot2) * Vector256.Create(d5 * d8_2);
+                off22 += d5 * s8_2;
+            }
+
+            // Row 3
+            {
+                byte* w = blockBase + 3 * Q5_0BlockBytes;
+                float d5 = (float)Unsafe.ReadUnaligned<Half>(w);
+
+                Vector256<int> dot0 = Q5_0BlockDotQ8_1(w, q8v0, ones);
+                acc30 = Fma.IsSupported ? Fma.MultiplyAdd(Vector256.Create(d5 * d8_0), Avx.ConvertToVector256Single(dot0), acc30)
+                    : acc30 + Avx.ConvertToVector256Single(dot0) * Vector256.Create(d5 * d8_0);
+                off30 += d5 * s8_0;
+
+                Vector256<int> dot1 = Q5_0BlockDotQ8_1(w, q8v1, ones);
+                acc31 = Fma.IsSupported ? Fma.MultiplyAdd(Vector256.Create(d5 * d8_1), Avx.ConvertToVector256Single(dot1), acc31)
+                    : acc31 + Avx.ConvertToVector256Single(dot1) * Vector256.Create(d5 * d8_1);
+                off31 += d5 * s8_1;
+
+                Vector256<int> dot2 = Q5_0BlockDotQ8_1(w, q8v2, ones);
+                acc32 = Fma.IsSupported ? Fma.MultiplyAdd(Vector256.Create(d5 * d8_2), Avx.ConvertToVector256Single(dot2), acc32)
+                    : acc32 + Avx.ConvertToVector256Single(dot2) * Vector256.Create(d5 * d8_2);
+                off32 += d5 * s8_2;
+            }
+        }
+
+        c[0 * cStride + 0] = HorizontalSumAvx2Float(acc00) - 16.0f * off00;
+        c[0 * cStride + 1] = HorizontalSumAvx2Float(acc10) - 16.0f * off10;
+        c[0 * cStride + 2] = HorizontalSumAvx2Float(acc20) - 16.0f * off20;
+        c[0 * cStride + 3] = HorizontalSumAvx2Float(acc30) - 16.0f * off30;
+        c[1 * cStride + 0] = HorizontalSumAvx2Float(acc01) - 16.0f * off01;
+        c[1 * cStride + 1] = HorizontalSumAvx2Float(acc11) - 16.0f * off11;
+        c[1 * cStride + 2] = HorizontalSumAvx2Float(acc21) - 16.0f * off21;
+        c[1 * cStride + 3] = HorizontalSumAvx2Float(acc31) - 16.0f * off31;
+        c[2 * cStride + 0] = HorizontalSumAvx2Float(acc02) - 16.0f * off02;
+        c[2 * cStride + 1] = HorizontalSumAvx2Float(acc12) - 16.0f * off12;
+        c[2 * cStride + 2] = HorizontalSumAvx2Float(acc22) - 16.0f * off22;
+        c[2 * cStride + 3] = HorizontalSumAvx2Float(acc32) - 16.0f * off32;
+    }
+
+    /// <summary>
+    /// Outer-product GEMM for Q5_0 R4-interleaved weights with Q8_1 input.
+    /// Processes weight groups in steps of 4 rows and token batches of 3.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void OuterProductGemmQ5_0(byte* repackedWeights, byte* inputQ8, float* c,
+        int fullGroups, int tailRows, int blockCount, int m, int n)
+    {
+        int q8RowBytes = blockCount * Q8_1BlockBytes;
+        int groupBytes = 4 * blockCount * Q5_0BlockBytes;
+        int nFull3 = (n / 3) * 3;
+
+        for (int g = 0; g < fullGroups; g++)
+        {
+            byte* groupBase = repackedWeights + (long)g * groupBytes;
+            int baseRow = g * 4;
+            int t = 0;
+
+            if (Avx2.IsSupported)
+            {
+                for (; t < nFull3; t += 3)
+                {
+                    OuterProductQ5_0Avx2_4x3(
+                        groupBase,
+                        inputQ8 + (long)t * q8RowBytes,
+                        inputQ8 + (long)(t + 1) * q8RowBytes,
+                        inputQ8 + (long)(t + 2) * q8RowBytes,
+                        c + (long)t * m + baseRow, blockCount, m);
+                }
+                for (; t < n; t++)
+                {
+                    VecDotQ5_0Q8_1Avx2_4RowsR4(groupBase, inputQ8 + (long)t * q8RowBytes,
+                        blockCount, c + (long)t * m + baseRow);
+                }
+            }
+            else
+            {
+                for (; t < n; t++)
+                {
+                    for (int r = 0; r < 4; r++)
+                        c[(long)t * m + baseRow + r] = VecDotQ5_0Q8_1ScalarR4(
+                            groupBase, r, inputQ8 + (long)t * q8RowBytes, blockCount);
+                }
+            }
+        }
+
+        // Tail rows
+        if (tailRows > 0)
+        {
+            int rowBytes = blockCount * Q5_0BlockBytes;
+            byte* tailBase = repackedWeights + (long)fullGroups * groupBytes;
+            int baseRow = fullGroups * 4;
+
+            for (int t = 0; t < n; t++)
+            {
+                byte* xQ8 = inputQ8 + (long)t * q8RowBytes;
+                for (int r = 0; r < tailRows; r++)
+                {
+                    c[(long)t * m + baseRow + r] = Avx2.IsSupported
+                        ? VecDotQ5_0Q8_1Avx2(tailBase + (long)r * rowBytes, xQ8, blockCount)
+                        : VecDotQ5_0Q8_1Scalar(tailBase + (long)r * rowBytes, xQ8, blockCount);
+                }
+            }
+        }
+    }
+
+    /// <summary>Context for parallel outer-product Q5_0 GEMM dispatch.</summary>
+    private struct OuterProductGemmQ5Ctx
+    {
+        public byte* RepackedWeights;
+        public byte* InputQ8;
+        public float* C;
+        public int FullGroups;
+        public int TailRows;
+        public int BlockCount;
+        public int M;
+        public int N;
+    }
+
+    /// <summary>
+    /// Parallel outer-product GEMM for Q5_0 R4 weights.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void OuterProductGemmQ5_0(byte* repackedWeights, byte* inputQ8, float* c,
+        int fullGroups, int tailRows, int blockCount, int m, int n, ComputeThreadPool? pool)
+    {
+        if (pool is null || m < ParallelMinRows)
+        {
+            OuterProductGemmQ5_0(repackedWeights, inputQ8, c, fullGroups, tailRows, blockCount, m, n);
+            return;
+        }
+
+        var ctx = new OuterProductGemmQ5Ctx
+        {
+            RepackedWeights = repackedWeights, InputQ8 = inputQ8, C = c,
+            FullGroups = fullGroups, TailRows = tailRows,
+            BlockCount = blockCount, M = m, N = n
+        };
+        pool.Dispatch((nint)(&ctx), &OuterProductGemmQ5_0Worker);
+    }
+
+    private static void OuterProductGemmQ5_0Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<OuterProductGemmQ5Ctx>((void*)ctxPtr);
+
+        int totalGroups = ctx.FullGroups + (ctx.TailRows > 0 ? 1 : 0);
+        int groupsPerThread = (totalGroups + threadCount - 1) / threadCount;
+        int startGroup = threadIdx * groupsPerThread;
+        int endGroup = Math.Min(startGroup + groupsPerThread, totalGroups);
+
+        if (startGroup >= totalGroups) return;
+
+        int q8RowBytes = ctx.BlockCount * Q8_1BlockBytes;
+        int groupBytes = 4 * ctx.BlockCount * Q5_0BlockBytes;
+        int nFull3 = (ctx.N / 3) * 3;
+
+        for (int g = startGroup; g < endGroup; g++)
+        {
+            if (g < ctx.FullGroups)
+            {
+                byte* groupBase = ctx.RepackedWeights + (long)g * groupBytes;
+                int baseRow = g * 4;
+                int t = 0;
+
+                if (Avx2.IsSupported)
+                {
+                    for (; t < nFull3; t += 3)
+                    {
+                        OuterProductQ5_0Avx2_4x3(
+                            groupBase,
+                            ctx.InputQ8 + (long)t * q8RowBytes,
+                            ctx.InputQ8 + (long)(t + 1) * q8RowBytes,
+                            ctx.InputQ8 + (long)(t + 2) * q8RowBytes,
+                            ctx.C + (long)t * ctx.M + baseRow, ctx.BlockCount, ctx.M);
+                    }
+                    for (; t < ctx.N; t++)
+                    {
+                        VecDotQ5_0Q8_1Avx2_4RowsR4(groupBase, ctx.InputQ8 + (long)t * q8RowBytes,
+                            ctx.BlockCount, ctx.C + (long)t * ctx.M + baseRow);
+                    }
+                }
+                else
+                {
+                    for (; t < ctx.N; t++)
+                    {
+                        for (int r = 0; r < 4; r++)
+                            ctx.C[(long)t * ctx.M + baseRow + r] = VecDotQ5_0Q8_1ScalarR4(
+                                groupBase, r, ctx.InputQ8 + (long)t * q8RowBytes, ctx.BlockCount);
+                    }
+                }
+            }
+            else
+            {
+                byte* tailBase = ctx.RepackedWeights + (long)ctx.FullGroups * groupBytes;
+                int baseRow = ctx.FullGroups * 4;
+                int rowBytes = ctx.BlockCount * Q5_0BlockBytes;
+                for (int t = 0; t < ctx.N; t++)
+                {
+                    byte* xQ8 = ctx.InputQ8 + (long)t * q8RowBytes;
+                    for (int r = 0; r < ctx.TailRows; r++)
+                    {
+                        ctx.C[(long)t * ctx.M + baseRow + r] = Avx2.IsSupported
+                            ? VecDotQ5_0Q8_1Avx2(tailBase + (long)r * rowBytes, xQ8, ctx.BlockCount)
+                            : VecDotQ5_0Q8_1Scalar(tailBase + (long)r * rowBytes, xQ8, ctx.BlockCount);
+                    }
+                }
+            }
+        }
+    }
 }

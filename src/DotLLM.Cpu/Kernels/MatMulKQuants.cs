@@ -1933,4 +1933,138 @@ public static unsafe partial class MatMul
                     ctx.C + t * ctx.M + mStart, tileRows, ctx.SuperBlockCount);
         }
     }
+
+    // ──────────────────── K-Quant Outer-product GEMM (R4 layout) ────────────────────
+
+    /// <summary>
+    /// Outer-product GEMM for K-quant R4-interleaved weights.
+    /// Iterates R4 groups and processes all tokens per group, keeping each group's data
+    /// hot in L2 cache while processing multiple tokens. Uses existing per-format
+    /// interleaved ComputeRows kernels (which internally call 4-row VecDot).
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void OuterProductGemmKQuant(byte* repackedWeights, byte* inputQ8K, float* c,
+        int fullGroups, int tailRows, int superBlockCount, int m, int n,
+        int blockBytes,
+        delegate* managed<byte*, byte*, float*, int, int, int, void> computeRowsInterleaved)
+    {
+        int q8kRowBytes = superBlockCount * Q8_K_BlockBytes;
+
+        // Process each R4 group against all N tokens before moving to next group
+        // This keeps the R4 group data hot in cache for all token passes
+        for (int t = 0; t < n; t++)
+        {
+            byte* xQ8K = inputQ8K + (long)t * q8kRowBytes;
+            computeRowsInterleaved(repackedWeights, xQ8K, c + (long)t * m,
+                fullGroups, tailRows, superBlockCount);
+        }
+    }
+
+    /// <summary>Context for parallel outer-product K-quant GEMM dispatch.</summary>
+    private struct OuterProductGemmKQuantCtx
+    {
+        public byte* RepackedWeights;
+        public byte* InputQ8K;
+        public float* C;
+        public int FullGroups;
+        public int TailRows;
+        public int SuperBlockCount;
+        public int M;
+        public int N;
+        public int BlockBytes;
+        public delegate* managed<byte*, byte*, float*, int, int, int, void> ComputeRowsInterleaved;
+    }
+
+    /// <summary>
+    /// Parallel outer-product GEMM for K-quant R4 weights.
+    /// For K-quants, we parallelize by partitioning tokens across threads,
+    /// each processing the full weight matrix for their token subset.
+    /// This avoids the complexity of partitioning R4 groups with K-quant's
+    /// multi-super-block structure while maintaining good parallelism.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void OuterProductGemmKQuant(byte* repackedWeights, byte* inputQ8K, float* c,
+        int fullGroups, int tailRows, int superBlockCount, int m, int n,
+        int blockBytes,
+        delegate* managed<byte*, byte*, float*, int, int, int, void> computeRowsInterleaved,
+        ComputeThreadPool? pool)
+    {
+        if (pool is null || m < ParallelMinRows)
+        {
+            OuterProductGemmKQuant(repackedWeights, inputQ8K, c, fullGroups, tailRows,
+                superBlockCount, m, n, blockBytes, computeRowsInterleaved);
+            return;
+        }
+
+        var ctx = new OuterProductGemmKQuantCtx
+        {
+            RepackedWeights = repackedWeights, InputQ8K = inputQ8K, C = c,
+            FullGroups = fullGroups, TailRows = tailRows,
+            SuperBlockCount = superBlockCount, M = m, N = n,
+            BlockBytes = blockBytes, ComputeRowsInterleaved = computeRowsInterleaved
+        };
+        pool.Dispatch((nint)(&ctx), &OuterProductGemmKQuantWorker);
+    }
+
+    private static void OuterProductGemmKQuantWorker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<OuterProductGemmKQuantCtx>((void*)ctxPtr);
+
+        // Partition tokens across threads
+        int tokensPerThread = (ctx.N + threadCount - 1) / threadCount;
+        int startToken = threadIdx * tokensPerThread;
+        int endToken = Math.Min(startToken + tokensPerThread, ctx.N);
+
+        if (startToken >= ctx.N) return;
+
+        int q8kRowBytes = ctx.SuperBlockCount * Q8_K_BlockBytes;
+
+        for (int t = startToken; t < endToken; t++)
+        {
+            byte* xQ8K = ctx.InputQ8K + (long)t * q8kRowBytes;
+            ctx.ComputeRowsInterleaved(ctx.RepackedWeights, xQ8K, ctx.C + (long)t * ctx.M,
+                ctx.FullGroups, ctx.TailRows, ctx.SuperBlockCount);
+        }
+    }
+
+    /// <summary>
+    /// Wrapper for Q4_K outer-product GEMM that dispatches to interleaved ComputeRows.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void OuterProductGemmQ4_K(byte* repackedWeights, byte* inputQ8K, float* c,
+        int fullGroups, int tailRows, int superBlockCount, int m, int n, ComputeThreadPool? pool)
+    {
+        OuterProductGemmKQuant(repackedWeights, inputQ8K, c, fullGroups, tailRows,
+            superBlockCount, m, n, Q4_K_BlockBytes,
+            &ComputeRowsQ4_KInterleaved, pool);
+    }
+
+    /// <summary>
+    /// Wrapper for Q5_K outer-product GEMM that dispatches to interleaved ComputeRows.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void OuterProductGemmQ5_K(byte* repackedWeights, byte* inputQ8K, float* c,
+        int fullGroups, int tailRows, int superBlockCount, int m, int n, ComputeThreadPool? pool)
+    {
+        OuterProductGemmKQuant(repackedWeights, inputQ8K, c, fullGroups, tailRows,
+            superBlockCount, m, n, Q5_K_BlockBytes,
+            &ComputeRowsQ5_KInterleaved, pool);
+    }
+
+    /// <summary>
+    /// Wrapper for Q6_K outer-product GEMM that dispatches to interleaved ComputeRows.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void OuterProductGemmQ6_K(byte* repackedWeights, byte* inputQ8K, float* c,
+        int fullGroups, int tailRows, int superBlockCount, int m, int n, ComputeThreadPool? pool)
+    {
+        OuterProductGemmKQuant(repackedWeights, inputQ8K, c, fullGroups, tailRows,
+            superBlockCount, m, n, Q6_K_BlockBytes,
+            &ComputeRowsQ6_KInterleaved, pool);
+    }
 }
