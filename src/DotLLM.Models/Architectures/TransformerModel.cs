@@ -541,125 +541,31 @@ public sealed unsafe class TransformerModel : IModel
 
     /// <summary>
     /// GEMM using R4-interleaved repacked weights. For single-token (n=1) uses interleaved ComputeRows.
-    /// Multi-token (n&gt;1) uses outer-product tiled GEMM for 3-5× prefill speedup.
+    /// Multi-token (n&gt;1) falls back to original Gemm — outer-product microkernels don't win on AVX2
+    /// due to RyuJIT register pressure (12 YMM accumulators spill with only 16 registers available).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void GemmInterleaved(nint origWeights, QuantizationType qt, float* b, float* c,
                                  int m, int k, int n, byte* preQuantizedInput,
                                  in WeightRepacking.RepackedWeight rw)
     {
-        if (rw.Ptr == 0 || rw.RowBytes < InterleavedMinRowBytes)
+        if (rw.Ptr == 0 || n > 1 || rw.RowBytes < InterleavedMinRowBytes)
         {
-            // No repacked weights or small row stride: use original path
+            // Multi-token or small row stride: use original tiled GEMM path
             Gemm(origWeights, qt, b, c, m, k, n, preQuantizedInput);
             return;
         }
 
-        if (n == 1)
+        // Single-token with pre-quantized input: use interleaved ComputeRows directly
+        if (preQuantizedInput != null)
         {
-            // Single-token with pre-quantized input: use interleaved ComputeRows directly
-            if (preQuantizedInput != null)
-            {
-                DispatchInterleavedComputeRows(qt, (byte*)rw.Ptr, preQuantizedInput, c,
-                    rw.FullGroupCount, rw.TailRows, k);
-                return;
-            }
-
-            // Single-token without pre-quantized: quantize + interleaved dispatch
-            GemvInterleaved(origWeights, qt, b, c, m, k, in rw);
+            DispatchInterleavedComputeRows(qt, (byte*)rw.Ptr, preQuantizedInput, c,
+                rw.FullGroupCount, rw.TailRows, k);
             return;
         }
 
-        // Multi-token: outer-product tiled GEMM
-        DispatchOuterProductGemm(origWeights, qt, b, c, m, k, n, preQuantizedInput, in rw);
-    }
-
-    /// <summary>
-    /// Dispatches outer-product GEMM for multi-token (n&gt;1) using R4 interleaved weights.
-    /// Quantizes input if needed, then calls the outer-product GEMM kernel.
-    /// Currently supports Q8_0; other types fall back to non-interleaved Gemm.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void DispatchOuterProductGemm(nint origWeights, QuantizationType qt, float* b, float* c,
-                                          int m, int k, int n, byte* preQuantizedInput,
-                                          in WeightRepacking.RepackedWeight rw)
-    {
-        if (qt == QuantizationType.Q8_0)
-        {
-            int blockCount = k / Q8_0GroupSize;
-            int q8RowBytes = blockCount * Q8_0BlockBytes;
-
-            if (preQuantizedInput != null)
-            {
-                MatMul.OuterProductGemmQ8_0((byte*)rw.Ptr, preQuantizedInput, c,
-                    rw.FullGroupCount, rw.TailRows, blockCount, m, n, _threadPool);
-                return;
-            }
-
-            // Quantize all input rows then dispatch
-            byte* scratch = (byte*)_state.InputQ8Scratch;
-            int totalQ8Bytes = n * q8RowBytes;
-            byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(totalQ8Bytes);
-            fixed (byte* rentedPtr = rented)
-            {
-                for (int t = 0; t < n; t++)
-                    MatMul.QuantizeF32ToQ8_0(b + t * k, rentedPtr + t * q8RowBytes, k);
-
-                MatMul.OuterProductGemmQ8_0((byte*)rw.Ptr, rentedPtr, c,
-                    rw.FullGroupCount, rw.TailRows, blockCount, m, n, _threadPool);
-            }
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
-            return;
-        }
-
-        if (qt == QuantizationType.Q5_0)
-        {
-            int blockCount = k / Q8_0GroupSize; // Q5_0 and Q8_1 share 32-element group size
-            int q8_1RowBytes = blockCount * MatMul.Q8_1BlockBytes;
-
-            if (preQuantizedInput != null)
-            {
-                MatMul.OuterProductGemmQ5_0((byte*)rw.Ptr, preQuantizedInput, c,
-                    rw.FullGroupCount, rw.TailRows, blockCount, m, n, _threadPool);
-                return;
-            }
-
-            int totalQ8Bytes = n * q8_1RowBytes;
-            byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(totalQ8Bytes);
-            fixed (byte* rentedPtr = rented)
-            {
-                for (int t = 0; t < n; t++)
-                    MatMul.QuantizeF32ToQ8_1(b + t * k, rentedPtr + t * q8_1RowBytes, k);
-
-                MatMul.OuterProductGemmQ5_0((byte*)rw.Ptr, rentedPtr, c,
-                    rw.FullGroupCount, rw.TailRows, blockCount, m, n, _threadPool);
-            }
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
-            return;
-        }
-
-        // K-quant types (Q4_K, Q5_K, Q6_K): no true outer-product microkernels yet —
-        // the per-token dispatch is slower than the existing tiled GEMM path.
-        // Fall back to non-interleaved Gemm for multi-token until dedicated
-        // K-quant outer-product microkernels are implemented.
-
-        // Other quant types: fall back to non-interleaved Gemm
-        Gemm(origWeights, qt, b, c, m, k, n, preQuantizedInput);
-    }
-
-    /// <summary>
-    /// Dispatches K-quant outer-product GEMM by quant type.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void DispatchKQuantOuterProduct(QuantizationType qt, byte* repackedWeights,
-        byte* inputQ8K, float* c, int fullGroups, int tailRows, int superBlockCount, int m, int n)
-    {
-        if (qt == QuantizationType.Q4_K)
-            MatMul.OuterProductGemmQ4_K(repackedWeights, inputQ8K, c, fullGroups, tailRows, superBlockCount, m, n, _threadPool);
-        else if (qt == QuantizationType.Q5_K)
-            MatMul.OuterProductGemmQ5_K(repackedWeights, inputQ8K, c, fullGroups, tailRows, superBlockCount, m, n, _threadPool);
-        else
-            MatMul.OuterProductGemmQ6_K(repackedWeights, inputQ8K, c, fullGroups, tailRows, superBlockCount, m, n, _threadPool);
+        // Single-token without pre-quantized: quantize + interleaved dispatch
+        GemvInterleaved(origWeights, qt, b, c, m, k, in rw);
     }
 
     /// <summary>

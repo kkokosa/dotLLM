@@ -87,7 +87,6 @@ There is no NuGet package yet — the project is in early development. Follow th
 
 ## News
 
-- **2026-03** — Outer-product tiled matmul: 4×3 (AVX2) and 4×6 (AVX-512) register-tiled GEMM microkernels for Q8_0 and Q5_0, weight-block reuse across tokens for 3-5× prefill speedup, K-quant token-tiled dispatch ([#53](https://github.com/kkokosa/dotLLM/issues/53))
 - **2026-03** — Row-interleaved weight repacking: R4 layout stores 4 consecutive rows' blocks contiguously at model load time, improving cache/TLB locality for all quantized GEMV kernels ([#52](https://github.com/kkokosa/dotLLM/issues/52))
 - **2026-03** — Q8_1 input quantization: precomputed block sums for Q5_0 kernels, 2-block loop unrolling, eliminates ~4 SIMD ops/block from Q5_0 vec_dot hot path ([#51](https://github.com/kkokosa/dotLLM/issues/51))
 - **2026-03** — Fused decode dispatch: Q/K/V (3→1) and Gate/Up (2→1) projection fusion saves ~72 dispatches/layer, ~4% decode throughput improvement ([#50](https://github.com/kkokosa/dotLLM/issues/50))
@@ -111,7 +110,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 |-------|-------------|--------|
 | **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | Done (9/9) |
 | **2 — Practical Local Inference** | Engine metrics, benchmarks, Q4_K_M, chat templates, streaming, multi-threading, more architectures | Done (10/10) |
-| **3 — CPU Performance** | Decode dispatch, Q8_1 input, weight repacking, outer-product GEMM, tiled attention, fast exp, fusion, NUMA | In Progress (4/8) |
+| **3 — CPU Performance** | Decode dispatch, Q8_1 input, weight repacking, outer-product GEMM, tiled attention, fast exp, fusion, NUMA | In Progress (3/8) |
 | **4 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Planned |
 | **5 — Constrained Decoding & API** | JSON mode, JSON Schema, regex/CFG, tool calling, logit bias, OpenAI API server | Planned |
 | **6 — Production Serving** | Continuous batching, paged KV-cache, prompt caching, speculative decoding, metrics | Planned |

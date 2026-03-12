@@ -1365,161 +1365,64 @@ public static unsafe partial class MatMul
         float* c, int blockCount, int cStride)
     {
         const int wStride = 4 * Q8_0BlockBytes;
-
-        // 12 accumulators: acc[row][token]
-        Vector256<float> acc00 = Vector256<float>.Zero, acc01 = Vector256<float>.Zero, acc02 = Vector256<float>.Zero;
-        Vector256<float> acc10 = Vector256<float>.Zero, acc11 = Vector256<float>.Zero, acc12 = Vector256<float>.Zero;
-        Vector256<float> acc20 = Vector256<float>.Zero, acc21 = Vector256<float>.Zero, acc22 = Vector256<float>.Zero;
-        Vector256<float> acc30 = Vector256<float>.Zero, acc31 = Vector256<float>.Zero, acc32 = Vector256<float>.Zero;
         Vector256<short> ones = Vector256.Create((short)1);
 
-        for (int b = 0; b < blockCount; b++)
+        // Process one weight row at a time with only 3 accumulators (one per token).
+        // This keeps register pressure at ~10 YMM (3 acc + 1 ones + 3 vx + 1 absX + 1 vw + 1 temp),
+        // well within the 16 YMM budget. Token blocks are reloaded per row but hit L1 cache.
+        for (int r = 0; r < 4; r++)
         {
-            byte* blockBase = groupBase + b * wStride;
-            byte* x0Block = x0 + b * Q8_0BlockBytes;
-            byte* x1Block = x1 + b * Q8_0BlockBytes;
-            byte* x2Block = x2 + b * Q8_0BlockBytes;
+            Vector256<float> a0 = Vector256<float>.Zero;
+            Vector256<float> a1 = Vector256<float>.Zero;
+            Vector256<float> a2 = Vector256<float>.Zero;
 
-            // Load 3 token vectors and scales
-            float dx0 = (float)Unsafe.ReadUnaligned<Half>(x0Block);
-            float dx1 = (float)Unsafe.ReadUnaligned<Half>(x1Block);
-            float dx2 = (float)Unsafe.ReadUnaligned<Half>(x2Block);
-            Vector256<sbyte> vx0 = Unsafe.ReadUnaligned<Vector256<sbyte>>(x0Block + 2);
-            Vector256<sbyte> vx1 = Unsafe.ReadUnaligned<Vector256<sbyte>>(x1Block + 2);
-            Vector256<sbyte> vx2 = Unsafe.ReadUnaligned<Vector256<sbyte>>(x2Block + 2);
-            Vector256<sbyte> absX0 = Avx2.Sign(vx0, vx0);
-            Vector256<sbyte> absX1 = Avx2.Sign(vx1, vx1);
-            Vector256<sbyte> absX2 = Avx2.Sign(vx2, vx2);
-
-            // Row 0: load weight once, compute for 3 tokens
+            for (int b = 0; b < blockCount; b++)
             {
-                byte* wBlock = blockBase;
+                byte* wBlock = groupBase + b * wStride + r * Q8_0BlockBytes;
                 float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
                 Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
 
                 // Token 0
+                byte* xb0 = x0 + b * Q8_0BlockBytes;
+                float dx0 = (float)Unsafe.ReadUnaligned<Half>(xb0);
+                Vector256<sbyte> vx0 = Unsafe.ReadUnaligned<Vector256<sbyte>>(xb0 + 2);
                 Vector256<sbyte> adjW0 = Avx2.Sign(vw, vx0);
+                Vector256<sbyte> absX0 = Avx2.Sign(vx0, vx0);
                 Vector256<short> prod0 = Avx2.MultiplyAddAdjacent(absX0.AsByte(), adjW0);
                 Vector256<int> isum0 = Avx2.MultiplyAddAdjacent(prod0, ones);
-                acc00 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx0 * dw), Avx.ConvertToVector256Single(isum0), acc00)
-                    : acc00 + Avx.ConvertToVector256Single(isum0) * Vector256.Create(dx0 * dw);
+                a0 = Fma.IsSupported
+                    ? Fma.MultiplyAdd(Vector256.Create(dx0 * dw), Avx.ConvertToVector256Single(isum0), a0)
+                    : a0 + Avx.ConvertToVector256Single(isum0) * Vector256.Create(dx0 * dw);
 
                 // Token 1
+                byte* xb1 = x1 + b * Q8_0BlockBytes;
+                float dx1 = (float)Unsafe.ReadUnaligned<Half>(xb1);
+                Vector256<sbyte> vx1 = Unsafe.ReadUnaligned<Vector256<sbyte>>(xb1 + 2);
                 Vector256<sbyte> adjW1 = Avx2.Sign(vw, vx1);
+                Vector256<sbyte> absX1 = Avx2.Sign(vx1, vx1);
                 Vector256<short> prod1 = Avx2.MultiplyAddAdjacent(absX1.AsByte(), adjW1);
                 Vector256<int> isum1 = Avx2.MultiplyAddAdjacent(prod1, ones);
-                acc01 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx1 * dw), Avx.ConvertToVector256Single(isum1), acc01)
-                    : acc01 + Avx.ConvertToVector256Single(isum1) * Vector256.Create(dx1 * dw);
+                a1 = Fma.IsSupported
+                    ? Fma.MultiplyAdd(Vector256.Create(dx1 * dw), Avx.ConvertToVector256Single(isum1), a1)
+                    : a1 + Avx.ConvertToVector256Single(isum1) * Vector256.Create(dx1 * dw);
 
                 // Token 2
+                byte* xb2 = x2 + b * Q8_0BlockBytes;
+                float dx2 = (float)Unsafe.ReadUnaligned<Half>(xb2);
+                Vector256<sbyte> vx2 = Unsafe.ReadUnaligned<Vector256<sbyte>>(xb2 + 2);
                 Vector256<sbyte> adjW2 = Avx2.Sign(vw, vx2);
+                Vector256<sbyte> absX2 = Avx2.Sign(vx2, vx2);
                 Vector256<short> prod2 = Avx2.MultiplyAddAdjacent(absX2.AsByte(), adjW2);
                 Vector256<int> isum2 = Avx2.MultiplyAddAdjacent(prod2, ones);
-                acc02 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx2 * dw), Avx.ConvertToVector256Single(isum2), acc02)
-                    : acc02 + Avx.ConvertToVector256Single(isum2) * Vector256.Create(dx2 * dw);
+                a2 = Fma.IsSupported
+                    ? Fma.MultiplyAdd(Vector256.Create(dx2 * dw), Avx.ConvertToVector256Single(isum2), a2)
+                    : a2 + Avx.ConvertToVector256Single(isum2) * Vector256.Create(dx2 * dw);
             }
 
-            // Row 1
-            {
-                byte* wBlock = blockBase + Q8_0BlockBytes;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
-                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
-
-                Vector256<sbyte> adjW0 = Avx2.Sign(vw, vx0);
-                Vector256<short> prod0 = Avx2.MultiplyAddAdjacent(absX0.AsByte(), adjW0);
-                Vector256<int> isum0 = Avx2.MultiplyAddAdjacent(prod0, ones);
-                acc10 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx0 * dw), Avx.ConvertToVector256Single(isum0), acc10)
-                    : acc10 + Avx.ConvertToVector256Single(isum0) * Vector256.Create(dx0 * dw);
-
-                Vector256<sbyte> adjW1 = Avx2.Sign(vw, vx1);
-                Vector256<short> prod1 = Avx2.MultiplyAddAdjacent(absX1.AsByte(), adjW1);
-                Vector256<int> isum1 = Avx2.MultiplyAddAdjacent(prod1, ones);
-                acc11 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx1 * dw), Avx.ConvertToVector256Single(isum1), acc11)
-                    : acc11 + Avx.ConvertToVector256Single(isum1) * Vector256.Create(dx1 * dw);
-
-                Vector256<sbyte> adjW2 = Avx2.Sign(vw, vx2);
-                Vector256<short> prod2 = Avx2.MultiplyAddAdjacent(absX2.AsByte(), adjW2);
-                Vector256<int> isum2 = Avx2.MultiplyAddAdjacent(prod2, ones);
-                acc12 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx2 * dw), Avx.ConvertToVector256Single(isum2), acc12)
-                    : acc12 + Avx.ConvertToVector256Single(isum2) * Vector256.Create(dx2 * dw);
-            }
-
-            // Row 2
-            {
-                byte* wBlock = blockBase + 2 * Q8_0BlockBytes;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
-                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
-
-                Vector256<sbyte> adjW0 = Avx2.Sign(vw, vx0);
-                Vector256<short> prod0 = Avx2.MultiplyAddAdjacent(absX0.AsByte(), adjW0);
-                Vector256<int> isum0 = Avx2.MultiplyAddAdjacent(prod0, ones);
-                acc20 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx0 * dw), Avx.ConvertToVector256Single(isum0), acc20)
-                    : acc20 + Avx.ConvertToVector256Single(isum0) * Vector256.Create(dx0 * dw);
-
-                Vector256<sbyte> adjW1 = Avx2.Sign(vw, vx1);
-                Vector256<short> prod1 = Avx2.MultiplyAddAdjacent(absX1.AsByte(), adjW1);
-                Vector256<int> isum1 = Avx2.MultiplyAddAdjacent(prod1, ones);
-                acc21 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx1 * dw), Avx.ConvertToVector256Single(isum1), acc21)
-                    : acc21 + Avx.ConvertToVector256Single(isum1) * Vector256.Create(dx1 * dw);
-
-                Vector256<sbyte> adjW2 = Avx2.Sign(vw, vx2);
-                Vector256<short> prod2 = Avx2.MultiplyAddAdjacent(absX2.AsByte(), adjW2);
-                Vector256<int> isum2 = Avx2.MultiplyAddAdjacent(prod2, ones);
-                acc22 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx2 * dw), Avx.ConvertToVector256Single(isum2), acc22)
-                    : acc22 + Avx.ConvertToVector256Single(isum2) * Vector256.Create(dx2 * dw);
-            }
-
-            // Row 3
-            {
-                byte* wBlock = blockBase + 3 * Q8_0BlockBytes;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
-                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
-
-                Vector256<sbyte> adjW0 = Avx2.Sign(vw, vx0);
-                Vector256<short> prod0 = Avx2.MultiplyAddAdjacent(absX0.AsByte(), adjW0);
-                Vector256<int> isum0 = Avx2.MultiplyAddAdjacent(prod0, ones);
-                acc30 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx0 * dw), Avx.ConvertToVector256Single(isum0), acc30)
-                    : acc30 + Avx.ConvertToVector256Single(isum0) * Vector256.Create(dx0 * dw);
-
-                Vector256<sbyte> adjW1 = Avx2.Sign(vw, vx1);
-                Vector256<short> prod1 = Avx2.MultiplyAddAdjacent(absX1.AsByte(), adjW1);
-                Vector256<int> isum1 = Avx2.MultiplyAddAdjacent(prod1, ones);
-                acc31 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx1 * dw), Avx.ConvertToVector256Single(isum1), acc31)
-                    : acc31 + Avx.ConvertToVector256Single(isum1) * Vector256.Create(dx1 * dw);
-
-                Vector256<sbyte> adjW2 = Avx2.Sign(vw, vx2);
-                Vector256<short> prod2 = Avx2.MultiplyAddAdjacent(absX2.AsByte(), adjW2);
-                Vector256<int> isum2 = Avx2.MultiplyAddAdjacent(prod2, ones);
-                acc32 = Fma.IsSupported
-                    ? Fma.MultiplyAdd(Vector256.Create(dx2 * dw), Avx.ConvertToVector256Single(isum2), acc32)
-                    : acc32 + Avx.ConvertToVector256Single(isum2) * Vector256.Create(dx2 * dw);
-            }
+            c[0 * cStride + r] = HorizontalSumAvx2Float(a0);
+            c[1 * cStride + r] = HorizontalSumAvx2Float(a1);
+            c[2 * cStride + r] = HorizontalSumAvx2Float(a2);
         }
-
-        // Horizontal sums → store to output
-        c[0 * cStride + 0] = HorizontalSumAvx2Float(acc00);
-        c[0 * cStride + 1] = HorizontalSumAvx2Float(acc10);
-        c[0 * cStride + 2] = HorizontalSumAvx2Float(acc20);
-        c[0 * cStride + 3] = HorizontalSumAvx2Float(acc30);
-        c[1 * cStride + 0] = HorizontalSumAvx2Float(acc01);
-        c[1 * cStride + 1] = HorizontalSumAvx2Float(acc11);
-        c[1 * cStride + 2] = HorizontalSumAvx2Float(acc21);
-        c[1 * cStride + 3] = HorizontalSumAvx2Float(acc31);
-        c[2 * cStride + 0] = HorizontalSumAvx2Float(acc02);
-        c[2 * cStride + 1] = HorizontalSumAvx2Float(acc12);
-        c[2 * cStride + 2] = HorizontalSumAvx2Float(acc22);
-        c[2 * cStride + 3] = HorizontalSumAvx2Float(acc32);
     }
 
     /// <summary>
