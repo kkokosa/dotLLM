@@ -11,7 +11,12 @@ namespace DotLLM.Tests.Unit.Cpu.Kernels;
 /// </summary>
 public sealed class TiledAttentionTests
 {
-    private const float Tolerance = 1e-4f;
+    /// <summary>
+    /// Tolerance widened from 1e-4 to 2e-2 to account for fast approximate exp (Schraudolph)
+    /// used in attention softmax. Individual exp values have ≤5% relative error, which propagates
+    /// through softmax normalization and value weighting. Scalar reference uses MathF.Exp.
+    /// </summary>
+    private const float Tolerance = 2e-2f;
 
     [Fact]
     public void TiledMatchesScalar_ShortSequence()

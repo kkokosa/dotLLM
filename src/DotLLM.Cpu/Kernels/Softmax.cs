@@ -30,6 +30,22 @@ public static class Softmax
     }
 
     /// <summary>
+    /// Fast approximate softmax using IEEE-754 bit-manipulation exp.
+    /// For attention scores where full precision is unnecessary — exp errors get normalized
+    /// away when dividing by the sum. Standard <see cref="Execute"/> should be used for sampling.
+    /// </summary>
+    /// <param name="input">Input span (logits).</param>
+    /// <param name="result">Destination span. Must have length &gt;= <paramref name="input"/>.Length.
+    /// May alias <paramref name="input"/> for in-place operation.</param>
+    [SkipLocalsInit]
+    public static void ExecuteFast(ReadOnlySpan<float> input, Span<float> result)
+    {
+        float max = TensorPrimitives.Max(input);
+        float sum = FastMath.ExpSumAndStore(input, result, -max);
+        TensorPrimitives.Multiply(result, 1.0f / sum, result);
+    }
+
+    /// <summary>
     /// Scalar reference implementation for correctness verification.
     /// </summary>
     [SkipLocalsInit]

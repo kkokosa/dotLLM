@@ -110,11 +110,11 @@ public static class Attention
             // 2. Apply causal mask
             ApplyCausalMask(scores, seqQ, seqKv, positionOffset, slidingWindowSize);
 
-            // 3. Softmax per row
+            // 3. Fast softmax per row (approximate exp — sufficient for attention)
             for (int i = 0; i < seqQ; i++)
             {
                 var row = scores.Slice(i * seqKv, seqKv);
-                Softmax.Execute(row, row);
+                Softmax.ExecuteFast(row, row);
             }
 
             // 4. Weighted sum: weights @ V_kvH → output_h
@@ -297,7 +297,7 @@ public static class Attention
             for (int i = 0; i < ctx.SeqQ; i++)
             {
                 var row = scoresSpan.Slice(i * ctx.SeqKv, ctx.SeqKv);
-                Softmax.Execute(row, row);
+                Softmax.ExecuteFast(row, row);
             }
 
             WeightedValues(scoresSpan, vSpan, outSpan, ctx.SeqQ, ctx.SeqKv, ctx.HeadDim,
@@ -399,7 +399,7 @@ public static class Attention
 
                 float tileMax = TensorPrimitives.Max(scores);
                 float newMax = MathF.Max(maxSoFar, tileMax);
-                float correction = MathF.Exp(maxSoFar - newMax);
+                float correction = FastMath.FastExp(maxSoFar - newMax);
 
                 if (correction < 1f)
                 {
@@ -407,9 +407,7 @@ public static class Attention
                     TensorPrimitives.Multiply(outRow, correction, outRow);
                 }
 
-                TensorPrimitives.Add(scores, -newMax, scores);
-                TensorPrimitives.Exp(scores, scores);
-                sumExp += TensorPrimitives.Sum(scores);
+                sumExp += FastMath.ExpSumAndStore(scores, scores, -newMax);
 
                 for (int j = 0; j < tileLen; j++)
                 {
