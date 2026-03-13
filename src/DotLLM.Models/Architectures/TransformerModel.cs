@@ -90,9 +90,26 @@ public sealed unsafe class TransformerModel : IModel
             ropeDim,
             ropeTheta);
 
-        ComputeThreadPool? pool = threading.IsParallel
-            ? new ComputeThreadPool(threading.EffectiveThreadCount)
-            : null;
+        ComputeThreadPool? pool = null;
+        if (threading.IsParallel)
+        {
+            int effectiveThreads = threading.EffectiveThreadCount;
+
+            if (threading.EnableNumaPinning || threading.EnablePCorePinning)
+            {
+                var topology = NumaTopology.Detect();
+
+                // If P-core pinning on hybrid, cap threads to P-core count
+                if (threading.EnablePCorePinning && topology.IsHybrid)
+                    effectiveThreads = Math.Min(effectiveThreads, topology.PerformanceCoreIds.Count);
+
+                pool = new ComputeThreadPool(effectiveThreads, topology, threading);
+            }
+            else
+            {
+                pool = new ComputeThreadPool(effectiveThreads, topology: null, threading);
+            }
+        }
 
         return new TransformerModel(config, weights, state, gguf, ropeDim, ropeType, pool, ownsPool: pool is not null);
     }
@@ -133,6 +150,10 @@ public sealed unsafe class TransformerModel : IModel
         float eps = Config.NormEpsilon;
 
         _state.EnsureCapacity(seqLen);
+
+        // Adaptive dispatch mode: spin-wait for decode (short, frequent dispatches),
+        // event-based for prefill (long dispatches where kernel transition cost is negligible).
+        _threadPool?.SetDispatchMode(seqLen == 1 ? DispatchMode.SpinWait : DispatchMode.EventBased);
 
         float* hidden = (float*)_state.HiddenState;
         float* residual = (float*)_state.Residual;

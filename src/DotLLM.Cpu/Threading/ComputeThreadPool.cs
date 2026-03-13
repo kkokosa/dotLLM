@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using DotLLM.Core.Configuration;
 
 namespace DotLLM.Cpu.Threading;
 
@@ -9,18 +10,35 @@ namespace DotLLM.Cpu.Threading;
 /// Work is dispatched via <c>delegate*</c> function pointers and stack-allocated context structs
 /// for zero GC allocations on the hot path.
 /// </summary>
+/// <remarks>
+/// Supports two dispatch modes:
+/// <list type="bullet">
+/// <item><see cref="DispatchMode.EventBased"/> — workers wait on <see cref="ManualResetEventSlim"/> (prefill)</item>
+/// <item><see cref="DispatchMode.SpinWait"/> — workers spin on a volatile generation counter (decode)</item>
+/// </list>
+/// Optionally pins workers to specific logical processors for NUMA locality and P-core affinity.
+/// </remarks>
 public sealed unsafe class ComputeThreadPool : IDisposable
 {
+    /// <summary>Number of spin iterations before falling back to event wait in spin-wait mode.</summary>
+    private const int SpinIterations = 10_000;
+
     private readonly Thread[] _workers;
     private readonly ManualResetEventSlim[] _workReady;
     private readonly CountdownEvent _completion;
     private readonly int _threadCount;
+    private readonly int _decodeThreadCount;
+    private readonly int[] _workerCoreAssignment; // maps worker index → logical processor ID (or -1)
 
     private volatile bool _shutdown;
+    private int _dispatchGeneration;
+    private volatile DispatchMode _currentMode;
+    private volatile int _activeWorkerCount; // number of active workers (not including caller)
 
     // Current work item — set by Dispatch before signalling workers
     private nint _context;
     private delegate*<nint, int, int, void> _workFn;
+    private volatile int _dispatchThreadCount; // total active threads for current dispatch (workers + caller)
 
     // Per-worker scratch buffers for attention scores etc.
     private nint[] _workerScratch;
@@ -35,18 +53,43 @@ public sealed unsafe class ComputeThreadPool : IDisposable
     /// </summary>
     /// <param name="threadCount">Total threads including caller. Must be >= 2.</param>
     public ComputeThreadPool(int threadCount)
+        : this(threadCount, topology: null, config: default)
+    {
+    }
+
+    /// <summary>
+    /// Creates a compute thread pool with NUMA topology awareness and threading configuration.
+    /// </summary>
+    /// <param name="threadCount">Total threads including caller. Must be >= 2.</param>
+    /// <param name="topology">Optional NUMA topology for CPU pinning. Null = no pinning.</param>
+    /// <param name="config">Threading configuration for decode thread count and pinning options.</param>
+    public ComputeThreadPool(int threadCount, NumaTopology? topology, ThreadingConfig config)
     {
         if (threadCount < 2)
             throw new ArgumentOutOfRangeException(nameof(threadCount), "Thread pool requires at least 2 threads.");
 
         _threadCount = threadCount;
         int workerCount = threadCount - 1;
+        _activeWorkerCount = workerCount;
+
+        // Compute decode thread count using the pool's actual threadCount, not the config's EffectiveThreadCount
+        // (which may be wrong when using the simple constructor with default config).
+        int memChannels = topology?.MemoryChannelEstimate ?? 2;
+        _decodeThreadCount = config.DecodeThreadCount > 0
+            ? Math.Clamp(config.DecodeThreadCount, 2, threadCount)
+            : Math.Clamp(memChannels, 2, threadCount);
+
+        // Build core assignment map
+        _workerCoreAssignment = BuildCoreAssignment(workerCount, topology, config);
 
         _workers = new Thread[workerCount];
         _workReady = new ManualResetEventSlim[workerCount];
         _completion = new CountdownEvent(workerCount);
         _workerScratch = new nint[threadCount];
         _workerScratchSize = new int[threadCount];
+
+        _currentMode = DispatchMode.EventBased;
+        _dispatchGeneration = 0;
 
         for (int i = 0; i < workerCount; i++)
         {
@@ -62,8 +105,22 @@ public sealed unsafe class ComputeThreadPool : IDisposable
     }
 
     /// <summary>
-    /// Dispatches work to all threads (caller = thread 0, workers = threads 1..N-1).
-    /// The caller blocks until all threads complete their partition.
+    /// Sets the dispatch mode for subsequent <see cref="Dispatch"/> calls.
+    /// In <see cref="DispatchMode.SpinWait"/> mode, also reduces active worker count
+    /// to the decode thread cap (memory-bandwidth-bound decode doesn't benefit from excess threads).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void SetDispatchMode(DispatchMode mode)
+    {
+        _currentMode = mode;
+        _activeWorkerCount = mode == DispatchMode.SpinWait
+            ? Math.Clamp(_decodeThreadCount - 1, 1, _threadCount - 1)
+            : _threadCount - 1;
+    }
+
+    /// <summary>
+    /// Dispatches work to all active threads (caller = thread 0, workers = threads 1..N-1).
+    /// The caller blocks until all active threads complete their partition.
     /// <paramref name="context"/> must remain valid until Dispatch returns (stack-allocated is fine).
     /// </summary>
     /// <param name="context">Pointer to context struct on caller's stack.</param>
@@ -71,21 +128,29 @@ public sealed unsafe class ComputeThreadPool : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Dispatch(nint context, delegate*<nint, int, int, void> fn)
     {
+        int activeWorkers = _activeWorkerCount;
+        int totalActive = activeWorkers + 1; // workers + caller
+
         _context = context;
         _workFn = fn;
+        _dispatchThreadCount = totalActive;
 
-        int workerCount = _threadCount - 1;
-        _completion.Reset(workerCount);
+        if (activeWorkers > 0)
+            _completion.Reset(activeWorkers);
 
-        // Signal all workers
-        for (int i = 0; i < workerCount; i++)
+        // Increment generation counter (wakes spinners)
+        Interlocked.Increment(ref _dispatchGeneration);
+
+        // Also set events (wakes any workers that fell through to kernel wait)
+        for (int i = 0; i < activeWorkers; i++)
             _workReady[i].Set();
 
         // Caller executes as thread 0
-        fn(context, 0, _threadCount);
+        fn(context, 0, totalActive);
 
-        // Wait for all workers to finish
-        _completion.Wait();
+        // Wait for all active workers to finish
+        if (activeWorkers > 0)
+            _completion.Wait();
     }
 
     /// <summary>
@@ -119,18 +184,76 @@ public sealed unsafe class ComputeThreadPool : IDisposable
         int arrayIdx = (int)state!;
         int threadIdx = arrayIdx + 1;
 
+        // Pin thread to assigned core if configured
+        if (_workerCoreAssignment[arrayIdx] >= 0)
+            CpuAffinity.PinCurrentThread(_workerCoreAssignment[arrayIdx]);
+
+        int lastGeneration = Volatile.Read(ref _dispatchGeneration);
+
         while (true)
         {
-            _workReady[arrayIdx].Wait();
+            int previousGen = lastGeneration;
 
-            if (_shutdown)
-                return;
+            if (_currentMode == DispatchMode.SpinWait && arrayIdx < _activeWorkerCount)
+            {
+                // Spin-wait: check generation counter
+                bool gotWork = false;
+                for (int spin = 0; spin < SpinIterations; spin++)
+                {
+                    int gen = Volatile.Read(ref _dispatchGeneration);
+                    if (gen != lastGeneration)
+                    {
+                        lastGeneration = gen;
+                        gotWork = true;
+                        break;
+                    }
+                    Thread.SpinWait(1);
+                }
 
-            _workReady[arrayIdx].Reset();
+                if (!gotWork)
+                {
+                    // Fallback to event wait after spin budget exhausted
+                    _workReady[arrayIdx].Wait();
+
+                    if (_shutdown) return;
+
+                    _workReady[arrayIdx].Reset();
+                    lastGeneration = Volatile.Read(ref _dispatchGeneration);
+                }
+                else
+                {
+                    // Dispose increments generation to wake spinners — check before proceeding
+                    if (_shutdown) return;
+
+                    // Consume the event if it was also set (avoid stale signal on next iteration)
+                    if (_workReady[arrayIdx].IsSet)
+                        _workReady[arrayIdx].Reset();
+                }
+            }
+            else
+            {
+                // Event-based wait (or inactive worker in decode mode)
+                _workReady[arrayIdx].Wait();
+
+                if (_shutdown) return;
+
+                _workReady[arrayIdx].Reset();
+                lastGeneration = Volatile.Read(ref _dispatchGeneration);
+            }
+
+            // Guard against stale event wake-ups: only process if a new dispatch occurred.
+            // Race scenario: worker detects gen change via spin, processes, loops back,
+            // then gets woken by the stale event from the same Dispatch (set after gen increment).
+            if (lastGeneration == previousGen)
+                continue;
+
+            // Check if this worker is active for the current dispatch
+            if (arrayIdx >= _activeWorkerCount)
+                continue;
 
             try
             {
-                _workFn(_context, threadIdx, _threadCount);
+                _workFn(_context, threadIdx, _dispatchThreadCount);
             }
             catch (Exception ex)
             {
@@ -143,10 +266,73 @@ public sealed unsafe class ComputeThreadPool : IDisposable
         }
     }
 
+    /// <summary>
+    /// Builds the core assignment array mapping each worker index to a logical processor ID.
+    /// Returns -1 for workers that should not be pinned.
+    /// </summary>
+    private static int[] BuildCoreAssignment(int workerCount, NumaTopology? topology, ThreadingConfig config)
+    {
+        var assignment = new int[workerCount];
+        Array.Fill(assignment, -1); // -1 = no pinning
+
+        if (topology is null)
+            return assignment;
+
+        if (!config.EnableNumaPinning && !config.EnablePCorePinning)
+            return assignment;
+
+        IReadOnlyList<int> candidateCores;
+        if (config.EnablePCorePinning && topology.IsHybrid)
+            candidateCores = topology.PerformanceCoreIds;
+        else if (config.EnableNumaPinning)
+        {
+            // Round-robin across NUMA nodes
+            var cores = new List<int>();
+            var nodeQueues = topology.ProcessorsByNumaNode
+                .OrderBy(kv => kv.Key)
+                .Select(kv => new Queue<int>(kv.Value))
+                .ToList();
+
+            while (cores.Count < workerCount + 1)
+            {
+                bool added = false;
+                foreach (var q in nodeQueues)
+                {
+                    if (q.Count > 0)
+                    {
+                        cores.Add(q.Dequeue());
+                        added = true;
+                    }
+                }
+                if (!added) break;
+            }
+
+            candidateCores = cores;
+        }
+        else
+        {
+            return assignment;
+        }
+
+        // Worker 0 in the array corresponds to thread index 1 (caller is thread 0).
+        // Skip candidateCores[0] for the caller thread — assign workers starting from index 1.
+        for (int i = 0; i < workerCount; i++)
+        {
+            int coreIdx = i + 1; // skip one for caller
+            if (coreIdx < candidateCores.Count)
+                assignment[i] = candidateCores[coreIdx];
+        }
+
+        return assignment;
+    }
+
     /// <inheritdoc/>
     public void Dispose()
     {
         _shutdown = true;
+
+        // Bump generation to wake any spinners
+        Interlocked.Increment(ref _dispatchGeneration);
 
         // Signal all workers to exit
         for (int i = 0; i < _workers.Length; i++)
