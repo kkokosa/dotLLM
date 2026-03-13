@@ -18,6 +18,9 @@ public static class Attention
     /// <summary>Stackalloc threshold in bytes. Above this, use ArrayPool.</summary>
     private const int StackAllocThreshold = 8192;
 
+    /// <summary>Maximum tile size for tiled attention. Used for constant-size stackalloc.</summary>
+    private const int MaxTileSize = 256;
+
     /// <summary>
     /// Computes scaled dot-product attention with causal masking and GQA head broadcast.
     /// Convenience overload that computes <c>scale = 1/sqrt(headDim)</c>.
@@ -84,9 +87,9 @@ public static class Attention
         {
             // Tiled path: only tileSize floats on stack instead of seqQ*seqKv
             int tileSize = ComputeTileSize(headDim);
-            Span<float> tileScores = stackalloc float[tileSize];
+            Span<float> tileScores = stackalloc float[MaxTileSize];
             ExecuteTiledCore(q, k, v, output, tileScores, seqQ, seqKv, numHeads, headDim,
-                             groupSize, scale, qStride, kvStride, positionOffset, tileSize, slidingWindowSize);
+                             groupSize, scale, qStride, kvStride, positionOffset, tileSize, slidingWindowSize ?? 0);
         }
     }
 
@@ -130,7 +133,7 @@ public static class Attention
         const int L2Budget = 256 * 1024; // 256 KB conservative L2 estimate
         int bytesPerKvToken = headDim * sizeof(float) * 2; // K + V
         int tc = L2Budget / bytesPerKvToken;
-        return Math.Clamp(tc, 64, 256);
+        return Math.Clamp(tc, 64, MaxTileSize);
     }
 
     /// <summary>
@@ -142,7 +145,7 @@ public static class Attention
                                           Span<float> output, Span<float> tileScores,
                                           int seqQ, int seqKv, int numHeads, int headDim,
                                           int groupSize, float scale, int qStride, int kvStride,
-                                          int positionOffset, int tileSize, int? slidingWindowSize = null)
+                                          int positionOffset, int tileSize, int slidingWindowSize = 0)
     {
         for (int h = 0; h < numHeads; h++)
         {
@@ -339,17 +342,15 @@ public static class Attention
         var vSpan = new ReadOnlySpan<float>(ctx.V, ctx.SeqKv * ctx.KvStride);
         var outSpan = new Span<float>(ctx.Output, ctx.SeqQ * ctx.QStride);
 
-        int? slidingWindow = ctx.SlidingWindowSize > 0 ? ctx.SlidingWindowSize : null;
-
         // Each worker stackallocs its own tile scores — max 256 * 4 = 1024 bytes
-        Span<float> tileScores = stackalloc float[ctx.TileSize];
+        Span<float> tileScores = stackalloc float[MaxTileSize];
 
         for (int h = startHead; h < endHead; h++)
         {
             ExecuteTiledCore(qSpan, kSpan, vSpan, outSpan, tileScores,
                              ctx.SeqQ, ctx.SeqKv, 1, ctx.HeadDim,
                              1, ctx.Scale, ctx.QStride, ctx.KvStride,
-                             ctx.PositionOffset, ctx.TileSize, slidingWindow,
+                             ctx.PositionOffset, ctx.TileSize, ctx.SlidingWindowSize,
                              h, h / ctx.GroupSize);
         }
     }
@@ -362,10 +363,10 @@ public static class Attention
                                           Span<float> output, Span<float> tileScores,
                                           int seqQ, int seqKv, int numHeads, int headDim,
                                           int groupSize, float scale, int qStride, int kvStride,
-                                          int positionOffset, int tileSize, int? slidingWindowSize,
+                                          int positionOffset, int tileSize, int slidingWindowSize,
                                           int headIdx, int kvHeadIdx)
     {
-        int window = slidingWindowSize ?? 0;
+        int window = slidingWindowSize;
 
         for (int i = 0; i < seqQ; i++)
         {
@@ -400,8 +401,11 @@ public static class Attention
                 float newMax = MathF.Max(maxSoFar, tileMax);
                 float correction = MathF.Exp(maxSoFar - newMax);
 
-                sumExp *= correction;
-                TensorPrimitives.Multiply(outRow, correction, outRow);
+                if (correction < 1f)
+                {
+                    sumExp *= correction;
+                    TensorPrimitives.Multiply(outRow, correction, outRow);
+                }
 
                 TensorPrimitives.Add(scores, -newMax, scores);
                 TensorPrimitives.Exp(scores, scores);

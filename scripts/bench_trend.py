@@ -7,8 +7,14 @@ lets you interactively select which runs and models to compare, and displays a
 formatted comparison table.
 
 Usage:
-    # Interactive mode (default — scans benchmarks/results/)
+    # Interactive mode (default — scans benchmarks/results/, dotLLM engine)
     python scripts/bench_trend.py
+
+    # Show llama.cpp results
+    python scripts/bench_trend.py --engine llama.cpp --all
+
+    # Show all engines
+    python scripts/bench_trend.py --engine all --all
 
     # Interactive with custom folder
     python scripts/bench_trend.py --folder path/to/results
@@ -31,7 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -71,6 +77,7 @@ class BenchEntry:
     branch: str
     dirty: bool
     models: list[str]
+    engines: list[str]
     results: list[dict]
     config: dict
     system: dict
@@ -87,6 +94,7 @@ class BenchEntry:
         git = data.get("git", {})
         results = data.get("results", [])
         models = list(dict.fromkeys(r.get("model", "?") for r in results))
+        engines = list(dict.fromkeys(r.get("engine", "dotLLM") for r in results))
 
         return BenchEntry(
             path=path,
@@ -96,6 +104,7 @@ class BenchEntry:
             branch=git.get("branch", "?"),
             dirty=git.get("dirty", False),
             models=models,
+            engines=engines,
             results=results,
             config=data.get("config", {}),
             system=data.get("system", {}),
@@ -117,6 +126,19 @@ class BenchEntry:
     def display_name(self) -> str:
         dirty = "*" if self.dirty else ""
         return f"{self.label} ({self.commit}{dirty})"
+
+    def filtered(self, engine: str | None = None) -> BenchEntry:
+        """Return a copy with results filtered to a specific engine (substring match)."""
+        if not engine:
+            return self
+        eng_lower = engine.lower()
+        filt = [r for r in self.results if eng_lower in r.get("engine", "").lower()]
+        return replace(
+            self,
+            models=list(dict.fromkeys(r.get("model", "?") for r in filt)),
+            engines=list(dict.fromkeys(r.get("engine", "?") for r in filt)),
+            results=filt,
+        )
 
 
 def scan_directory(directory: Path) -> list[BenchEntry]:
@@ -370,7 +392,11 @@ def interactive_select(entries: list[BenchEntry]) -> tuple[list[BenchEntry], str
         message="Select benchmark runs to compare (Space to toggle, Enter to confirm):",
         choices=choices,
         validate=lambda result: len(result) >= 1 or "Select at least one entry",
-        instruction="(↑↓ move, Space toggle, Ctrl+A all, Enter confirm)",
+        instruction="(↑↓ move, Space toggle, Ctrl+A toggle all, Enter confirm)",
+        keybindings={
+            "toggle-all": [{"key": "c-a"}],
+            "toggle-all-true": [],
+        },
     ).execute()
 
     if not selected_entries:
@@ -414,6 +440,26 @@ def _collect_models(entries: list[BenchEntry]) -> list[str]:
                 seen.add(m)
                 models.append(m)
     return models
+
+
+def _collect_engines(entries: list[BenchEntry]) -> list[str]:
+    """Collect unique engine names across all entries, preserving order."""
+    seen: set[str] = set()
+    engines: list[str] = []
+    for entry in entries:
+        for e in entry.engines:
+            if e not in seen:
+                seen.add(e)
+                engines.append(e)
+    return engines
+
+
+def _apply_engine_filter(entries: list[BenchEntry], engine: str | None) -> list[BenchEntry]:
+    """Pre-filter entries by engine. Returns entries that still have results."""
+    if not engine:
+        return entries
+    filtered = [e.filtered(engine) for e in entries]
+    return [e for e in filtered if e.results]
 
 
 def display(entries: list[BenchEntry], model_filter: str | None, use_md: bool) -> None:
@@ -466,10 +512,12 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python scripts/bench_trend.py                    # interactive\n"
-            "  python scripts/bench_trend.py --all              # show all results\n"
-            "  python scripts/bench_trend.py base.json cur.json # compare two files\n"
-            "  python scripts/bench_trend.py --md --all         # markdown output\n"
+            "  python scripts/bench_trend.py                              # interactive (dotLLM)\n"
+            "  python scripts/bench_trend.py --all                        # show all results\n"
+            "  python scripts/bench_trend.py --engine llama.cpp --all     # llama.cpp results\n"
+            "  python scripts/bench_trend.py --engine all --all           # all engines\n"
+            "  python scripts/bench_trend.py base.json cur.json           # compare two files\n"
+            "  python scripts/bench_trend.py --md --all                   # markdown output\n"
         ),
     )
     parser.add_argument("files", nargs="*",
@@ -482,8 +530,13 @@ def main() -> int:
                         help="Output as GitHub Markdown")
     parser.add_argument("--model", type=str, default=None,
                         help="Filter results by model name substring")
+    parser.add_argument("--engine", type=str, default="dotLLM",
+                        help='Filter by engine (default: dotLLM). Use "all" for all engines.')
 
     args = parser.parse_args()
+
+    # Resolve engine filter: "all" means no filter
+    engine_filter = args.engine if args.engine.lower() != "all" else None
 
     # Mode 1: Explicit files on command line
     if args.files:
@@ -494,6 +547,7 @@ def main() -> int:
                 print(f"Failed to load: {f}", file=sys.stderr)
                 return 1
             entries.append(entry)
+        entries = _apply_engine_filter(entries, engine_filter)
         display(entries, args.model, args.md)
         return 0
 
@@ -509,6 +563,7 @@ def main() -> int:
 
     # Mode 2: --all flag — show everything non-interactively
     if args.all:
+        entries = _apply_engine_filter(entries, engine_filter)
         display(entries, args.model, args.md)
         return 0
 
@@ -519,8 +574,22 @@ def main() -> int:
         if not _has_rich:
             print("Tip: pip install rich  (for colored tables)\n",
                   file=sys.stderr)
+        entries = _apply_engine_filter(entries, engine_filter)
         display(entries, args.model, args.md)
         return 0
+
+    # Interactive: prompt for engine if multiple exist and --engine wasn't explicitly given
+    all_engines = _collect_engines(entries)
+    if len(all_engines) > 1 and args.engine == "dotLLM":
+        engine_choices = [{"name": e, "value": e} for e in all_engines]
+        engine_choices.append({"name": "All engines", "value": None})
+        engine_filter = inquirer.select(
+            message="Select engine:",
+            choices=engine_choices,
+            default="dotLLM",
+        ).execute()
+
+    entries = _apply_engine_filter(entries, engine_filter)
 
     selected, model_filter = interactive_select(entries)
     if args.model:
