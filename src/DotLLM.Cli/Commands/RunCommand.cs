@@ -74,6 +74,21 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [DefaultValue(0)]
         public int Threads { get; set; }
 
+        [CommandOption("--decode-threads")]
+        [Description("Number of threads for decode. 0 = auto (caps at memory channel count).")]
+        [DefaultValue(0)]
+        public int DecodeThreads { get; set; }
+
+        [CommandOption("--numa-pin")]
+        [Description("Pin workers to NUMA-local cores on multi-socket systems.")]
+        [DefaultValue(false)]
+        public bool NumaPin { get; set; }
+
+        [CommandOption("--pcore-only")]
+        [Description("Pin workers to P-cores only (Intel hybrid architectures).")]
+        [DefaultValue(false)]
+        public bool PCoreOnly { get; set; }
+
         [CommandOption("--quant|-q")]
         [Description("Quantization filter when multiple GGUF files exist (e.g., Q4_K_M, Q8_0).")]
         public string? Quant { get; set; }
@@ -109,7 +124,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             gguf = GgufFile.Open(resolvedPath);
             config = GgufModelConfigExtractor.Extract(gguf.Metadata);
             tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-            model = TransformerModel.LoadFromGguf(gguf, config, new ThreadingConfig(settings.Threads));
+            model = TransformerModel.LoadFromGguf(gguf, config,
+                new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly));
         }
 
         var loadSw = Stopwatch.StartNew();
@@ -125,7 +141,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         }
         loadSw.Stop();
 
-        var threadingInfo = new ThreadingConfig(settings.Threads);
+        var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
 
         // Build inference options from CLI flags
         var inferenceOptions = new InferenceOptions
@@ -138,7 +154,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             RepetitionPenaltyWindow = settings.RepeatLastN,
             MaxTokens = settings.MaxTokens,
             Seed = settings.Seed,
-            Threading = new ThreadingConfig(settings.Threads)
+            Threading = threadingInfo
         };
 
         if (!settings.Json)

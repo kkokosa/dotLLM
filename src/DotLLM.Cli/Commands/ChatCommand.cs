@@ -86,6 +86,24 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         [DefaultValue(0)]
         public int Threads { get; set; }
 
+        /// <summary>Decode thread count.</summary>
+        [CommandOption("--decode-threads")]
+        [Description("Number of threads for decode. 0 = auto (caps at memory channel count).")]
+        [DefaultValue(0)]
+        public int DecodeThreads { get; set; }
+
+        /// <summary>NUMA pinning.</summary>
+        [CommandOption("--numa-pin")]
+        [Description("Pin workers to NUMA-local cores on multi-socket systems.")]
+        [DefaultValue(false)]
+        public bool NumaPin { get; set; }
+
+        /// <summary>P-core pinning.</summary>
+        [CommandOption("--pcore-only")]
+        [Description("Pin workers to P-cores only (Intel hybrid architectures).")]
+        [DefaultValue(false)]
+        public bool PCoreOnly { get; set; }
+
         /// <summary>Quantization filter.</summary>
         [CommandOption("--quant|-q")]
         [Description("Quantization filter when multiple GGUF files exist (e.g., Q4_K_M, Q8_0).")]
@@ -117,7 +135,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                 ctx.Status("Loading tokenizer...");
                 tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
-                var threading = new ThreadingConfig(settings.Threads);
+                var threading = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
                 ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden, {threading.EffectiveThreadCount} threads)...");
                 model = TransformerModel.LoadFromGguf(gguf, config, threading);
             });
@@ -150,11 +168,11 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             MaxTokens = settings.MaxTokens,
             Seed = settings.Seed,
             StopSequences = stopSequences,
-            Threading = new ThreadingConfig(settings.Threads)
+            Threading = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly)
         };
 
         // Print header
-        var threadingInfo = new ThreadingConfig(settings.Threads);
+        var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
         var quantLabel = InferQuantLabel(resolvedPath, settings.Quant);
         var samplingLabel = BuildSamplingLabel(settings);
         var segments = $"{config!.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {threadingInfo.EffectiveThreadCount} threads | {samplingLabel}";
