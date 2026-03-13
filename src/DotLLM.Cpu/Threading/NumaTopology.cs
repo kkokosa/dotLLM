@@ -172,13 +172,15 @@ public sealed partial class NumaTopology
             {
                 if (relationship != WindowsNative.LOGICAL_PROCESSOR_RELATIONSHIP.RelationNumaNode) return;
 
-                // Offset: GroupMask starts at offset 0 within the union
-                // NUMA_NODE_RELATIONSHIP: DWORD NodeNumber at offset 0, then GROUP_AFFINITY at offset 4
+                // SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX layout:
+                // [0..3] Relationship, [4..7] Size, [8..] union data
+                // NUMA_NODE_RELATIONSHIP: NodeNumber(4) + Reserved(18) + GroupCount(2) + GROUP_AFFINITY[](...)
+                // NodeNumber at union+0 = absolute 8, GROUP_AFFINITY at union+24 = absolute 32
                 unsafe
                 {
-                    int nodeNumber = *(int*)(entryPtr + 24); // union starts at 24 in the struct
-                    // GROUP_AFFINITY is at offset 28 (24 + 4): KAFFINITY Mask (8 bytes), WORD Group, WORD[3] Reserved
-                    ulong mask = *(ulong*)(entryPtr + 28);
+                    int nodeNumber = *(int*)(entryPtr + 8);
+                    // GROUP_AFFINITY: KAFFINITY Mask (8 bytes), WORD Group, WORD[3] Reserved
+                    ulong mask = *(ulong*)(entryPtr + 32);
 
                     for (int bit = 0; bit < 64; bit++)
                     {
@@ -199,10 +201,10 @@ public sealed partial class NumaTopology
 
                 unsafe
                 {
-                    // PROCESSOR_RELATIONSHIP: BYTE Flags(0), BYTE EfficiencyClass(1), BYTE[20] Reserved, WORD GroupCount(22), GROUP_AFFINITY[](24)
-                    byte efficiencyClass = *(byte*)(entryPtr + 24 + 1); // +24 for union offset, +1 for EfficiencyClass
-                    // GROUP_AFFINITY starts at offset 24 + 24 = 48
-                    ulong mask = *(ulong*)(entryPtr + 48);
+                    // PROCESSOR_RELATIONSHIP: Flags(1) + EfficiencyClass(1) + Reserved(20) + GroupCount(2) + GROUP_AFFINITY[](...)
+                    // EfficiencyClass at union+1 = absolute 9, GROUP_AFFINITY at union+24 = absolute 32
+                    byte efficiencyClass = *(byte*)(entryPtr + 9);
+                    ulong mask = *(ulong*)(entryPtr + 32);
 
                     int coreId = physicalCoreCounter++;
 

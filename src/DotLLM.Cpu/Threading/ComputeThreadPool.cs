@@ -109,6 +109,12 @@ public sealed unsafe class ComputeThreadPool : IDisposable
     /// In <see cref="DispatchMode.SpinWait"/> mode, also reduces active worker count
     /// to the decode thread cap (memory-bandwidth-bound decode doesn't benefit from excess threads).
     /// </summary>
+    /// <remarks>
+    /// Thread safety: SetDispatchMode is always called before Dispatch, which issues
+    /// a full fence via Interlocked.Increment on _dispatchGeneration. The volatile
+    /// writes to _currentMode and _activeWorkerCount are therefore safely visible
+    /// to worker threads before they process the next dispatch.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void SetDispatchMode(DispatchMode mode)
     {
@@ -207,6 +213,8 @@ public sealed unsafe class ComputeThreadPool : IDisposable
                         gotWork = true;
                         break;
                     }
+                    // Intentional Thread.SpinWait(1) over SpinWait struct — avoids
+                    // OS yields during the spin budget (struct escalates to Thread.Sleep).
                     Thread.SpinWait(1);
                 }
 
@@ -272,6 +280,9 @@ public sealed unsafe class ComputeThreadPool : IDisposable
     /// </summary>
     private static int[] BuildCoreAssignment(int workerCount, NumaTopology? topology, ThreadingConfig config)
     {
+        // TODO: The caller thread (thread 0 = Forward() thread) is not pinned.
+        // If scheduled on an E-core, pinned P-core workers idle at the barrier.
+        // Consider a PinCallerThread() API for the inference thread (follow-up issue).
         var assignment = new int[workerCount];
         Array.Fill(assignment, -1); // -1 = no pinning
 

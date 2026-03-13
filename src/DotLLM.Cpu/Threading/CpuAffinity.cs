@@ -66,12 +66,13 @@ internal static partial class CpuAffinity
     {
         try
         {
-            // cpu_set_t on x86_64 is 128 bytes (1024 bits), supporting up to 1024 CPUs.
-            // We need ceil(logicalProcessorId + 1, 64) ulongs.
-            int ulongCount = (logicalProcessorId / 64) + 1;
-            int setSize = ulongCount * 8; // bytes
+            // Always allocate the full cpu_set_t (128 bytes = 1024 bits = CPU_SETSIZE).
+            // Dynamically-sized masks may be rejected by older kernels that expect
+            // the standard cpumask_size. 128 bytes covers up to 1024 CPUs.
+            const int CpuSetSize = 128; // bytes
+            const int UlongCount = CpuSetSize / sizeof(ulong); // 16
 
-            Span<ulong> mask = stackalloc ulong[ulongCount];
+            Span<ulong> mask = stackalloc ulong[UlongCount];
             mask.Clear();
             mask[logicalProcessorId / 64] = 1UL << (logicalProcessorId % 64);
 
@@ -80,7 +81,7 @@ internal static partial class CpuAffinity
             {
                 fixed (ulong* pMask = mask)
                 {
-                    result = LinuxNative.sched_setaffinity(0, (nuint)setSize, pMask);
+                    result = LinuxNative.sched_setaffinity(0, (nuint)CpuSetSize, pMask);
                 }
             }
             return result == 0;
