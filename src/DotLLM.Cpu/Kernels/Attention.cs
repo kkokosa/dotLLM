@@ -73,8 +73,7 @@ public static class Attention
         int kvStride = numKvHeads * headDim;
         int scoreSize = seqQ * seqKv;
 
-        // Allocate scores buffer: one head at a time, reused.
-        // Follows the MatMul stackalloc/ArrayPool pattern.
+        // Small score matrix: use existing naive path (SIMD softmax is faster for tiny sequences)
         if (scoreSize * sizeof(float) <= StackAllocThreshold)
         {
             Span<float> scores = stackalloc float[scoreSize];
@@ -83,10 +82,11 @@ public static class Attention
         }
         else
         {
-            float[] rented = ArrayPool<float>.Shared.Rent(scoreSize);
-            ExecuteCore(q, k, v, output, rented.AsSpan(0, scoreSize), seqQ, seqKv, numHeads, headDim,
-                        groupSize, scale, qStride, kvStride, positionOffset, slidingWindowSize);
-            ArrayPool<float>.Shared.Return(rented);
+            // Tiled path: only tileSize floats on stack instead of seqQ*seqKv
+            int tileSize = ComputeTileSize(headDim);
+            Span<float> tileScores = stackalloc float[tileSize];
+            ExecuteTiledCore(q, k, v, output, tileScores, seqQ, seqKv, numHeads, headDim,
+                             groupSize, scale, qStride, kvStride, positionOffset, tileSize, slidingWindowSize);
         }
     }
 
@@ -117,6 +117,38 @@ public static class Attention
             // 4. Weighted sum: weights @ V_kvH → output_h
             WeightedValues(scores, v, output, seqQ, seqKv, headDim,
                            h, kvH, qStride, kvStride);
+        }
+    }
+
+    /// <summary>
+    /// Computes KV tile size targeting L2 cache residency.
+    /// Each tile loads Tc K vectors + Tc V vectors of headDim floats.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int ComputeTileSize(int headDim)
+    {
+        const int L2Budget = 256 * 1024; // 256 KB conservative L2 estimate
+        int bytesPerKvToken = headDim * sizeof(float) * 2; // K + V
+        int tc = L2Budget / bytesPerKvToken;
+        return Math.Clamp(tc, 64, 256);
+    }
+
+    /// <summary>
+    /// Tiled attention with online softmax. Processes KV in tiles of <paramref name="tileSize"/> tokens,
+    /// maintaining running max and sum_exp for numerically stable softmax without materializing the
+    /// full seqQ×seqKv score matrix. Memory: O(tileSize) per head instead of O(seqQ×seqKv).
+    /// </summary>
+    private static void ExecuteTiledCore(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
+                                          Span<float> output, Span<float> tileScores,
+                                          int seqQ, int seqKv, int numHeads, int headDim,
+                                          int groupSize, float scale, int qStride, int kvStride,
+                                          int positionOffset, int tileSize, int? slidingWindowSize = null)
+    {
+        for (int h = 0; h < numHeads; h++)
+        {
+            ExecuteTiledCore(q, k, v, output, tileScores, seqQ, seqKv, 1, headDim,
+                             1, scale, qStride, kvStride, positionOffset, tileSize, slidingWindowSize,
+                             h, h / groupSize);
         }
     }
 
@@ -163,27 +195,49 @@ public static class Attention
             return;
         }
 
-        // Pre-allocate per-worker scores buffers via pool scratch
         int scoreSize = seqQ * seqKv;
-        int scratchBytes = scoreSize * sizeof(float);
-        int threadCount = pool.ThreadCount;
-        nint* scratchPtrs = stackalloc nint[threadCount];
-        for (int i = 0; i < threadCount; i++)
-            scratchPtrs[i] = pool.GetWorkerScratch(i, scratchBytes);
 
-        var ctx = new AttentionCtx
+        // Small score matrix: naive parallel path with per-worker scratch
+        if (scoreSize * sizeof(float) <= StackAllocThreshold)
         {
-            Q = q, K = k, V = v, Output = output,
-            SeqQ = seqQ, SeqKv = seqKv, NumHeads = numHeads, NumKvHeads = numKvHeads,
-            HeadDim = headDim, Scale = scale, PositionOffset = positionOffset,
-            GroupSize = numHeads / numKvHeads,
-            QStride = numHeads * headDim,
-            KvStride = numKvHeads * headDim,
-            ScoreSize = scoreSize,
-            ScratchPtrs = scratchPtrs,
-            SlidingWindowSize = slidingWindowSize ?? 0
-        };
-        pool.Dispatch((nint)(&ctx), &AttentionWorker);
+            int scratchBytes = scoreSize * sizeof(float);
+            int threadCount = pool.ThreadCount;
+            nint* scratchPtrs = stackalloc nint[threadCount];
+            for (int i = 0; i < threadCount; i++)
+                scratchPtrs[i] = pool.GetWorkerScratch(i, scratchBytes);
+
+            var ctx = new AttentionCtx
+            {
+                Q = q, K = k, V = v, Output = output,
+                SeqQ = seqQ, SeqKv = seqKv, NumHeads = numHeads, NumKvHeads = numKvHeads,
+                HeadDim = headDim, Scale = scale, PositionOffset = positionOffset,
+                GroupSize = numHeads / numKvHeads,
+                QStride = numHeads * headDim,
+                KvStride = numKvHeads * headDim,
+                ScoreSize = scoreSize,
+                ScratchPtrs = scratchPtrs,
+                SlidingWindowSize = slidingWindowSize ?? 0
+            };
+            pool.Dispatch((nint)(&ctx), &AttentionWorker);
+        }
+        else
+        {
+            // Large score matrix: tiled parallel path — no scratch pre-allocation needed
+            int tileSize = ComputeTileSize(headDim);
+
+            var ctx = new TiledAttentionCtx
+            {
+                Q = q, K = k, V = v, Output = output,
+                SeqQ = seqQ, SeqKv = seqKv, NumHeads = numHeads, NumKvHeads = numKvHeads,
+                HeadDim = headDim, Scale = scale, PositionOffset = positionOffset,
+                GroupSize = numHeads / numKvHeads,
+                QStride = numHeads * headDim,
+                KvStride = numKvHeads * headDim,
+                TileSize = tileSize,
+                SlidingWindowSize = slidingWindowSize ?? 0
+            };
+            pool.Dispatch((nint)(&ctx), &TiledAttentionWorker);
+        }
     }
 
     private unsafe struct AttentionCtx
@@ -245,6 +299,127 @@ public static class Attention
 
             WeightedValues(scoresSpan, vSpan, outSpan, ctx.SeqQ, ctx.SeqKv, ctx.HeadDim,
                            h, kvH, ctx.QStride, ctx.KvStride);
+        }
+    }
+
+    private unsafe struct TiledAttentionCtx
+    {
+        public float* Q;
+        public float* K;
+        public float* V;
+        public float* Output;
+        public int SeqQ;
+        public int SeqKv;
+        public int NumHeads;
+        public int NumKvHeads;
+        public int HeadDim;
+        public float Scale;
+        public int PositionOffset;
+        public int GroupSize;
+        public int QStride;
+        public int KvStride;
+        public int TileSize;
+        /// <summary>Sliding window size. 0 means no sliding window (full context).</summary>
+        public int SlidingWindowSize;
+    }
+
+    [SkipLocalsInit]
+    private static unsafe void TiledAttentionWorker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<TiledAttentionCtx>((void*)ctxPtr);
+
+        // Partition heads across threads
+        int headsPerThread = (ctx.NumHeads + threadCount - 1) / threadCount;
+        int startHead = threadIdx * headsPerThread;
+        int endHead = Math.Min(startHead + headsPerThread, ctx.NumHeads);
+        if (startHead >= ctx.NumHeads) return;
+
+        var qSpan = new ReadOnlySpan<float>(ctx.Q, ctx.SeqQ * ctx.QStride);
+        var kSpan = new ReadOnlySpan<float>(ctx.K, ctx.SeqKv * ctx.KvStride);
+        var vSpan = new ReadOnlySpan<float>(ctx.V, ctx.SeqKv * ctx.KvStride);
+        var outSpan = new Span<float>(ctx.Output, ctx.SeqQ * ctx.QStride);
+
+        int? slidingWindow = ctx.SlidingWindowSize > 0 ? ctx.SlidingWindowSize : null;
+
+        // Each worker stackallocs its own tile scores — max 256 * 4 = 1024 bytes
+        Span<float> tileScores = stackalloc float[ctx.TileSize];
+
+        for (int h = startHead; h < endHead; h++)
+        {
+            ExecuteTiledCore(qSpan, kSpan, vSpan, outSpan, tileScores,
+                             ctx.SeqQ, ctx.SeqKv, 1, ctx.HeadDim,
+                             1, ctx.Scale, ctx.QStride, ctx.KvStride,
+                             ctx.PositionOffset, ctx.TileSize, slidingWindow,
+                             h, h / ctx.GroupSize);
+        }
+    }
+
+    /// <summary>
+    /// Tiled attention overload for the parallel worker: processes a single head identified by
+    /// <paramref name="headIdx"/> and <paramref name="kvHeadIdx"/>.
+    /// </summary>
+    private static void ExecuteTiledCore(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
+                                          Span<float> output, Span<float> tileScores,
+                                          int seqQ, int seqKv, int numHeads, int headDim,
+                                          int groupSize, float scale, int qStride, int kvStride,
+                                          int positionOffset, int tileSize, int? slidingWindowSize,
+                                          int headIdx, int kvHeadIdx)
+    {
+        int window = slidingWindowSize ?? 0;
+
+        for (int i = 0; i < seqQ; i++)
+        {
+            var qRow = q.Slice(i * qStride + headIdx * headDim, headDim);
+            var outRow = output.Slice(i * qStride + headIdx * headDim, headDim);
+            outRow.Clear();
+
+            // Causal + sliding window bounds
+            int visibleEnd = Math.Min(seqKv, positionOffset + i + 1);
+            int visibleStart = (window > 0)
+                ? Math.Max(0, positionOffset + i - window + 1)
+                : 0;
+
+            if (visibleStart >= visibleEnd)
+                continue;
+
+            float maxSoFar = float.NegativeInfinity;
+            float sumExp = 0f;
+
+            for (int tileBase = visibleStart; tileBase < visibleEnd; tileBase += tileSize)
+            {
+                int tileLen = Math.Min(tileSize, visibleEnd - tileBase);
+                var scores = tileScores.Slice(0, tileLen);
+
+                for (int j = 0; j < tileLen; j++)
+                {
+                    var kRow = k.Slice((tileBase + j) * kvStride + kvHeadIdx * headDim, headDim);
+                    scores[j] = TensorPrimitives.Dot(qRow, kRow) * scale;
+                }
+
+                float tileMax = TensorPrimitives.Max(scores);
+                float newMax = MathF.Max(maxSoFar, tileMax);
+                float correction = MathF.Exp(maxSoFar - newMax);
+
+                sumExp *= correction;
+                TensorPrimitives.Multiply(outRow, correction, outRow);
+
+                TensorPrimitives.Add(scores, -newMax, scores);
+                TensorPrimitives.Exp(scores, scores);
+                sumExp += TensorPrimitives.Sum(scores);
+
+                for (int j = 0; j < tileLen; j++)
+                {
+                    float w = scores[j];
+                    if (w == 0f) continue;
+                    var vRow = v.Slice((tileBase + j) * kvStride + kvHeadIdx * headDim, headDim);
+                    TensorPrimitives.MultiplyAdd(vRow, w, outRow, outRow);
+                }
+
+                maxSoFar = newMax;
+            }
+
+            if (sumExp > 0f)
+                TensorPrimitives.Multiply(outRow, 1f / sumExp, outRow);
         }
     }
 
