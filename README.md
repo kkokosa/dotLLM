@@ -87,6 +87,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 
 ## News
 
+- **2026-03** — Operator fusion: fused RMSNorm+quantize (decode-only, eliminates normOut intermediate buffer) and tiled SwiGLU (1KB L1-resident sigmoid buffer) reduce DRAM roundtrips on the decode hot path ([#56](https://github.com/kkokosa/dotLLM/issues/56))
 - **2026-03** — Fast approximate exp/softmax: Schraudolph IEEE-754 bit-manipulation trick replaces polynomial exp (~3 SIMD ops vs ~12) in attention softmax. AVX2/AVX-512 fused shift+exp+sum pass eliminates 3 separate TensorPrimitives calls. Sampling softmax keeps full precision ([#55](https://github.com/kkokosa/dotLLM/issues/55))
 - **2026-03** — Tiled attention with online softmax: O(N) memory flash-attention-style algorithm replaces O(N²) score matrix materialization, eliminates 64 MB/head allocations at ctx 4096, uses ~1 KB stack per head ([#54](https://github.com/kkokosa/dotLLM/issues/54))
 - **2026-03** — Row-interleaved weight repacking: R4 layout stores 4 consecutive rows' blocks contiguously at model load time, improving cache/TLB locality for all quantized GEMV kernels ([#52](https://github.com/kkokosa/dotLLM/issues/52))
@@ -112,7 +113,7 @@ There is no NuGet package yet — the project is in early development. Follow th
 |-------|-------------|--------|
 | **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | Done (9/9) |
 | **2 — Practical Local Inference** | Engine metrics, benchmarks, Q4_K_M, chat templates, streaming, multi-threading, more architectures | Done (10/10) |
-| **3 — CPU Performance** | Decode dispatch, Q8_1 input, weight repacking, outer-product GEMM, tiled attention, fast exp, fusion, NUMA | In Progress (5/8) |
+| **3 — CPU Performance** | Decode dispatch, Q8_1 input, weight repacking, outer-product GEMM, tiled attention, fast exp, fusion, NUMA | In Progress (6/8) |
 | **4 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Planned |
 | **5 — Constrained Decoding & API** | JSON mode, JSON Schema, regex/CFG, tool calling, logit bias, OpenAI API server | Planned |
 | **6 — Production Serving** | Continuous batching, paged KV-cache, prompt caching, speculative decoding, metrics | Planned |

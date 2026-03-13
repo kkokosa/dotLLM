@@ -159,28 +159,45 @@ public sealed unsafe class TransformerModel : IModel
             // a. Copy hiddenState → residual
             new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
 
-            // b. RMSNorm all tokens
-            for (int t = 0; t < seqLen; t++)
-            {
-                RmsNorm.Execute(
-                    new ReadOnlySpan<float>(hidden + t * hiddenSize, hiddenSize),
-                    lw.AttnNormWeight,
-                    eps,
-                    new Span<float>(normOut + t * hiddenSize, hiddenSize));
-            }
-
-            // c. Pre-quantize normOutput once, reuse across Q/K/V projections
+            // b. RMSNorm + Pre-quantize + Q/K/V projections
             byte* inputQ8Scratch = (byte*)_state.InputQ8Scratch;
-            byte* preQuantNorm = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, lw.QQuantType);
 
-            // Batched Q/K/V projections — fused dispatch for decode (seqLen=1)
             if (seqLen == 1 && _threadPool != null)
             {
+                // Decode path: try fused RmsNorm+Quantize (skips normOut intermediate)
+                byte* preQuantNorm = null;
+                if (IsCompatiblePreQuant(lw.QQuantType, lw.KQuantType)
+                    && IsCompatiblePreQuant(lw.QQuantType, lw.VQuantType))
+                {
+                    preQuantNorm = FusedOps.RmsNormQuantize(hidden, lw.AttnNormWeight, eps,
+                        inputQ8Scratch, hiddenSize, lw.QQuantType);
+                }
+
+                if (preQuantNorm == null)
+                {
+                    // Fallback: unfused (F32/F16 weights or cross-family projections)
+                    RmsNorm.Execute(
+                        new ReadOnlySpan<float>(hidden, hiddenSize),
+                        lw.AttnNormWeight, eps,
+                        new Span<float>(normOut, hiddenSize));
+                    preQuantNorm = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, 1, lw.QQuantType);
+                }
+
                 FusedQkvDecode(in lw, normOut, preQuantNorm, q, k, v);
             }
             else
             {
-                // Guard: only reuse preQuantNorm when target quant type is in the same family as QQuantType
+                // Prefill path: unfused RmsNorm + Quantize + individual projections
+                for (int t = 0; t < seqLen; t++)
+                {
+                    RmsNorm.Execute(
+                        new ReadOnlySpan<float>(hidden + t * hiddenSize, hiddenSize),
+                        lw.AttnNormWeight, eps,
+                        new Span<float>(normOut + t * hiddenSize, hiddenSize));
+                }
+
+                byte* preQuantNorm = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, lw.QQuantType);
+
                 var rwQ = rl?.Q ?? default;
                 var rwK = rl?.K ?? default;
                 var rwV = rl?.V ?? default;
@@ -254,26 +271,42 @@ public sealed unsafe class TransformerModel : IModel
             // h. Copy hiddenState → residual
             new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
 
-            // i. FFN RMSNorm all tokens
-            for (int t = 0; t < seqLen; t++)
-            {
-                RmsNorm.Execute(
-                    new ReadOnlySpan<float>(hidden + t * hiddenSize, hiddenSize),
-                    lw.FfnNormWeight,
-                    eps,
-                    new Span<float>(normOut + t * hiddenSize, hiddenSize));
-            }
-
-            // j. Pre-quantize normOutput once, reuse across Gate/Up projections
-            byte* preQuantFfn = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, lw.GateQuantType);
-
-            // Batched Gate + Up projections — fused dispatch for decode (seqLen=1)
+            // i. FFN RMSNorm + Pre-quantize + Gate/Up projections
             if (seqLen == 1 && _threadPool != null)
             {
+                // Decode path: try fused RmsNorm+Quantize (skips normOut intermediate)
+                byte* preQuantFfn = null;
+                if (IsCompatiblePreQuant(lw.GateQuantType, lw.UpQuantType))
+                {
+                    preQuantFfn = FusedOps.RmsNormQuantize(hidden, lw.FfnNormWeight, eps,
+                        inputQ8Scratch, hiddenSize, lw.GateQuantType);
+                }
+
+                if (preQuantFfn == null)
+                {
+                    // Fallback: unfused (F32/F16 weights or cross-family projections)
+                    RmsNorm.Execute(
+                        new ReadOnlySpan<float>(hidden, hiddenSize),
+                        lw.FfnNormWeight, eps,
+                        new Span<float>(normOut, hiddenSize));
+                    preQuantFfn = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, 1, lw.GateQuantType);
+                }
+
                 FusedGateUpDecode(in lw, normOut, preQuantFfn, ffnGate, ffnUp);
             }
             else
             {
+                // Prefill path: unfused RmsNorm + Quantize + individual projections
+                for (int t = 0; t < seqLen; t++)
+                {
+                    RmsNorm.Execute(
+                        new ReadOnlySpan<float>(hidden + t * hiddenSize, hiddenSize),
+                        lw.FfnNormWeight, eps,
+                        new Span<float>(normOut + t * hiddenSize, hiddenSize));
+                }
+
+                byte* preQuantFfn = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, lw.GateQuantType);
+
                 var rwGate = rl?.Gate ?? default;
                 var rwUp = rl?.Up ?? default;
                 GemmInterleaved(lw.GateWeight, lw.GateQuantType, normOut, ffnGate, lw.GateOutputDim, lw.GateInputDim, seqLen,
@@ -284,19 +317,15 @@ public sealed unsafe class TransformerModel : IModel
             AddBias(lw.GateBias, ffnGate, lw.GateOutputDim, seqLen);
             AddBias(lw.UpBias, ffnUp, lw.UpOutputDim, seqLen);
 
-            // SiLU + Multiply (element-wise, per token)
+            // Fused SwiGLU: SiLU(gate) * up in a single tiled pass (per token)
             for (int t = 0; t < seqLen; t++)
             {
                 float* gateT = ffnGate + t * intermediateSize;
                 float* upT = ffnUp + t * intermediateSize;
                 float* siluT = siluOut + t * intermediateSize;
 
-                SiLu.Execute(
+                FusedOps.SwiGLU(
                     new ReadOnlySpan<float>(gateT, intermediateSize),
-                    new Span<float>(siluT, intermediateSize));
-
-                Multiply.Execute(
-                    new ReadOnlySpan<float>(siluT, intermediateSize),
                     new ReadOnlySpan<float>(upT, intermediateSize),
                     new Span<float>(siluT, intermediateSize));
             }
