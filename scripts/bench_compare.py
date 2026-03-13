@@ -311,6 +311,7 @@ def run_dotllm(
     bdn_filter: str,
     bdn_project: str | None,
     skip_bdn_build: bool,
+    iterations: int | None = None,
     **kwargs,
 ) -> list[EngineResult]:
     """Run dotLLM BDN benchmarks and parse results."""
@@ -331,6 +332,8 @@ def run_dotllm(
         "--filter", effective_filter,
         "--exporters", "json",
     ]
+    if iterations is not None:
+        cmd.extend(["--iterationCount", str(iterations)])
 
     # Set env vars so BDN uses the centrally-resolved model, prompt, and token count
     env = os.environ.copy()
@@ -675,7 +678,7 @@ def print_comparison(results: list[EngineResult], prompt: str, max_tokens: int) 
         return f"{text:<{model_w}} " if multi_model else ""
 
     # Header
-    data_cols = f"{'Engine':<14} {'Prefill':>10} {'':>10} {'Decode':>10} {'':>10} {'':>8} {'Total':>8}  {'Notes'}"
+    data_cols = f"{'Engine':<14} {'Prefill':>10} {'':>10} {'Decode':>10} {'':>10} {'':>8} {'Total':>8}  {'CV':>6}"
     sub_cols = f"{'':14} {'ms':>10} {'tok/s':>10} {'ms':>10} {'tok/s':>10} {'ms/tok':>8} {'tok/s':>8}"
     sep = "-" * (100 + (model_w + 1 if multi_model else 0))
 
@@ -684,27 +687,14 @@ def print_comparison(results: list[EngineResult], prompt: str, max_tokens: int) 
     print(sep)
 
     for r in results:
-        notes = ""
-        cv_str = f"CV:{r.decode_cv:.1%}" if r.decode_cv > 0 else ""
-        if r.bdn_mean_ns is not None:
-            mean_ms = r.bdn_mean_ns / 1_000_000
-            stddev_ms = (r.bdn_stddev_ns or 0) / 1_000_000
-            notes = f"(BDN: {mean_ms:.1f}\u00b1{stddev_ms:.1f} ms"
-            if cv_str:
-                notes += f", {cv_str}"
-            notes += ")"
-        elif r.engine == "llama.cpp":
-            notes = f"(best-of-{len(r.all_decode_tok_per_sec or [])} runs"
-            if cv_str:
-                notes += f", {cv_str}"
-            notes += ")"
+        cv_str = f"{r.decode_cv:.1%}" if r.decode_cv > 0 else "-"
 
         print(
             f"{prefix(r.model)}"
             f"{r.engine:<14} "
             f"{r.prefill_ms:>10.1f} {r.prefill_tok_per_sec:>10.1f} "
             f"{r.decode_ms:>10.1f} {r.decode_tok_per_sec:>10.1f} "
-            f"{r.decode_ms_per_tok:>8.2f} {r.total_tok_per_sec:>8.1f}  {notes}"
+            f"{r.decode_ms_per_tok:>8.2f} {r.total_tok_per_sec:>8.1f}  {cv_str:>6}"
         )
 
     print(sep)
@@ -739,6 +729,8 @@ def print_comparison(results: list[EngineResult], prompt: str, max_tokens: int) 
     if has_ratios:
         print(sep)
 
+    print("All values are best-of-N (max tok/s, min ms). CV is the coefficient of variation")
+    print("across runs — lower means more stable; deltas smaller than CV are likely noise.")
     print()
 
 
@@ -830,6 +822,8 @@ def main() -> int:
                         help="Max tokens to generate (default: 20)")
     parser.add_argument("--runs", type=int, default=5,
                         help="Number of llama.cpp runs (default: 5; BDN has its own iteration config)")
+    parser.add_argument("--iterations", type=int, default=None,
+                        help="Override BDN iteration count (default: per-benchmark, typically 5)")
 
     # Engine selection flags — if none specified, all engines run
     parser.add_argument("--dotllm", action="store_true",
@@ -939,6 +933,7 @@ def main() -> int:
                 bdn_filter=args.bdn_filter,
                 bdn_project=args.bdn_project,
                 skip_bdn_build=args.skip_bdn_build,
+                iterations=args.iterations,
             )
             all_results.extend(results)
 

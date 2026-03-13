@@ -212,12 +212,10 @@ def rich_trend_table(entries: list[BenchEntry], model_filter: str | None) -> Non
 
     table = Table(title="Benchmark Trend", show_lines=False, pad_edge=True)
     table.add_column("Label", style="bold cyan", no_wrap=True)
-    table.add_column("Commit", style="dim")
     table.add_column("Date", style="dim")
     table.add_column("Model", style="dim")
     table.add_column("Prefill tok/s", justify="right")
     table.add_column("Decode tok/s", justify="right")
-    table.add_column("Decode ms/tok", justify="right")
     table.add_column("CV", justify="right", style="dim")
 
     prev_result: dict | None = None
@@ -228,7 +226,6 @@ def rich_trend_table(entries: list[BenchEntry], model_filter: str | None) -> Non
 
         pf = result.get("prefill_tok_per_sec", 0)
         dc = result.get("decode_tok_per_sec", 0)
-        ms = result.get("decode_ms_per_tok", 0)
         model = result.get("model", "?")
         cv = _compute_cv(result)
 
@@ -238,20 +235,16 @@ def rich_trend_table(entries: list[BenchEntry], model_filter: str | None) -> Non
             noise_cv = max(cv, prev_cv)
             _, pf_style = format_delta(prev_result.get("prefill_tok_per_sec", 0), pf, True, cv=noise_cv)
             _, dc_style = format_delta(prev_result.get("decode_tok_per_sec", 0), dc, True, cv=noise_cv)
-            _, ms_style = format_delta(prev_result.get("decode_ms_per_tok", 0), ms, False, cv=noise_cv)
         else:
-            pf_style = dc_style = ms_style = ""
+            pf_style = dc_style = ""
 
         cv_text = f"{cv:.1%}" if cv > 0 else "-"
-        dirty = "*" if entry.dirty else ""
         table.add_row(
             entry.label,
-            f"{entry.commit}{dirty}",
             entry.date,
             model,
             Text(f"{pf:.1f}", style=pf_style),
             Text(f"{dc:.1f}", style=dc_style),
-            Text(f"{ms:.2f}", style=ms_style),
             cv_text,
         )
         prev_result = result
@@ -325,21 +318,19 @@ def rich_comparison_table(base: BenchEntry, current: BenchEntry, model_filter: s
 
 def plain_trend_table(entries: list[BenchEntry], model_filter: str | None) -> None:
     """Plain-text trend table when rich is not installed."""
-    print(f"\n{'Label':<20} {'Commit':<9} {'Date':<12} {'Model':<30} {'Prefill tok/s':>14} {'Decode tok/s':>13} {'Decode ms/tok':>14} {'CV':>6}")
-    print("-" * 122)
+    print(f"\n{'Label':<20} {'Date':<12} {'Model':<30} {'Prefill tok/s':>14} {'Decode tok/s':>13} {'CV':>6}")
+    print("-" * 99)
     for entry in entries:
         result = entry.get_result(model_filter)
         if not result:
             continue
-        dirty = "*" if entry.dirty else ""
         cv = _compute_cv(result)
         cv_text = f"{cv:.1%}" if cv > 0 else "-"
         print(
-            f"{entry.label:<20} {entry.commit + dirty:<9} {entry.date:<12} "
+            f"{entry.label:<20} {entry.date:<12} "
             f"{result.get('model', '?'):<30} "
             f"{result.get('prefill_tok_per_sec', 0):>14.1f} "
             f"{result.get('decode_tok_per_sec', 0):>13.1f} "
-            f"{result.get('decode_ms_per_tok', 0):>14.2f} "
             f"{cv_text:>6}"
         )
     print()
@@ -378,21 +369,19 @@ def plain_comparison_table(base: BenchEntry, current: BenchEntry, model_filter: 
 
 def md_trend_table(entries: list[BenchEntry], model_filter: str | None) -> None:
     print("## Benchmark Trend\n")
-    print("| Label | Commit | Date | Model | Prefill tok/s | Decode tok/s | Decode ms/tok | CV |")
-    print("|-------|--------|------|-------|---------------|--------------|---------------|----|")
+    print("| Label | Date | Model | Prefill tok/s | Decode tok/s | CV |")
+    print("|-------|------|-------|---------------|--------------|-----|")
     for entry in entries:
         result = entry.get_result(model_filter)
         if not result:
             continue
-        dirty = "*" if entry.dirty else ""
         cv = _compute_cv(result)
         cv_text = f"{cv:.1%}" if cv > 0 else "-"
         print(
-            f"| {entry.label} | {entry.commit}{dirty} | {entry.date} | "
+            f"| {entry.label} | {entry.date} | "
             f"{result.get('model', '?')} | "
             f"{result.get('prefill_tok_per_sec', 0):.1f} | "
             f"{result.get('decode_tok_per_sec', 0):.1f} | "
-            f"{result.get('decode_ms_per_tok', 0):.2f} | "
             f"{cv_text} |"
         )
 
