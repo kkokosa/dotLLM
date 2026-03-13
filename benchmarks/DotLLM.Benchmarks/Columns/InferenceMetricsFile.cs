@@ -14,7 +14,17 @@ internal sealed record InferenceMetricsFile(
     [property: JsonPropertyName("medianDecodeMs")] double MedianDecodeMs,
     [property: JsonPropertyName("prefillTokenCount")] int PrefillTokenCount,
     [property: JsonPropertyName("decodeTokenCount")] int DecodeTokenCount,
-    [property: JsonPropertyName("iterations")] int Iterations)
+    [property: JsonPropertyName("iterations")] int Iterations,
+    [property: JsonPropertyName("bestPrefillTokPerSec")] double BestPrefillTokPerSec = 0,
+    [property: JsonPropertyName("bestDecodeTokPerSec")] double BestDecodeTokPerSec = 0,
+    [property: JsonPropertyName("bestPrefillMs")] double BestPrefillMs = 0,
+    [property: JsonPropertyName("bestDecodeMs")] double BestDecodeMs = 0,
+    [property: JsonPropertyName("decodeCv")] double DecodeCv = 0,
+    [property: JsonPropertyName("prefillCv")] double PrefillCv = 0,
+    [property: JsonPropertyName("allDecodeTokPerSec")] double[]? AllDecodeTokPerSec = null,
+    [property: JsonPropertyName("allPrefillTokPerSec")] double[]? AllPrefillTokPerSec = null,
+    [property: JsonPropertyName("allDecodeMs")] double[]? AllDecodeMs = null,
+    [property: JsonPropertyName("allPrefillMs")] double[]? AllPrefillMs = null)
 {
     private static readonly JsonSerializerOptions s_jsonOptions = new()
     {

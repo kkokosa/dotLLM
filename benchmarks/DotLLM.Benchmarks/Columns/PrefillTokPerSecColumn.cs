@@ -16,7 +16,7 @@ internal sealed class PrefillTokPerSecColumn : IColumn
     public int PriorityInCategory => 0;
     public bool IsNumeric => true;
     public UnitType UnitType => UnitType.Dimensionless;
-    public string Legend => "Median prefill throughput (tokens per second)";
+    public string Legend => "Best-of-N prefill throughput (tokens per second)";
 
     public string GetValue(Summary summary, BenchmarkCase benchmarkCase)
         => GetValue(summary, benchmarkCase, SummaryStyle.Default);
@@ -30,7 +30,9 @@ internal sealed class PrefillTokPerSecColumn : IColumn
         if (!InferenceMetricsFile.TryRead(key, out var data) || data is null)
             return "N/A";
 
-        return data.MedianPrefillTokPerSec.ToString("F1", style.CultureInfo);
+        // Prefer best-of-N; fall back to median for old data files
+        double value = data.BestPrefillTokPerSec > 0 ? data.BestPrefillTokPerSec : data.MedianPrefillTokPerSec;
+        return value.ToString("F1", style.CultureInfo);
     }
 
     public bool IsAvailable(Summary summary) => true;

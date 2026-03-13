@@ -16,7 +16,7 @@ internal sealed class DecodeTokPerSecColumn : IColumn
     public int PriorityInCategory => 1;
     public bool IsNumeric => true;
     public UnitType UnitType => UnitType.Dimensionless;
-    public string Legend => "Median decode throughput (tokens per second)";
+    public string Legend => "Best-of-N decode throughput (tokens per second)";
 
     public string GetValue(Summary summary, BenchmarkCase benchmarkCase)
         => GetValue(summary, benchmarkCase, SummaryStyle.Default);
@@ -30,7 +30,9 @@ internal sealed class DecodeTokPerSecColumn : IColumn
         if (!InferenceMetricsFile.TryRead(key, out var data) || data is null)
             return "N/A";
 
-        return data.MedianDecodeTokPerSec.ToString("F1", style.CultureInfo);
+        // Prefer best-of-N; fall back to median for old data files
+        double value = data.BestDecodeTokPerSec > 0 ? data.BestDecodeTokPerSec : data.MedianDecodeTokPerSec;
+        return value.ToString("F1", style.CultureInfo);
     }
 
     public bool IsAvailable(Summary summary) => true;

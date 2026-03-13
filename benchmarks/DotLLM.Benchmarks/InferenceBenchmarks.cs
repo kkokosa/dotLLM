@@ -115,22 +115,37 @@ public class InferenceBenchmarks
     [GlobalCleanup]
     public void Cleanup()
     {
-        // Write median metrics for the custom IColumn bridge
+        // Write metrics for the custom IColumn bridge
         if (_timings.Count > 0)
         {
-            var prefillTokPerSec = _timings.Select(t => t.PrefillTokensPerSec).OrderBy(v => v).ToList();
-            var decodeTokPerSec = _timings.Select(t => t.DecodeTokensPerSec).OrderBy(v => v).ToList();
-            var prefillMs = _timings.Select(t => t.PrefillTimeMs).OrderBy(v => v).ToList();
-            var decodeMs = _timings.Select(t => t.DecodeTimeMs).OrderBy(v => v).ToList();
+            var prefillTokPerSecAll = _timings.Select(t => t.PrefillTokensPerSec).ToArray();
+            var decodeTokPerSecAll = _timings.Select(t => t.DecodeTokensPerSec).ToArray();
+            var prefillMsAll = _timings.Select(t => t.PrefillTimeMs).ToArray();
+            var decodeMsAll = _timings.Select(t => t.DecodeTimeMs).ToArray();
+
+            var prefillTokPerSecSorted = prefillTokPerSecAll.OrderBy(v => v).ToList();
+            var decodeTokPerSecSorted = decodeTokPerSecAll.OrderBy(v => v).ToList();
+            var prefillMsSorted = prefillMsAll.OrderBy(v => v).ToList();
+            var decodeMsSorted = decodeMsAll.OrderBy(v => v).ToList();
 
             var metrics = new InferenceMetricsFile(
-                MedianPrefillTokPerSec: Median(prefillTokPerSec),
-                MedianDecodeTokPerSec: Median(decodeTokPerSec),
-                MedianPrefillMs: Median(prefillMs),
-                MedianDecodeMs: Median(decodeMs),
+                MedianPrefillTokPerSec: Median(prefillTokPerSecSorted),
+                MedianDecodeTokPerSec: Median(decodeTokPerSecSorted),
+                MedianPrefillMs: Median(prefillMsSorted),
+                MedianDecodeMs: Median(decodeMsSorted),
                 PrefillTokenCount: _timings[0].PrefillTokenCount,
                 DecodeTokenCount: _timings[0].DecodeTokenCount,
-                Iterations: _timings.Count);
+                Iterations: _timings.Count,
+                BestPrefillTokPerSec: prefillTokPerSecAll.Max(),
+                BestDecodeTokPerSec: decodeTokPerSecAll.Max(),
+                BestPrefillMs: prefillMsAll.Min(),
+                BestDecodeMs: decodeMsAll.Min(),
+                DecodeCv: Cv(decodeTokPerSecAll),
+                PrefillCv: Cv(prefillTokPerSecAll),
+                AllDecodeTokPerSec: decodeTokPerSecAll,
+                AllPrefillTokPerSec: prefillTokPerSecAll,
+                AllDecodeMs: decodeMsAll,
+                AllPrefillMs: prefillMsAll);
 
             InferenceMetricsFile.Write(_metricsKey, metrics);
         }
@@ -145,6 +160,22 @@ public class InferenceBenchmarks
         if (n == 0) return 0;
         if (n % 2 == 1) return sorted[n / 2];
         return (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
+    }
+
+    private static double StdDev(double[] values)
+    {
+        if (values.Length < 2) return 0;
+        double mean = values.Average();
+        double sumSq = values.Sum(v => (v - mean) * (v - mean));
+        return Math.Sqrt(sumSq / (values.Length - 1));
+    }
+
+    private static double Cv(double[] values)
+    {
+        if (values.Length < 2) return 0;
+        double mean = values.Average();
+        if (mean == 0) return 0;
+        return StdDev(values) / mean;
     }
 
     private static string DownloadModel(string repoId, string filename, int approxMB)

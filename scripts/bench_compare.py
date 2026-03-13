@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from statistics import median
+from statistics import median, stdev
 
 
 # ---------------------------------------------------------------------------
@@ -97,20 +97,37 @@ PROMPTS = {
 
 @dataclass
 class EngineResult:
-    """Standardized result from any inference engine."""
+    """Standardized result from any inference engine.
+
+    Primary fields (prefill_tok_per_sec, decode_tok_per_sec, prefill_ms, decode_ms)
+    store the **best-of-N** values. Median values are in explicit median_* fields.
+    """
     engine: str
     model: str
-    prefill_ms: float
-    decode_ms: float
+    prefill_ms: float          # best (min) across runs
+    decode_ms: float           # best (min) across runs
     prefill_tokens: int
     decode_tokens: int
-    prefill_tok_per_sec: float
-    decode_tok_per_sec: float
+    prefill_tok_per_sec: float  # best (max) across runs
+    decode_tok_per_sec: float   # best (max) across runs
     decode_ms_per_tok: float
     total_tok_per_sec: float
     # BDN-only fields (None for non-BDN engines)
     bdn_mean_ns: float | None = None
     bdn_stddev_ns: float | None = None
+    # Median values (for backward compat and display)
+    median_prefill_tok_per_sec: float = 0
+    median_decode_tok_per_sec: float = 0
+    median_prefill_ms: float = 0
+    median_decode_ms: float = 0
+    # Noise metrics
+    decode_cv: float = 0
+    prefill_cv: float = 0
+    # Per-iteration raw data
+    all_decode_tok_per_sec: list[float] | None = None
+    all_prefill_tok_per_sec: list[float] | None = None
+    all_decode_ms: list[float] | None = None
+    all_prefill_ms: list[float] | None = None
 
 
 def _default_models_dir() -> Path:
@@ -377,44 +394,80 @@ def run_dotllm(
             metrics_dir = Path(tempfile.gettempdir()) / "dotllm-bdn-metrics"
             metrics_file = metrics_dir / f"{model_name}.json"
 
-            prefill_ms = 0.0
-            decode_ms = 0.0
+            median_prefill_ms = 0.0
+            median_decode_ms = 0.0
             prefill_tokens = 0
             decode_tokens = 0
-            prefill_tok_s = 0.0
-            decode_tok_s = 0.0
+            median_prefill_tok_s = 0.0
+            median_decode_tok_s = 0.0
+            best_prefill_tok_s = 0.0
+            best_decode_tok_s = 0.0
+            best_prefill_ms = 0.0
+            best_decode_ms = 0.0
+            decode_cv = 0.0
+            prefill_cv = 0.0
+            all_decode_tok_s: list[float] | None = None
+            all_prefill_tok_s: list[float] | None = None
+            all_decode_ms_vals: list[float] | None = None
+            all_prefill_ms_vals: list[float] | None = None
 
             if metrics_file.exists():
                 try:
                     with open(metrics_file) as f:
                         metrics = json.load(f)
-                    prefill_ms = metrics.get("medianPrefillMs", 0)
-                    decode_ms = metrics.get("medianDecodeMs", 0)
+                    median_prefill_ms = metrics.get("medianPrefillMs", 0)
+                    median_decode_ms = metrics.get("medianDecodeMs", 0)
                     prefill_tokens = metrics.get("prefillTokenCount", 0)
                     decode_tokens = metrics.get("decodeTokenCount", 0)
-                    prefill_tok_s = metrics.get("medianPrefillTokPerSec", 0)
-                    decode_tok_s = metrics.get("medianDecodeTokPerSec", 0)
+                    median_prefill_tok_s = metrics.get("medianPrefillTokPerSec", 0)
+                    median_decode_tok_s = metrics.get("medianDecodeTokPerSec", 0)
+                    best_prefill_tok_s = metrics.get("bestPrefillTokPerSec", 0)
+                    best_decode_tok_s = metrics.get("bestDecodeTokPerSec", 0)
+                    best_prefill_ms = metrics.get("bestPrefillMs", 0)
+                    best_decode_ms = metrics.get("bestDecodeMs", 0)
+                    decode_cv = metrics.get("decodeCv", 0)
+                    prefill_cv = metrics.get("prefillCv", 0)
+                    all_decode_tok_s = metrics.get("allDecodeTokPerSec")
+                    all_prefill_tok_s = metrics.get("allPrefillTokPerSec")
+                    all_decode_ms_vals = metrics.get("allDecodeMs")
+                    all_prefill_ms_vals = metrics.get("allPrefillMs")
                 except (json.JSONDecodeError, OSError):
                     pass
 
-            total_ms = prefill_ms + decode_ms
+            # Use best-of-N as primary; fall back to median for old metrics files
+            pf_tok_s = best_prefill_tok_s if best_prefill_tok_s > 0 else median_prefill_tok_s
+            dc_tok_s = best_decode_tok_s if best_decode_tok_s > 0 else median_decode_tok_s
+            pf_ms = best_prefill_ms if best_prefill_ms > 0 else median_prefill_ms
+            dc_ms = best_decode_ms if best_decode_ms > 0 else median_decode_ms
+
+            total_ms = pf_ms + dc_ms
             total_tokens = prefill_tokens + decode_tokens
             total_tok_s = total_tokens / (total_ms / 1000.0) if total_ms > 0 else 0
-            ms_per_tok = decode_ms / decode_tokens if decode_tokens > 0 else 0
+            ms_per_tok = dc_ms / decode_tokens if decode_tokens > 0 else 0
 
             bdn_results.append(EngineResult(
                 engine="dotLLM",
                 model=model_name,
-                prefill_ms=prefill_ms,
-                decode_ms=decode_ms,
+                prefill_ms=pf_ms,
+                decode_ms=dc_ms,
                 prefill_tokens=prefill_tokens,
                 decode_tokens=decode_tokens,
-                prefill_tok_per_sec=prefill_tok_s,
-                decode_tok_per_sec=decode_tok_s,
+                prefill_tok_per_sec=pf_tok_s,
+                decode_tok_per_sec=dc_tok_s,
                 decode_ms_per_tok=ms_per_tok,
                 total_tok_per_sec=total_tok_s,
                 bdn_mean_ns=mean_ns,
                 bdn_stddev_ns=stddev_ns,
+                median_prefill_tok_per_sec=median_prefill_tok_s,
+                median_decode_tok_per_sec=median_decode_tok_s,
+                median_prefill_ms=median_prefill_ms,
+                median_decode_ms=median_decode_ms,
+                decode_cv=decode_cv,
+                prefill_cv=prefill_cv,
+                all_decode_tok_per_sec=all_decode_tok_s,
+                all_prefill_tok_per_sec=all_prefill_tok_s,
+                all_decode_ms=all_decode_ms_vals,
+                all_prefill_ms=all_prefill_ms_vals,
             ))
 
     return bdn_results
@@ -533,28 +586,50 @@ def run_llamacpp(
         print("[llama.cpp] No successful runs.", file=sys.stderr)
         return []
 
-    pf_ms = median(prefill_ms_list)
-    dc_ms = median(decode_ms_list)
+    # Best-of-N: max for throughput, min for latency
+    best_pf_tok_s = max(prefill_tok_s_list)
+    best_dc_tok_s = max(decode_tok_s_list)
+    best_pf_ms = min(prefill_ms_list)
+    best_dc_ms = min(decode_ms_list)
+
+    med_pf_tok_s = median(prefill_tok_s_list)
+    med_dc_tok_s = median(decode_tok_s_list)
+    med_pf_ms = median(prefill_ms_list)
+    med_dc_ms = median(decode_ms_list)
+
     pf_tok = prefill_tokens_list[0]
     dc_tok = decode_tokens_list[0]
-    pf_tok_s = median(prefill_tok_s_list)
-    dc_tok_s = median(decode_tok_s_list)
-    total_ms = pf_ms + dc_ms
+
+    # CV (coefficient of variation)
+    dc_cv = (stdev(decode_tok_s_list) / (sum(decode_tok_s_list) / len(decode_tok_s_list))) if len(decode_tok_s_list) >= 2 else 0
+    pf_cv = (stdev(prefill_tok_s_list) / (sum(prefill_tok_s_list) / len(prefill_tok_s_list))) if len(prefill_tok_s_list) >= 2 else 0
+
+    total_ms = best_pf_ms + best_dc_ms
     total_tokens = pf_tok + dc_tok
     total_tok_s = total_tokens / (total_ms / 1000.0) if total_ms > 0 else 0
-    ms_per_tok = dc_ms / dc_tok if dc_tok > 0 else 0
+    ms_per_tok = best_dc_ms / dc_tok if dc_tok > 0 else 0
 
     return [EngineResult(
         engine="llama.cpp",
         model=model_name,
-        prefill_ms=pf_ms,
-        decode_ms=dc_ms,
+        prefill_ms=best_pf_ms,
+        decode_ms=best_dc_ms,
         prefill_tokens=pf_tok,
         decode_tokens=dc_tok,
-        prefill_tok_per_sec=pf_tok_s,
-        decode_tok_per_sec=dc_tok_s,
+        prefill_tok_per_sec=best_pf_tok_s,
+        decode_tok_per_sec=best_dc_tok_s,
         decode_ms_per_tok=ms_per_tok,
         total_tok_per_sec=total_tok_s,
+        median_prefill_tok_per_sec=med_pf_tok_s,
+        median_decode_tok_per_sec=med_dc_tok_s,
+        median_prefill_ms=med_pf_ms,
+        median_decode_ms=med_dc_ms,
+        decode_cv=dc_cv,
+        prefill_cv=pf_cv,
+        all_decode_tok_per_sec=list(decode_tok_s_list),
+        all_prefill_tok_per_sec=list(prefill_tok_s_list),
+        all_decode_ms=list(decode_ms_list),
+        all_prefill_ms=list(prefill_ms_list),
     )]
 
 
@@ -610,12 +685,19 @@ def print_comparison(results: list[EngineResult], prompt: str, max_tokens: int) 
 
     for r in results:
         notes = ""
+        cv_str = f"CV:{r.decode_cv:.1%}" if r.decode_cv > 0 else ""
         if r.bdn_mean_ns is not None:
             mean_ms = r.bdn_mean_ns / 1_000_000
             stddev_ms = (r.bdn_stddev_ns or 0) / 1_000_000
-            notes = f"(BDN: {mean_ms:.1f}\u00b1{stddev_ms:.1f} ms)"
+            notes = f"(BDN: {mean_ms:.1f}\u00b1{stddev_ms:.1f} ms"
+            if cv_str:
+                notes += f", {cv_str}"
+            notes += ")"
         elif r.engine == "llama.cpp":
-            notes = "(median of runs)"
+            notes = f"(best-of-{len(r.all_decode_tok_per_sec or [])} runs"
+            if cv_str:
+                notes += f", {cv_str}"
+            notes += ")"
 
         print(
             f"{prefix(r.model)}"

@@ -158,8 +158,27 @@ def scan_directory(directory: Path) -> list[BenchEntry]:
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
-def format_delta(old_val: float, new_val: float, higher_is_better: bool) -> tuple[str, str]:
-    """Format delta as (text, style). style is 'green'/'red'/'dim'."""
+def _compute_cv(result: dict) -> float:
+    """Extract or compute decode CV from a result dict."""
+    cv = result.get("decode_cv", 0)
+    if cv:
+        return cv
+    # Fallback: compute from raw per-iteration data if available
+    all_vals = result.get("all_decode_tok_per_sec")
+    if all_vals and len(all_vals) >= 2:
+        mean = sum(all_vals) / len(all_vals)
+        if mean > 0:
+            variance = sum((v - mean) ** 2 for v in all_vals) / (len(all_vals) - 1)
+            return variance ** 0.5 / mean
+    return 0
+
+
+def format_delta(old_val: float, new_val: float, higher_is_better: bool, cv: float = 0) -> tuple[str, str]:
+    """Format delta as (text, style). style is 'green'/'red'/'dim'.
+
+    If cv > 0 and the delta is within the noise floor (abs(delta%) < cv*100),
+    the text is prefixed with '~' and styled as dim.
+    """
     if old_val == 0:
         return "N/A", "dim"
     pct = (new_val - old_val) / old_val * 100
@@ -167,8 +186,9 @@ def format_delta(old_val: float, new_val: float, higher_is_better: bool) -> tupl
         pct = -pct
     sign = "+" if pct >= 0 else ""
     text = f"{sign}{pct:.1f}%"
-    if abs(pct) < 0.5:
-        return text, "dim"
+    noise_threshold = cv * 100 if cv > 0 else 0.5
+    if abs(pct) < noise_threshold:
+        return f"~{text}", "dim"
     return text, "green" if pct > 0 else "red"
 
 
@@ -198,6 +218,7 @@ def rich_trend_table(entries: list[BenchEntry], model_filter: str | None) -> Non
     table.add_column("Prefill tok/s", justify="right")
     table.add_column("Decode tok/s", justify="right")
     table.add_column("Decode ms/tok", justify="right")
+    table.add_column("CV", justify="right", style="dim")
 
     prev_result: dict | None = None
     for entry in entries:
@@ -209,15 +230,19 @@ def rich_trend_table(entries: list[BenchEntry], model_filter: str | None) -> Non
         dc = result.get("decode_tok_per_sec", 0)
         ms = result.get("decode_ms_per_tok", 0)
         model = result.get("model", "?")
+        cv = _compute_cv(result)
 
-        # Color-code values relative to previous entry
+        # Color-code values relative to previous entry (noise-aware)
         if prev_result:
-            _, pf_style = format_delta(prev_result.get("prefill_tok_per_sec", 0), pf, True)
-            _, dc_style = format_delta(prev_result.get("decode_tok_per_sec", 0), dc, True)
-            _, ms_style = format_delta(prev_result.get("decode_ms_per_tok", 0), ms, False)
+            prev_cv = _compute_cv(prev_result)
+            noise_cv = max(cv, prev_cv)
+            _, pf_style = format_delta(prev_result.get("prefill_tok_per_sec", 0), pf, True, cv=noise_cv)
+            _, dc_style = format_delta(prev_result.get("decode_tok_per_sec", 0), dc, True, cv=noise_cv)
+            _, ms_style = format_delta(prev_result.get("decode_ms_per_tok", 0), ms, False, cv=noise_cv)
         else:
             pf_style = dc_style = ms_style = ""
 
+        cv_text = f"{cv:.1%}" if cv > 0 else "-"
         dirty = "*" if entry.dirty else ""
         table.add_row(
             entry.label,
@@ -227,6 +252,7 @@ def rich_trend_table(entries: list[BenchEntry], model_filter: str | None) -> Non
             Text(f"{pf:.1f}", style=pf_style),
             Text(f"{dc:.1f}", style=dc_style),
             Text(f"{ms:.2f}", style=ms_style),
+            cv_text,
         )
         prev_result = result
 
@@ -246,6 +272,10 @@ def rich_comparison_table(base: BenchEntry, current: BenchEntry, model_filter: s
         console.print("[red]No matching results found in one or both files.[/red]")
         return
 
+    base_cv = _compute_cv(base_r)
+    curr_cv = _compute_cv(curr_r)
+    noise_cv = max(base_cv, curr_cv)
+
     table = Table(
         title=f"Comparison: {base.display_name} -> {current.display_name}",
         show_lines=False,
@@ -255,17 +285,24 @@ def rich_comparison_table(base: BenchEntry, current: BenchEntry, model_filter: s
     table.add_column(base.display_name, justify="right", style="dim")
     table.add_column(current.display_name, justify="right", style="bold")
     table.add_column("Delta", justify="right")
+    table.add_column("CV", justify="right", style="dim")
 
     for label, key, higher_better, fmt in METRICS:
         bv = base_r.get(key, 0)
         cv = curr_r.get(key, 0)
-        delta_text, delta_style = format_delta(bv, cv, higher_better)
+        delta_text, delta_style = format_delta(bv, cv, higher_better, cv=noise_cv)
+
+        # Show CV for throughput metrics
+        cv_text = ""
+        if "tok_per_sec" in key and curr_cv > 0:
+            cv_text = f"{curr_cv:.1%}"
 
         table.add_row(
             label,
             f"{bv:{fmt}}",
             f"{cv:{fmt}}",
             Text(delta_text, style=f"bold {delta_style}"),
+            cv_text,
         )
 
     console.print()
@@ -273,10 +310,11 @@ def rich_comparison_table(base: BenchEntry, current: BenchEntry, model_filter: s
 
     model = curr_r.get("model", "?")
     config = current.config
+    cv_note = f" | CV: {curr_cv:.1%}" if curr_cv > 0 else ""
     console.print(
         f"  Model: [cyan]{model}[/cyan] | "
         f"Prompt: {config.get('prompt_size', '?')} | "
-        f"Tokens: {config.get('max_tokens', '?')}"
+        f"Tokens: {config.get('max_tokens', '?')}{cv_note}"
     )
     console.print()
 
@@ -287,19 +325,22 @@ def rich_comparison_table(base: BenchEntry, current: BenchEntry, model_filter: s
 
 def plain_trend_table(entries: list[BenchEntry], model_filter: str | None) -> None:
     """Plain-text trend table when rich is not installed."""
-    print(f"\n{'Label':<20} {'Commit':<9} {'Date':<12} {'Model':<30} {'Prefill tok/s':>14} {'Decode tok/s':>13} {'Decode ms/tok':>14}")
-    print("-" * 115)
+    print(f"\n{'Label':<20} {'Commit':<9} {'Date':<12} {'Model':<30} {'Prefill tok/s':>14} {'Decode tok/s':>13} {'Decode ms/tok':>14} {'CV':>6}")
+    print("-" * 122)
     for entry in entries:
         result = entry.get_result(model_filter)
         if not result:
             continue
         dirty = "*" if entry.dirty else ""
+        cv = _compute_cv(result)
+        cv_text = f"{cv:.1%}" if cv > 0 else "-"
         print(
             f"{entry.label:<20} {entry.commit + dirty:<9} {entry.date:<12} "
             f"{result.get('model', '?'):<30} "
             f"{result.get('prefill_tok_per_sec', 0):>14.1f} "
             f"{result.get('decode_tok_per_sec', 0):>13.1f} "
-            f"{result.get('decode_ms_per_tok', 0):>14.2f}"
+            f"{result.get('decode_ms_per_tok', 0):>14.2f} "
+            f"{cv_text:>6}"
         )
     print()
 
@@ -312,16 +353,22 @@ def plain_comparison_table(base: BenchEntry, current: BenchEntry, model_filter: 
         print("No matching results found.", file=sys.stderr)
         return
 
+    base_cv = _compute_cv(base_r)
+    curr_cv = _compute_cv(curr_r)
+    noise_cv = max(base_cv, curr_cv)
+
     title = f"Comparison: {base.display_name} -> {current.display_name}"
     print(f"\n{title}\n")
-    header = f"{'Metric':<20} {base.display_name:>22} {current.display_name:>22} {'Delta':>10}"
+    header = f"{'Metric':<20} {base.display_name:>22} {current.display_name:>22} {'Delta':>12}"
     print(header)
     print("-" * len(header))
     for label, key, higher_better, fmt in METRICS:
         bv = base_r.get(key, 0)
         cv = curr_r.get(key, 0)
-        delta_text, _ = format_delta(bv, cv, higher_better)
-        print(f"{label:<20} {bv:>22{fmt}} {cv:>22{fmt}} {delta_text:>10}")
+        delta_text, _ = format_delta(bv, cv, higher_better, cv=noise_cv)
+        print(f"{label:<20} {bv:>22{fmt}} {cv:>22{fmt}} {delta_text:>12}")
+    if curr_cv > 0:
+        print(f"\n  CV: {curr_cv:.1%}")
     print()
 
 
@@ -331,19 +378,22 @@ def plain_comparison_table(base: BenchEntry, current: BenchEntry, model_filter: 
 
 def md_trend_table(entries: list[BenchEntry], model_filter: str | None) -> None:
     print("## Benchmark Trend\n")
-    print("| Label | Commit | Date | Model | Prefill tok/s | Decode tok/s | Decode ms/tok |")
-    print("|-------|--------|------|-------|---------------|--------------|---------------|")
+    print("| Label | Commit | Date | Model | Prefill tok/s | Decode tok/s | Decode ms/tok | CV |")
+    print("|-------|--------|------|-------|---------------|--------------|---------------|----|")
     for entry in entries:
         result = entry.get_result(model_filter)
         if not result:
             continue
         dirty = "*" if entry.dirty else ""
+        cv = _compute_cv(result)
+        cv_text = f"{cv:.1%}" if cv > 0 else "-"
         print(
             f"| {entry.label} | {entry.commit}{dirty} | {entry.date} | "
             f"{result.get('model', '?')} | "
             f"{result.get('prefill_tok_per_sec', 0):.1f} | "
             f"{result.get('decode_tok_per_sec', 0):.1f} | "
-            f"{result.get('decode_ms_per_tok', 0):.2f} |"
+            f"{result.get('decode_ms_per_tok', 0):.2f} | "
+            f"{cv_text} |"
         )
 
 
@@ -353,18 +403,23 @@ def md_comparison_table(base: BenchEntry, current: BenchEntry, model_filter: str
     if not base_r or not curr_r:
         return
 
+    base_cv = _compute_cv(base_r)
+    curr_cv = _compute_cv(curr_r)
+    noise_cv = max(base_cv, curr_cv)
+
     print(f"## Comparison: {base.display_name} -> {current.display_name}\n")
     print(f"| Metric | {base.display_name} | {current.display_name} | Delta |")
     print("|--------|--------|--------|-------|")
     for label, key, higher_better, fmt in METRICS:
         bv = base_r.get(key, 0)
         cv = curr_r.get(key, 0)
-        delta_text, _ = format_delta(bv, cv, higher_better)
+        delta_text, _ = format_delta(bv, cv, higher_better, cv=noise_cv)
         print(f"| {label} | {bv:{fmt}} | {cv:{fmt}} | {delta_text} |")
     print()
     model = curr_r.get("model", "?")
     config = current.config
-    print(f"Model: {model} | Prompt: {config.get('prompt_size', '?')} | Tokens: {config.get('max_tokens', '?')}")
+    cv_note = f" | CV: {curr_cv:.1%}" if curr_cv > 0 else ""
+    print(f"Model: {model} | Prompt: {config.get('prompt_size', '?')} | Tokens: {config.get('max_tokens', '?')}{cv_note}")
 
 
 # ---------------------------------------------------------------------------
