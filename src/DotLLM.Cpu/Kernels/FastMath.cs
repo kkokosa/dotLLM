@@ -54,6 +54,12 @@ public static class FastMath
     /// <param name="output">Output span. May alias <paramref name="input"/> for in-place operation.</param>
     /// <param name="offset">Additive offset (typically <c>-max</c> for numerical stability).</param>
     /// <returns>Sum of all exponentiated values.</returns>
+    /// <remarks>
+    /// The vectorized paths only clamp the lower bound (<c>-87.3f</c>). This is safe because the intended
+    /// use is attention softmax where <paramref name="offset"/> is <c>-max(input)</c>, guaranteeing
+    /// <c>input[i] + offset ≤ 0</c>. Callers passing a positive offset must ensure
+    /// <c>input[i] + offset ≤ 88.7f</c> to avoid integer overflow in the bit trick.
+    /// </remarks>
     [SkipLocalsInit]
     public static float ExpSumAndStore(ReadOnlySpan<float> input, Span<float> output, float offset)
     {
@@ -183,8 +189,7 @@ public static class FastMath
         for (int i = 0; i < length; i++)
         {
             float val = Unsafe.Add(ref src, (nuint)i) + offset;
-            // Scalar fallback uses MathF.Exp for full precision
-            float exp = MathF.Exp(val);
+            float exp = FastExp(val);
             Unsafe.Add(ref dst, (nuint)i) = exp;
             sum += exp;
         }
