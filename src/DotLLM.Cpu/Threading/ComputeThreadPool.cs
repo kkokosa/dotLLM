@@ -74,10 +74,13 @@ public sealed unsafe class ComputeThreadPool : IDisposable
 
         // Compute decode thread count using the pool's actual threadCount, not the config's EffectiveThreadCount
         // (which may be wrong when using the simple constructor with default config).
-        int memChannels = topology?.MemoryChannelEstimate ?? 2;
+        // When topology is null (no NUMA detection), don't apply the memory channel heuristic —
+        // use all configured threads. The cap only makes sense with real topology data.
         _decodeThreadCount = config.DecodeThreadCount > 0
             ? Math.Clamp(config.DecodeThreadCount, 2, threadCount)
-            : Math.Clamp(memChannels, 2, threadCount);
+            : topology is not null
+                ? Math.Clamp(topology.MemoryChannelEstimate, 2, threadCount)
+                : threadCount;
 
         // Build core assignment map
         _workerCoreAssignment = BuildCoreAssignment(workerCount, topology, config);
