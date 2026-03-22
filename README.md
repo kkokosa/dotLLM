@@ -65,9 +65,13 @@ Each project ships as a separate NuGet package, so users pull in only what they 
 
 ## Getting Started
 
-dotLLM requires [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
+### Prerequisites
 
-**Build from source:**
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- [Python 3.10+](https://www.python.org/) with `pip install rich InquirerPy` (for benchmark scripts)
+- *Optional:* [llama.cpp](https://github.com/ggerganov/llama.cpp) for comparison benchmarks (see [llama.cpp setup](#llamacpp-setup) below)
+
+### Build
 
 ```bash
 git clone https://github.com/kkokosa/dotLLM.git
@@ -75,7 +79,9 @@ cd dotLLM
 dotnet build
 ```
 
-**Run tests:**
+### Tests
+
+**Unit and integration tests:**
 
 ```bash
 dotnet test
@@ -83,7 +89,113 @@ dotnet test
 
 > Integration tests automatically download [SmolLM-135M](https://huggingface.co/QuantFactory/SmolLM-135M-GGUF) Q8_0 (~145 MB) to `~/.dotllm/test-cache/`.
 
-There is no NuGet package yet — the project is in early development. Follow the [Roadmap](#roadmap) for progress toward the first release.
+**Model correctness smoke tests** (`scripts/test_models.py`) run dotLLM CLI with greedy decoding across architectures (Llama, Mistral, Phi, Qwen) and verify expected output:
+
+```bash
+# Build CLI first
+dotnet build src/DotLLM.Cli -c Release
+
+# List available test cases and which models are cached
+python scripts/test_models.py --list
+
+# Run tests for all cached models
+python scripts/test_models.py
+
+# Download missing models and run all tests
+python scripts/test_models.py --download
+
+# Run only specific architectures
+python scripts/test_models.py --filter phi,qwen
+```
+
+Models are downloaded from HuggingFace to `~/.dotllm/models/` on first use and cached for subsequent runs.
+
+### Benchmarks
+
+Three scripts in `scripts/` provide benchmarking at different levels:
+
+**`bench_compare.py`** -- Single-point benchmark. Runs dotLLM (via BDN) and optionally llama.cpp on one or more models, reports best-of-N throughput with CV (coefficient of variation):
+
+```bash
+# Benchmark dotLLM on SmolLM-135M (auto-downloads from HuggingFace)
+python scripts/bench_compare.py --model QuantFactory/SmolLM-135M-GGUF --quant Q8_0
+
+# Benchmark multiple models and quantizations
+python scripts/bench_compare.py --model bartowski/Llama-3.2-1B-Instruct-GGUF --quant Q4_K_M,Q8_0
+
+# Compare dotLLM vs llama.cpp side-by-side
+python scripts/bench_compare.py --model QuantFactory/SmolLM-135M-GGUF --dotllm --llamacpp
+
+# Export results to JSON for later comparison
+python scripts/bench_compare.py --model QuantFactory/SmolLM-135M-GGUF \
+    --export-json benchmarks/results/baseline.json --label baseline
+```
+
+**`bench_trend.py`** -- Interactive comparison of exported JSON results. Displays color-coded delta tables with noise-aware highlighting:
+
+```bash
+# Interactive mode: select runs and models to compare
+python scripts/bench_trend.py
+
+# Compare two specific result files
+python scripts/bench_trend.py benchmarks/results/baseline.json benchmarks/results/optimized.json
+
+# Show all results as a trend table
+python scripts/bench_trend.py --all
+```
+
+**`bench_history.py`** -- Benchmark across git commits. Creates worktrees for each commit, runs bench_compare in each, and displays trend tables with per-commit deltas:
+
+```bash
+# Benchmark last 5 commits on main
+python scripts/bench_history.py myrun --last 5
+
+# Benchmark from a specific commit to HEAD
+python scripts/bench_history.py myrun --from f3d3bf8
+
+# Show results from a previous run (no benchmarking)
+python scripts/bench_history.py myrun --show
+
+# Interactively select which commits to benchmark
+python scripts/bench_history.py myrun --last 10 --select
+```
+
+Sample output (from `bench_history.py --show`):
+
+```
+Benchmark History -- Llama-3.2-1B-Instruct-Q4_K_M
+ Label                   Date        Prefill   %chg pf    Decode   %chg dc     CV
+ run_0 (f3d3bf8)         2026-03-16     46.3               25.1                 -
+ run_1 (c12ba0a)         2026-03-16     45.0    -2.8%      24.9    ~-0.7%       -
+ run_2 (cdb5234)         2026-03-16     43.3    -3.7%      25.3    +1.6%        -
+ run_3 (d1978d2)         2026-03-16     48.2   +11.2%      10.3   -59.3%        -
+ run_4 (572179d)         2026-03-16     48.8    ~+1.3%     31.0   +202.0%    10.6%
+```
+
+> `%chg` columns show commit-to-commit deltas. `~` prefix means the change is within noise (CV threshold). CV requires multiple BDN iterations (controlled by `--runs` in bench_compare).
+
+### llama.cpp setup
+
+To run comparison benchmarks against llama.cpp:
+
+1. **Build llama.cpp** from source ([instructions](https://github.com/ggerganov/llama.cpp#build)):
+   ```bash
+   git clone https://github.com/ggerganov/llama.cpp.git
+   cd llama.cpp && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release
+   ```
+
+2. **Point bench_compare to the binary** -- either:
+   - Set `LLAMACPP_BIN` environment variable to the path of `llama-cli` (or `llama-completion`)
+   - Or pass `--llamacpp-bin /path/to/llama-cli` on each invocation
+
+3. **Run comparison:**
+   ```bash
+   python scripts/bench_compare.py --model QuantFactory/SmolLM-135M-GGUF --dotllm --llamacpp
+   ```
+
+> llama.cpp is optional. All dotLLM benchmarks work without it. The `--llamacpp` flag simply adds a side-by-side comparison column.
+
+There is no NuGet package yet -- the project is in early development. Follow the [Roadmap](#roadmap) for progress toward the first release.
 
 ## News
 
