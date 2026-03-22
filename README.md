@@ -177,17 +177,14 @@ python scripts/bench_trend.py benchmarks/results/baseline.json benchmarks/result
 python scripts/bench_trend.py --all
 ```
 
-Sample output (comparing two runs):
+Sample output (trend across three labeled runs):
 
 ```
-Comparison: baseline (a062743) -> optimized (572179d)
-
-  Metric               baseline (a062743)     optimized (572179d)        Delta
-  Prefill tok/s                      44.8                    48.8       +8.9%
-  Decode tok/s                       24.2                    31.0      +28.1%
-  Decode ms/tok                     41.30                   32.30      +21.8%
-
-  Model: Llama-3.2-1B-Instruct-Q4_K_M | Prompt: short | Tokens: 20 | CV: 10.6%
+                             Benchmark Trend
+ Label      Date        Model               Prefill tok/s   Decode tok/s   CV
+ baseline   2026-03-11  SmolLM-135M.Q4_K_M          127.6          109.5    -
+ step29     2026-03-13  SmolLM-135M.Q4_K_M          142.2          127.0    -
+ step30     2026-03-13  SmolLM-135M.Q4_K_M          146.0           98.6    -
 ```
 
 **`bench_history.py`** -- Benchmark across git commits. Creates worktrees for each commit, runs bench_compare in each, and displays trend tables with per-commit deltas:
@@ -210,21 +207,18 @@ Sample output:
 
 ```
                      Benchmark History -- Llama-3.2-3B-Instruct-Q8_0
- Label                  Date        Prefill tok/s   %chg pf   Decode tok/s   %chg dc     CV
- uber_run5_0 (f3d3bf8)  2026-03-16           24.6                      8.1                 -
- uber_run5_1 (c12ba0a)  2026-03-16           24.3     -1.3%            8.0    ~-0.9%       -
- uber_run5_2 (cdb5234)  2026-03-16           24.9     +2.8%            8.0    ~-0.1%       -
- uber_run5_3 (5531fa4)  2026-03-16           24.7    ~-0.9%            7.8     -1.9%       -
- uber_run5_4 (a062743)  2026-03-16           24.9    ~+0.9%            7.8    ~-0.7%       -
- uber_run5_5 (f50cefe)  2026-03-16           24.7    ~-0.7%            7.9     +1.6%       -
- uber_run5_6 (6c06fbf)  2026-03-16           24.6    ~-0.6%            7.8     -1.9%       -
- uber_run5_7 (d1978d2)  2026-03-16           25.4     +3.4%            7.0    -10.4%       -
- uber_run5_8 (572179d)  2026-03-16           25.5    ~+0.1%            7.8    +12.2%    4.2%
+ Label                   Date        Prefill tok/s  %chg pf  Decode tok/s  %chg dc     CV
+ test_run_0 (f3d3bf8)    2026-03-11          21.2                     7.4              3.8%
+ test_run_1 (cdb5234)    2026-03-12          24.9    +17.5%           8.0    +8.1%     2.1%
+ test_run_2 (a062743)    2026-03-13          24.5    ~-1.6%           7.8   ~-2.5%     4.5%
+ test_run_3 (6c06fbf)    2026-03-14          24.6    ~+0.4%           7.8   ~+0.0%     3.2%
+ test_run_4 (d1978d2)    2026-03-15          25.4     +3.3%           7.0   -10.3%     5.1%
+ test_run_5 (572179d)    2026-03-16          25.5    ~+0.4%           7.8   +11.4%     4.2%
 ```
 
 > `%chg` columns show commit-to-commit deltas. `~` prefix means the change is within noise (CV threshold). CV requires multiple [BenchmarkDotNet](https://benchmarkdotnet.org/) iterations (controlled by `--runs` in bench_compare).
 
-**Why best-of-N instead of median?** On a non-isolated machine (laptop, desktop with background processes), run-to-run noise is typically 6--30%. The median includes runs degraded by OS scheduling jitter, thermal throttling, and background I/O. Best-of-N (maximum throughput) represents what the hardware *can* achieve and is more stable across sessions. CV is reported alongside so you can judge measurement quality -- if CV is high, the environment was noisy and even the best-of-N value should be taken with a grain of salt.
+> **Why best-of-N instead of median?** On a non-isolated machine, run-to-run noise is typically 6--30%. The median includes runs degraded by OS scheduling jitter, thermal throttling, and background I/O. Best-of-N (maximum throughput) represents what the hardware *can* achieve and is more stable across sessions. CV is reported alongside so you can judge measurement quality -- if CV is high, the environment was noisy and even the best-of-N value should be taken with a grain of salt.
 
 ### [llama.cpp](https://github.com/ggerganov/llama.cpp) setup
 
