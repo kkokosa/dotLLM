@@ -83,6 +83,161 @@ cd dotLLM
 dotnet build
 ```
 
+### Run
+
+dotLLM provides a CLI tool (`DotLLM.Cli`) with two generation modes. Models are specified by local GGUF file path or HuggingFace repo ID (auto-downloaded to `~/.dotllm/models/` on first use).
+
+**Single-shot generation** (`run`) — encode a prompt, stream tokens, print performance summary:
+
+```bash
+# Greedy generation (default: temperature=0)
+dotnet run --project src/DotLLM.Cli -c Release -- run QuantFactory/SmolLM-135M-GGUF \
+    --prompt "The capital of France is" --max-tokens 64
+
+# Sampled generation with temperature
+dotnet run --project src/DotLLM.Cli -c Release -- run QuantFactory/SmolLM-135M-GGUF \
+    -p "Once upon a time" -n 128 -t 0.7 --top-k 40 --top-p 0.95
+
+# JSON output (for scripting / piping)
+dotnet run --project src/DotLLM.Cli -c Release -- run QuantFactory/SmolLM-135M-GGUF \
+    -p "Hello" --json
+
+# Select a specific quantization variant
+dotnet run --project src/DotLLM.Cli -c Release -- run QuantFactory/SmolLM-135M-GGUF \
+    -p "Test" -q Q8_0
+
+# Threading options
+dotnet run --project src/DotLLM.Cli -c Release -- run QuantFactory/SmolLM-135M-GGUF \
+    -p "Test" --threads 8 --decode-threads 4 --numa-pin
+```
+
+Sample output:
+
+```
+── dotllm | Llama 30L/576H | Q8_0 | 16 threads | greedy ──────────────────
+The capital of France is Paris. Paris is a city of romance and culture,
+
+╭──────────────────────────────────────────────────────────────────────────╮
+│                                                                          │
+│  Generation Complete                                      163.27 tok/s   │
+│                                                                          │
+│  Performance                                                             │
+│  Prefill            12.3 ms       6 tokens       487.80 tok/s            │
+│  Decode             91.8 ms      15 tokens       163.40 tok/s            │
+│  Sampling            0.1 ms      15 tokens                               │
+│  ──────────────────────────────────────────────────────────              │
+│  Total             104.2 ms      21 tokens       201.54 tok/s            │
+│  Load              456.7 ms                                              │
+│                                                                          │
+│  Memory                                                                  │
+│  Weights         136.73 MiB      (memory-mapped)                         │
+│  Compute           2.25 MiB                                              │
+│  KV Cache        158.20 MiB      (192 slots)                             │
+│  ──────────────────────────────────────────────────────────              │
+│  Total           297.18 MiB                                              │
+│                                                                          │
+│  length | 6 prompt, 15 generated                                         │
+╰──────────────────────────────────────────────────────────────────────────╯
+```
+
+**Interactive chat** (`chat`) — multi-turn conversation REPL with chat template formatting:
+
+```bash
+# Basic chat (uses model's built-in chat template, falls back to ChatML)
+dotnet run --project src/DotLLM.Cli -c Release -- chat QuantFactory/SmolLM-135M-GGUF
+
+# With system prompt and sampling
+dotnet run --project src/DotLLM.Cli -c Release -- chat QuantFactory/SmolLM-135M-GGUF \
+    --system "You are a helpful assistant." -t 0.8 --top-p 0.95
+```
+
+In-session commands: `/exit` or `/quit` to leave, `/clear` to reset history (keeps system prompt), `/system <text>` to change the system prompt.
+
+Sample session:
+
+```
+── dotllm chat | Llama 30L/576H | Q8_0 | 16 threads | greedy ─────────────
+Type /exit to quit, /clear to reset history, /system <text> to set system prompt.
+
+>>> Hello, how are you?
+I'm doing well, thank you for asking! How can I help you today?
+[42 prompt tokens, 18 generated tokens, 28 ms TTFT, 487.8 prefill tok/s, 163.4 decode tok/s]
+
+>>> What is 2+2?
+2 + 2 = 4.
+[78 prompt tokens, 12 generated tokens, 45 ms TTFT, 312.5 prefill tok/s, 155.2 decode tok/s]
+
+>>> /clear
+History cleared.
+>>> /exit
+```
+
+**CLI option reference** (both `run` and `chat`):
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--prompt` | `-p` | *(required for `run`)* | Input prompt |
+| `--system` | `-s` | *(none)* | System prompt (`chat` only) |
+| `--max-tokens` | `-n` | 128 / 512 | Max tokens to generate |
+| `--temp` | `-t` | 0 | Sampling temperature (0 = greedy) |
+| `--top-k` | | 0 | Top-K sampling (0 = disabled) |
+| `--top-p` | | 1.0 | Top-P (nucleus) threshold |
+| `--min-p` | | 0 | Min-P threshold (0 = disabled) |
+| `--repeat-penalty` | | 1.0 | Repetition penalty (1.0 = disabled) |
+| `--repeat-last-n` | | 0 | Penalty lookback window (0 = full) |
+| `--seed` | `-s` | *(random)* | Random seed for reproducibility |
+| `--threads` | | 0 | CPU threads (0 = auto/all cores) |
+| `--decode-threads` | | 0 | Decode threads (0 = auto) |
+| `--numa-pin` | | false | Pin to NUMA-local cores |
+| `--pcore-only` | | false | Pin to P-cores only (Intel hybrid) |
+| `--quant` | `-q` | *(auto)* | Quantization filter (e.g., Q4_K_M) |
+| `--json` | | false | JSON output (`run` only) |
+
+**Model management** (`model`) — search, download, and list GGUF models from HuggingFace:
+
+```bash
+dotnet run --project src/DotLLM.Cli -c Release -- model search llama --limit 5
+dotnet run --project src/DotLLM.Cli -c Release -- model pull QuantFactory/SmolLM-135M-GGUF
+dotnet run --project src/DotLLM.Cli -c Release -- model list
+dotnet run --project src/DotLLM.Cli -c Release -- model info QuantFactory/SmolLM-135M-GGUF
+```
+
+### Debug Build
+
+Building in `Debug` configuration (`-c Debug`) enables a `debug` command group with diagnostic tools for inspecting GGUF files and model internals. These commands are excluded from Release builds via `#if DEBUG`.
+
+```bash
+# Build in Debug mode
+dotnet build src/DotLLM.Cli -c Debug
+
+# Inspect GGUF file structure
+dotnet run --project src/DotLLM.Cli -c Debug -- debug gguf-header model.gguf
+dotnet run --project src/DotLLM.Cli -c Debug -- debug gguf-metadata model.gguf
+dotnet run --project src/DotLLM.Cli -c Debug -- debug gguf-tensors model.gguf
+dotnet run --project src/DotLLM.Cli -c Debug -- debug gguf-config model.gguf
+
+# Tokenizer round-trip verification
+dotnet run --project src/DotLLM.Cli -c Debug -- debug tokenize model.gguf --text "Hello world"
+
+# Single forward pass with top-10 logit diagnostics
+dotnet run --project src/DotLLM.Cli -c Debug -- debug forward-pass model.gguf --prompt "Hello"
+
+# Inspect embedding vector for a token ID
+dotnet run --project src/DotLLM.Cli -c Debug -- debug embed-lookup model.gguf --token-id 1
+```
+
+| Command | Description |
+|---------|-------------|
+| `debug gguf-header` | GGUF header structure (magic, version, tensor/metadata counts) |
+| `debug gguf-metadata` | All metadata key-value pairs |
+| `debug gguf-tensors` | Tensor descriptors (name, shape, quantization type, offset) |
+| `debug gguf-config` | Extracted `ModelConfig` (architecture, layers, dims, RoPE params) |
+| `debug tokenize` | Encode text → token IDs → decode, verify round-trip fidelity |
+| `debug forward-pass` | Single forward pass, top-10 predicted tokens with softmax probabilities |
+| `debug embed-lookup` | Raw embedding vector for a given token ID |
+
+> Debug builds are significantly slower than Release (~2-10x) because JIT optimizations, inlining, and SIMD vectorization are reduced. Always use `-c Release` for performance measurements.
+
 ### Tests
 
 **Unit and integration tests:**
@@ -91,7 +246,7 @@ dotnet build
 dotnet test
 ```
 
-> Integration tests automatically download [SmolLM-135M](https://huggingface.co/QuantFactory/SmolLM-135M-GGUF) Q8_0 (~145 MB) to `~/.dotllm/test-cache/`.
+> Integration tests automatically download several GGUF models (~4.5 GB total) from HuggingFace to `~/.dotllm/test-cache/` on first run. The first `dotnet test` will take a while; subsequent runs use the cache. To run only unit tests (no downloads): `dotnet test tests/DotLLM.Tests.Unit`.
 
 **Model correctness smoke tests** (`scripts/test_models.py`) run dotLLM CLI with greedy decoding across architectures (Llama, Mistral, Phi, Qwen) and verify expected output:
 

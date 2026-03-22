@@ -1,4 +1,3 @@
-using DotLLM.HuggingFace;
 using Xunit;
 
 namespace DotLLM.Tests.Integration.Fixtures;
@@ -11,29 +10,11 @@ namespace DotLLM.Tests.Integration.Fixtures;
 /// </summary>
 public sealed class Llama32InstructFixture : IAsyncLifetime
 {
-    private const string RepoId = "bartowski/Llama-3.2-1B-Instruct-GGUF";
-    private const string Filename = "Llama-3.2-1B-Instruct-Q8_0.gguf";
-
     /// <summary>Full local path to the downloaded GGUF file.</summary>
     public string FilePath { get; private set; } = string.Empty;
 
-    public async Task InitializeAsync()
-    {
-        string cacheDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".dotllm", "test-cache");
-
-        string cachedPath = Path.Combine(cacheDir, RepoId.Replace('/', Path.DirectorySeparatorChar), Filename);
-
-        if (File.Exists(cachedPath))
-        {
-            FilePath = cachedPath;
-            return;
-        }
-
-        using var downloader = new HuggingFaceDownloader();
-        FilePath = await downloader.DownloadFileAsync(RepoId, Filename, cacheDir);
-    }
+    public async Task InitializeAsync() =>
+        FilePath = await TestModelDownloader.EnsureModelAsync("bartowski/Llama-3.2-1B-Instruct-GGUF", "Llama-3.2-1B-Instruct-Q8_0.gguf");
 
     public Task DisposeAsync() => Task.CompletedTask;
 }

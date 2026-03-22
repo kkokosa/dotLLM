@@ -1,4 +1,3 @@
-using DotLLM.HuggingFace;
 using Xunit;
 
 namespace DotLLM.Tests.Integration.Fixtures;
@@ -10,29 +9,11 @@ namespace DotLLM.Tests.Integration.Fixtures;
 /// </summary>
 public sealed class QwenModelFixture : IAsyncLifetime
 {
-    private const string RepoId = "Qwen/Qwen2.5-0.5B-Instruct-GGUF";
-    private const string Filename = "qwen2.5-0.5b-instruct-q8_0.gguf";
-
     /// <summary>Full local path to the downloaded GGUF file.</summary>
     public string FilePath { get; private set; } = string.Empty;
 
-    public async Task InitializeAsync()
-    {
-        string cacheDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".dotllm", "test-cache");
-
-        string cachedPath = Path.Combine(cacheDir, RepoId.Replace('/', Path.DirectorySeparatorChar), Filename);
-
-        if (File.Exists(cachedPath))
-        {
-            FilePath = cachedPath;
-            return;
-        }
-
-        using var downloader = new HuggingFaceDownloader();
-        FilePath = await downloader.DownloadFileAsync(RepoId, Filename, cacheDir);
-    }
+    public async Task InitializeAsync() =>
+        FilePath = await TestModelDownloader.EnsureModelAsync("Qwen/Qwen2.5-0.5B-Instruct-GGUF", "qwen2.5-0.5b-instruct-q8_0.gguf");
 
     public Task DisposeAsync() => Task.CompletedTask;
 }
