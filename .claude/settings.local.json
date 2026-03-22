@@ -28,7 +28,17 @@
       "Bash(git remote:*)",
       "Bash(git ls-files:*)",
       "Bash(git rev-parse:*)",
-      "Bash(git stash list:*)"
+      "Bash(git stash list:*)",
+      "Bash(xargs cat:*)",
+      "Bash(/c/tools/llama/llama-cli:*)",
+      "Bash(grep -E '\\\\.exe$')",
+      "Bash(/c/tools/llama/llama-completion:*)",
+      "Bash(wc:*)",
+      "Bash(DOTLLM_MAX_LAYERS=1 dotnet run --project src/DotLLM.Cli)",
+      "Bash(python -c)",
+      "Read(//c/Users/kkoko/.dotllm/models/**)",
+      "Read(//c/Users/kkoko/.dotllm/test-cache/**)",
+      "Bash(./src/DotLLM.Cli/bin/Release/net10.0/DotLLM.Cli.exe run:*)"
     ]
   }
 }
