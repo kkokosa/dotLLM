@@ -213,7 +213,7 @@ def _apply_quant_filter(files: list[str], quant: str | None) -> list[str]:
     return [f for f in files if quant_lower in f.lower()]
 
 
-def resolve_model(model_arg: str, quant: str | None) -> Path:
+def resolve_model(model_arg: str, quant: str | None, quiet: bool = False) -> Path:
     """
     Resolve a model argument to a local .gguf path.
 
@@ -240,7 +240,8 @@ def resolve_model(model_arg: str, quant: str | None) -> Path:
         cached = _apply_quant_filter(cached, quant)
         if len(cached) == 1:
             result = repo_dir / cached[0]
-            print(f"[model] Using cached: {result}")
+            if not quiet:
+                print(f"[model] Using cached: {result}")
             return result
         if len(cached) > 1:
             print(f"[model] Multiple cached .gguf files in {repo_dir}:")
@@ -281,7 +282,8 @@ def resolve_model(model_arg: str, quant: str | None) -> Path:
     filename = filenames[0]
     dest = repo_dir / filename
     if dest.exists():
-        print(f"[model] Using cached: {dest}")
+        if not quiet:
+            print(f"[model] Using cached: {dest}")
         return dest
 
     size = size_map.get(filename, 0)

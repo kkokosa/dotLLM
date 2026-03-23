@@ -358,7 +358,7 @@ def main() -> int:
 
         # Resolve model (downloads if --download and not cached)
         try:
-            model_path = resolve_model(tc.repo, tc.quant)
+            model_path = resolve_model(tc.repo, tc.quant, quiet=True)
         except SystemExit:
             failed += 1
             print(f"{tc.name:<35} {tc.arch:<10} {'FAIL':<8} {'':>8}  model resolution failed")
