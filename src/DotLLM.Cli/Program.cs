@@ -10,6 +10,8 @@ app.Configure(config =>
 {
     config.SetApplicationName("dotllm");
     config.SetApplicationVersion("0.1.0");
+    config.ValidateExamples();
+    config.Settings.StrictParsing = true;
 
     config.AddBranch("model", model =>
     {

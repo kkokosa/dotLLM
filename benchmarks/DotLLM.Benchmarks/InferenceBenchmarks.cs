@@ -1,7 +1,9 @@
 using BenchmarkDotNet.Attributes;
 using DotLLM.Benchmarks.Columns;
+using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
+using DotLLM.Cuda;
 using DotLLM.Engine;
 using DotLLM.HuggingFace;
 using DotLLM.Models.Architectures;
@@ -93,9 +95,31 @@ public class InferenceBenchmarks
 
         _gguf = GgufFile.Open(_modelPath);
         var config = GgufModelConfigExtractor.Extract(_gguf.Metadata);
-        _model = TransformerModel.LoadFromGguf(_gguf, config, ThreadingConfig.Auto);
         _tokenizer = GgufBpeTokenizerFactory.Load(_gguf.Metadata);
-        _generator = new TextGenerator(_model, _tokenizer);
+
+        var envDevice = Environment.GetEnvironmentVariable("DOTLLM_BENCH_DEVICE") ?? "cpu";
+        Func<ModelConfig, int, IKvCache>? kvFactory = null;
+
+        if (envDevice.StartsWith("gpu", StringComparison.OrdinalIgnoreCase))
+        {
+            int gpuId = 0;
+            if (envDevice.Contains(':'))
+                int.TryParse(envDevice.Split(':')[1], out gpuId);
+
+            var cudaModel = CudaTransformerModel.LoadFromGguf(_gguf, config, gpuId);
+            _model = cudaModel;
+            kvFactory = (cfg, size) => cudaModel.CreateKvCache(size);
+
+            var device = CudaDevice.GetDevice(gpuId);
+            Console.WriteLine($"Device: GPU ({device})");
+        }
+        else
+        {
+            _model = TransformerModel.LoadFromGguf(_gguf, config, ThreadingConfig.Auto);
+            Console.WriteLine($"Device: CPU ({ThreadingConfig.Auto.EffectiveThreadCount} threads)");
+        }
+
+        _generator = new TextGenerator(_model, _tokenizer, kvFactory);
     }
 
     [Benchmark(Description = "E2E inference (prefill + decode)")]

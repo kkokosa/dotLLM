@@ -11,6 +11,7 @@ Usage:
     python scripts/bench_compare.py --model path/to/model.gguf --llamacpp
     python scripts/bench_compare.py --model path/to/model.gguf --llamacpp --dotllm
     python scripts/bench_compare.py --model repo/A,repo/B --quant Q4_K_M,Q8_0
+    python scripts/bench_compare.py --model path/to/model.gguf --dotllm --device gpu
 """
 
 from __future__ import annotations
@@ -314,6 +315,7 @@ def run_dotllm(
     bdn_project: str | None,
     skip_bdn_build: bool,
     iterations: int | None = None,
+    device: str = "cpu",
     **kwargs,
 ) -> list[EngineResult]:
     """Run dotLLM BDN benchmarks and parse results."""
@@ -343,6 +345,8 @@ def run_dotllm(
         env["DOTLLM_BENCH_MODEL_PATH"] = model_path
     env["DOTLLM_BENCH_PROMPT"] = prompt
     env["DOTLLM_BENCH_MAX_TOKENS"] = str(max_tokens)
+    if device != "cpu":
+        env["DOTLLM_BENCH_DEVICE"] = device
 
     print(f"[dotLLM] Running BDN: {' '.join(cmd)}")
     if model_path:
@@ -450,8 +454,9 @@ def run_dotllm(
             total_tok_s = total_tokens / (total_ms / 1000.0) if total_ms > 0 else 0
             ms_per_tok = dc_ms / decode_tokens if decode_tokens > 0 else 0
 
+            engine_label = f"dotLLM ({device})" if device != "cpu" else "dotLLM"
             bdn_results.append(EngineResult(
-                engine="dotLLM",
+                engine=engine_label,
                 model=model_name,
                 prefill_ms=pf_ms,
                 decode_ms=dc_ms,
@@ -476,6 +481,165 @@ def run_dotllm(
             ))
 
     return bdn_results
+
+
+def _find_dotllm_cli() -> list[str]:
+    """Return the command prefix for the dotLLM CLI (prebuilt exe or dotnet run)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    bin_dir = repo_root / "src" / "DotLLM.Cli" / "bin"
+    for config in ("Release", "Debug"):
+        for ext in (".exe", ""):
+            p = bin_dir / config / "net10.0" / f"DotLLM.Cli{ext}"
+            if p.exists():
+                return [str(p)]
+    return [
+        "dotnet", "run",
+        "--project", str(repo_root / "src" / "DotLLM.Cli"),
+        "-c", "Release", "--",
+    ]
+
+
+def _run_dotllm_cli_once(cmd: list[str], run_num: int) -> dict | None:
+    """Run dotLLM CLI once with --json and return parsed JSON, or None on failure."""
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=600,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[dotLLM-cli] Run {run_num} timed out", file=sys.stderr)
+        return None
+    except FileNotFoundError:
+        print(f"[dotLLM-cli] Binary not found: {cmd[0]}", file=sys.stderr)
+        return None
+
+    if result.returncode != 0:
+        error_text = result.stderr.strip() or result.stdout.strip()
+        print(f"[dotLLM-cli] Run {run_num} failed (exit {result.returncode}): {error_text[:200]}", file=sys.stderr)
+        return None
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        print(f"[dotLLM-cli] Run {run_num}: invalid JSON: {result.stdout[:200]}", file=sys.stderr)
+        return None
+
+
+def run_dotllm_cli(
+    model_path: str | None,
+    prompt: str,
+    max_tokens: int,
+    runs: int,
+    device: str = "gpu",
+    **kwargs,
+) -> list[EngineResult]:
+    """Run dotLLM via CLI N times (for GPU benchmarking) and compute stats."""
+    if not model_path:
+        print("[dotLLM-cli] No --model path provided, skipping.", file=sys.stderr)
+        return []
+
+    cli_prefix = _find_dotllm_cli()
+    cmd = cli_prefix + [
+        "run", model_path,
+        "-p", prompt,
+        "-n", str(max_tokens),
+        "-t", "0",
+        "--json",
+        "--device", device,
+    ]
+
+    # Print command (truncate prompt)
+    display_cmd = list(cmd)
+    try:
+        prompt_idx = display_cmd.index("-p") + 1
+        if len(display_cmd[prompt_idx]) > 80:
+            display_cmd[prompt_idx] = display_cmd[prompt_idx][:80] + "..."
+    except ValueError:
+        pass
+    quoted_cmd = " ".join(f'"{c}"' if " " in c else c for c in display_cmd)
+    print(f"[dotLLM-cli] Command: {quoted_cmd}")
+
+    model_name = Path(model_path).stem
+
+    prefill_ms_list: list[float] = []
+    decode_ms_list: list[float] = []
+    prefill_tok_s_list: list[float] = []
+    decode_tok_s_list: list[float] = []
+    prefill_tokens = 0
+    decode_tokens = 0
+
+    # Warmup run
+    print("[dotLLM-cli] Warmup run (discarded)...")
+    warmup = _run_dotllm_cli_once(cmd, 0)
+    if warmup is None:
+        return []
+
+    for i in range(runs):
+        print(f"[dotLLM-cli] Run {i + 1}/{runs}...")
+        data = _run_dotllm_cli_once(cmd, i + 1)
+        if data is None:
+            if i == 0:
+                return []
+            continue
+
+        t = data.get("timings", {})
+        u = data.get("usage", {})
+        prefill_ms_list.append(t.get("prefill_ms", 0))
+        decode_ms_list.append(t.get("decode_ms", 0))
+        prefill_tok_s_list.append(t.get("prefill_tok_s", 0))
+        decode_tok_s_list.append(t.get("decode_tok_s", 0))
+        prefill_tokens = u.get("prompt_tokens", 0)
+        decode_tokens = u.get("generated_tokens", 0)
+
+    if not prefill_ms_list:
+        print("[dotLLM-cli] No successful runs.", file=sys.stderr)
+        return []
+
+    best_pf_tok_s = max(prefill_tok_s_list)
+    best_dc_tok_s = max(decode_tok_s_list)
+    best_pf_ms = min(prefill_ms_list)
+    best_dc_ms = min(decode_ms_list)
+
+    med_pf_tok_s = median(prefill_tok_s_list)
+    med_dc_tok_s = median(decode_tok_s_list)
+    med_pf_ms = median(prefill_ms_list)
+    med_dc_ms = median(decode_ms_list)
+
+    dc_cv = (stdev(decode_tok_s_list) / (sum(decode_tok_s_list) / len(decode_tok_s_list))) if len(decode_tok_s_list) >= 2 else 0
+    pf_cv = (stdev(prefill_tok_s_list) / (sum(prefill_tok_s_list) / len(prefill_tok_s_list))) if len(prefill_tok_s_list) >= 2 else 0
+
+    total_ms = best_pf_ms + best_dc_ms
+    total_tokens = prefill_tokens + decode_tokens
+    total_tok_s = total_tokens / (total_ms / 1000.0) if total_ms > 0 else 0
+    ms_per_tok = best_dc_ms / decode_tokens if decode_tokens > 0 else 0
+
+    engine_label = f"dotLLM-cli ({device})" if device != "cpu" else "dotLLM-cli"
+
+    return [EngineResult(
+        engine=engine_label,
+        model=model_name,
+        prefill_ms=best_pf_ms,
+        decode_ms=best_dc_ms,
+        prefill_tokens=prefill_tokens,
+        decode_tokens=decode_tokens,
+        prefill_tok_per_sec=best_pf_tok_s,
+        decode_tok_per_sec=best_dc_tok_s,
+        decode_ms_per_tok=ms_per_tok,
+        total_tok_per_sec=total_tok_s,
+        median_prefill_tok_per_sec=med_pf_tok_s,
+        median_decode_tok_per_sec=med_dc_tok_s,
+        median_prefill_ms=med_pf_ms,
+        median_decode_ms=med_dc_ms,
+        decode_cv=dc_cv,
+        prefill_cv=pf_cv,
+        all_decode_tok_per_sec=list(decode_tok_s_list),
+        all_prefill_tok_per_sec=list(prefill_tok_s_list),
+        all_decode_ms=list(decode_ms_list),
+        all_prefill_ms=list(prefill_ms_list),
+    )]
 
 
 def _run_llamacpp_once(cmd: list[str], run_num: int) -> str | None:
@@ -510,6 +674,7 @@ def run_llamacpp(
     max_tokens: int,
     runs: int,
     llamacpp_bin: str | None,
+    device: str = "cpu",
     **kwargs,
 ) -> list[EngineResult]:
     """Run llama.cpp llama-completion N times and parse perf output."""
@@ -549,6 +714,8 @@ def run_llamacpp(
         "--perf",           # enable timing output (off by default)
         "--mlock",          # lock model in RAM — eliminates mmap page faults during timing
     ]
+    if device == "gpu":
+        cmd.extend(["-ngl", "99"])  # offload all layers to GPU
 
     # Print command for manual reproduction (truncate long prompts)
     display_cmd = list(cmd)
@@ -614,8 +781,10 @@ def run_llamacpp(
     total_tok_s = total_tokens / (total_ms / 1000.0) if total_ms > 0 else 0
     ms_per_tok = best_dc_ms / dc_tok if dc_tok > 0 else 0
 
+    engine_label = f"llama.cpp ({device})" if device != "cpu" else "llama.cpp"
+
     return [EngineResult(
-        engine="llama.cpp",
+        engine=engine_label,
         model=model_name,
         prefill_ms=best_pf_ms,
         decode_ms=best_dc_ms,
@@ -708,8 +877,8 @@ def print_comparison(results: list[EngineResult], prompt: str, max_tokens: int) 
     has_ratios = False
     for model in models:
         model_results = [r for r in results if r.model == model]
-        dotllm_results = [r for r in model_results if r.engine == "dotLLM"]
-        other_results = [r for r in model_results if r.engine != "dotLLM"]
+        dotllm_results = [r for r in model_results if r.engine.startswith("dotLLM")]
+        other_results = [r for r in model_results if not r.engine.startswith("dotLLM")]
 
         if dotllm_results and other_results:
             base = dotllm_results[0]
@@ -776,6 +945,7 @@ def export_results_json(
     prompt_size: str,
     max_tokens: int,
     models: list[str],
+    device: str = "cpu",
 ) -> None:
     """Export benchmark results to a structured JSON file."""
     export = {
@@ -787,6 +957,7 @@ def export_results_json(
             "prompt_size": prompt_size,
             "max_tokens": max_tokens,
             "models": [Path(m).name for m in models],
+            "device": device,
         },
         "results": [asdict(r) for r in results],
     }
@@ -847,6 +1018,9 @@ def main() -> int:
                         help="Export structured results to JSON file")
     parser.add_argument("--label", type=str, default=None,
                         help="Human label for this benchmark run (used in --export-json)")
+    parser.add_argument("--device", type=str, default="cpu",
+                        choices=["cpu", "gpu"],
+                        help="Compute device for dotLLM and llama.cpp (default: cpu)")
 
     args = parser.parse_args()
 
@@ -892,7 +1066,8 @@ def main() -> int:
     estimated_tokens = max(1, len(prompt.split()) * 4 // 3)  # rough word→token estimate
     prompt_preview = prompt[:60] + "..." if len(prompt) > 60 else prompt
     print()
-    print(f"[config] Models: {len(resolved_models)}, Threads: {os.cpu_count()} (auto)")
+    device = args.device
+    print(f"[config] Models: {len(resolved_models)}, Device: {device}, Threads: {os.cpu_count()} (auto)")
     print(f'[config] Prompt ({prompt_size_label}): "{prompt_preview}" (~{estimated_tokens} tokens est.)')
     print(f"[config] Max tokens: {args.tokens}")
     print()
@@ -936,6 +1111,7 @@ def main() -> int:
                 bdn_project=args.bdn_project,
                 skip_bdn_build=args.skip_bdn_build,
                 iterations=args.iterations,
+                device=device,
             )
             all_results.extend(results)
 
@@ -949,6 +1125,7 @@ def main() -> int:
             prompt_size_label,
             args.tokens,
             resolved_models,
+            device=device,
         )
 
     return 0

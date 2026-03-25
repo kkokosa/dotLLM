@@ -506,6 +506,14 @@ def _apply_engine_filter(entries: list[BenchEntry], engine: str | None) -> list[
     return [e for e in filtered if e.results]
 
 
+def _apply_device_filter(entries: list[BenchEntry], device: str | None) -> list[BenchEntry]:
+    """Filter entries by config.device field (exact match). Returns entries that match."""
+    if not device:
+        return entries
+    dev_lower = device.lower()
+    return [e for e in entries if e.config.get("device", "cpu").lower() == dev_lower]
+
+
 def display(entries: list[BenchEntry], model_filter: str | None, use_md: bool) -> None:
     """Display results using the best available renderer.
 
@@ -576,11 +584,15 @@ def main() -> int:
                         help="Filter results by model name substring")
     parser.add_argument("--engine", type=str, default="dotLLM",
                         help='Filter by engine (default: dotLLM). Use "all" for all engines.')
+    parser.add_argument("--device", type=str, default=None,
+                        help='Filter by device (cpu/gpu). Default: show all devices.')
 
     args = parser.parse_args()
 
     # Resolve engine filter: "all" means no filter
     engine_filter = args.engine if args.engine.lower() != "all" else None
+
+    device_filter = args.device
 
     # Mode 1: Explicit files on command line
     if args.files:
@@ -591,6 +603,7 @@ def main() -> int:
                 print(f"Failed to load: {f}", file=sys.stderr)
                 return 1
             entries.append(entry)
+        entries = _apply_device_filter(entries, device_filter)
         entries = _apply_engine_filter(entries, engine_filter)
         display(entries, args.model, args.md)
         return 0
@@ -604,6 +617,8 @@ def main() -> int:
         print(f"Run: python scripts/bench_compare.py --model ... --dotllm --export-json {folder}/run.json --label run",
               file=sys.stderr)
         return 1
+
+    entries = _apply_device_filter(entries, device_filter)
 
     # Mode 2: --all flag — show everything non-interactively
     if args.all:
