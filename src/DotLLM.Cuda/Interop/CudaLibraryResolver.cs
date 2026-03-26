@@ -40,7 +40,7 @@ internal static class CudaLibraryResolver
         {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                foreach (var ver in new[] { "12", "11" })
+                foreach (var ver in new[] { "13", "12", "11" })
                 {
                     if (NativeLibrary.TryLoad($"cublas64_{ver}.dll", out nint h))
                         return h;
@@ -51,7 +51,7 @@ internal static class CudaLibraryResolver
                 if (NativeLibrary.TryLoad("libcublas.so", out nint h))
                     return h;
                 // Try versioned names
-                foreach (var ver in new[] { "12", "11" })
+                foreach (var ver in new[] { "13", "12", "11" })
                 {
                     if (NativeLibrary.TryLoad($"libcublas.so.{ver}", out nint h2))
                         return h2;
