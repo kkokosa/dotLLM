@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text;
 using DotLLM.Cuda.Interop;
 
@@ -50,6 +51,15 @@ public sealed class CudaDevice
     {
         try
         {
+            // Probe for the CUDA driver library before any P/Invoke.
+            // On systems without NVIDIA drivers, the JIT would throw
+            // DllNotFoundException when compiling the P/Invoke call sites.
+            string cudaLib = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+                ? "nvcuda.dll" : "libcuda.so.1";
+            if (!NativeLibrary.TryLoad(cudaLib, out nint handle))
+                return false;
+            NativeLibrary.Free(handle);
+
             CudaLibraryResolver.Register();
             CudaDriverApi.cuInit(0).ThrowOnError();
             CudaDriverApi.cuDeviceGetCount(out int count).ThrowOnError();
