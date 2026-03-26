@@ -11,6 +11,7 @@
     <ProjectReference Include="..\..\src\DotLLM.Tokenizers\DotLLM.Tokenizers.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Cpu\DotLLM.Cpu.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Engine\DotLLM.Engine.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Cuda\DotLLM.Cuda.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Diagnostics\DotLLM.Diagnostics.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Telemetry\DotLLM.Telemetry.csproj" />
   </ItemGroup>
@@ -19,6 +20,7 @@
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Xunit.SkippableFact" />
   </ItemGroup>
 
 </Project>

@@ -104,6 +104,12 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         [DefaultValue(false)]
         public bool PCoreOnly { get; set; }
 
+        /// <summary>Compute device.</summary>
+        [CommandOption("--device|-d")]
+        [Description("Compute device: 'cpu' (default), 'gpu', 'gpu:0', 'gpu:1'.")]
+        [DefaultValue("cpu")]
+        public string Device { get; set; } = "cpu";
+
         /// <summary>Quantization filter.</summary>
         [CommandOption("--quant|-q")]
         [Description("Quantization filter when multiple GGUF files exist (e.g., Q4_K_M, Q8_0).")]
@@ -135,10 +141,25 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                 ctx.Status("Loading tokenizer...");
                 tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
-                var threading = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
-                ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden, {threading.EffectiveThreadCount} threads)...");
-                model = TransformerModel.LoadFromGguf(gguf, config, threading);
+                if (settings.Device.StartsWith("gpu", StringComparison.OrdinalIgnoreCase))
+                {
+                    int gpuId = settings.Device.IndexOf(':') is int ci and > 0
+                        ? int.Parse(settings.Device.AsSpan(ci + 1))
+                        : 0;
+                    ctx.Status($"Loading {config.Architecture} model on GPU {gpuId}...");
+                    model = DotLLM.Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
+                }
+                else
+                {
+                    var threading = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
+                    ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden, {threading.EffectiveThreadCount} threads)...");
+                    model = TransformerModel.LoadFromGguf(gguf, config, threading);
+                }
             });
+
+        // Display VRAM warning after spinner completes (so it stays visible)
+        if (model is DotLLM.Cuda.CudaTransformerModel cudaCheck && cudaCheck.VramWarning is not null)
+            AnsiConsole.MarkupLine($"[yellow]WARNING: {Markup.Escape(cudaCheck.VramWarning)}[/]");
 
         // Create chat template from GGUF metadata, fallback to ChatML
         string bosTokenStr = tokenizer!.DecodeToken(tokenizer.BosTokenId);
@@ -175,7 +196,11 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
         var quantLabel = InferQuantLabel(resolvedPath, settings.Quant);
         var samplingLabel = BuildSamplingLabel(settings);
-        var segments = $"{config!.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {threadingInfo.EffectiveThreadCount} threads | {samplingLabel}";
+        var deviceLabel = model is DotLLM.Cuda.CudaTransformerModel
+            ? DotLLM.Cuda.CudaDevice.GetDevice(settings.Device.IndexOf(':') is int ci and > 0
+                ? int.Parse(settings.Device.AsSpan(ci + 1)) : 0).ToString()
+            : $"{threadingInfo.EffectiveThreadCount} threads";
+        var segments = $"{config!.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {deviceLabel} | {samplingLabel}";
         AnsiConsole.Write(new Rule($"[grey]dotllm chat | {Markup.Escape(segments)}[/]").LeftJustified());
         AnsiConsole.MarkupLine("[dim]Type /exit to quit, /clear to reset history, /system <text> to set system prompt.[/]");
         AnsiConsole.WriteLine();
@@ -185,7 +210,11 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         if (!string.IsNullOrEmpty(settings.SystemPrompt))
             history.Add(new ChatMessage { Role = "system", Content = settings.SystemPrompt });
 
-        var generator = new TextGenerator(model!, tokenizer);
+        Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
+        if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
+            kvFactory = (cfg, size) => cudaModel.CreateKvCache(size);
+
+        var generator = new TextGenerator(model!, tokenizer!, kvFactory);
 
         try
         {
@@ -209,11 +238,15 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
     {
         while (true)
         {
-            Console.Write(">>> ");
-            string? input = Console.ReadLine();
-
-            if (input is null)
-                break; // EOF / Ctrl+C
+            string input;
+            try
+            {
+                input = AnsiConsole.Prompt(new TextPrompt<string>(">>>").AllowEmpty());
+            }
+            catch (InvalidOperationException)
+            {
+                break; // stdin redirected or closed
+            }
 
             input = input.Trim();
             if (string.IsNullOrEmpty(input))

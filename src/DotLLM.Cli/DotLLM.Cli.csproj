@@ -10,6 +10,7 @@
     <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
     <ProjectReference Include="..\DotLLM.Models\DotLLM.Models.csproj" />
     <ProjectReference Include="..\DotLLM.Cpu\DotLLM.Cpu.csproj" />
+    <ProjectReference Include="..\DotLLM.Cuda\DotLLM.Cuda.csproj" />
     <ProjectReference Include="..\DotLLM.Engine\DotLLM.Engine.csproj" />
     <ProjectReference Include="..\DotLLM.Tokenizers\DotLLM.Tokenizers.csproj" />
     <ProjectReference Include="..\DotLLM.Server\DotLLM.Server.csproj" />

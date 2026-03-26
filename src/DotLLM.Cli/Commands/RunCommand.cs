@@ -89,6 +89,11 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [DefaultValue(false)]
         public bool PCoreOnly { get; set; }
 
+        [CommandOption("--device|-d")]
+        [Description("Compute device: 'cpu' (default), 'gpu', 'gpu:0', 'gpu:1'.")]
+        [DefaultValue("cpu")]
+        public string Device { get; set; } = "cpu";
+
         [CommandOption("--quant|-q")]
         [Description("Quantization filter when multiple GGUF files exist (e.g., Q4_K_M, Q8_0).")]
         public string? Quant { get; set; }
@@ -124,8 +129,17 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             gguf = GgufFile.Open(resolvedPath);
             config = GgufModelConfigExtractor.Extract(gguf.Metadata);
             tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
-            model = TransformerModel.LoadFromGguf(gguf, config,
-                new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly));
+
+            if (settings.Device.StartsWith("gpu", StringComparison.OrdinalIgnoreCase))
+            {
+                int gpuId = ParseGpuId(settings.Device);
+                model = DotLLM.Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
+            }
+            else
+            {
+                model = TransformerModel.LoadFromGguf(gguf, config,
+                    new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly));
+            }
         }
 
         var loadSw = Stopwatch.StartNew();
@@ -140,6 +154,16 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 .Start("Loading model...", _ => LoadModel());
         }
         loadSw.Stop();
+
+        // Display VRAM warning after spinner completes (so it stays visible).
+        // In JSON mode, write to stderr so it doesn't corrupt the JSON output.
+        if (model is DotLLM.Cuda.CudaTransformerModel cudaCheck && cudaCheck.VramWarning is not null)
+        {
+            if (settings.Json)
+                Console.Error.WriteLine($"WARNING: {cudaCheck.VramWarning}");
+            else
+                AnsiConsole.MarkupLine($"[yellow]WARNING: {Markup.Escape(cudaCheck.VramWarning)}[/]");
+        }
 
         var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
 
@@ -162,7 +186,10 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             // Build compact pre-gen header rule
             var quantLabel = InferQuantLabel(resolvedPath, settings.Quant);
             var samplingLabel = BuildSamplingLabel(settings);
-            var segments = $"{config.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {threadingInfo.EffectiveThreadCount} threads | {samplingLabel}";
+            var deviceLabel = model is DotLLM.Cuda.CudaTransformerModel
+                ? DotLLM.Cuda.CudaDevice.GetDevice(ParseGpuId(settings.Device)).ToString()
+                : $"{threadingInfo.EffectiveThreadCount} threads";
+            var segments = $"{config.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {deviceLabel} | {samplingLabel}";
             AnsiConsole.Write(new Rule($"[grey]dotllm | {Markup.Escape(segments)}[/]").LeftJustified());
             AnsiConsole.WriteLine();
         }
@@ -172,7 +199,11 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             if (!settings.Json)
                 Console.Write(settings.Prompt);
 
-            var generator = new TextGenerator(model, tokenizer);
+            Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
+            if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
+                kvFactory = (cfg, size) => cudaModel.CreateKvCache(size);
+
+            var generator = new TextGenerator(model, tokenizer, kvFactory);
             var totalSw = Stopwatch.StartNew();
             int generated = 0;
             InferenceTimings timings = default;
@@ -341,6 +372,14 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
         var match = Regex.Match(Path.GetFileName(resolvedPath), @"\.(Q[\w]+)\.gguf$", RegexOptions.IgnoreCase);
         return match.Success ? match.Groups[1].Value : "unknown";
+    }
+
+    private static int ParseGpuId(string device)
+    {
+        // "gpu" → 0, "gpu:0" → 0, "gpu:1" → 1
+        int colonIdx = device.IndexOf(':');
+        if (colonIdx < 0) return 0;
+        return int.Parse(device.AsSpan(colonIdx + 1));
     }
 
     private static string BuildSamplingLabel(Settings settings)

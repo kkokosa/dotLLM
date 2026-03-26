@@ -78,7 +78,7 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
-| 31 | **CUDA backend** | Native C/CUDA library: cuBLAS GEMM for matmul, custom kernels for flash attention, RMSNorm+SiLU fused, RoPE, quantized matmul (Q4_K_M, Q8_0). `CudaBackend` implementing `IBackend`. | Phase 1–2 |
+| 31 | **CUDA backend** :white_check_mark: | PTX kernels loaded via CUDA Driver API P/Invoke — no native shared library. cuBLAS HGEMM for prefill, custom quantized GEMV for decode (Q8_0, Q4_K, Q6_K). Dequantization kernels (Q8_0, Q4_0, Q5_0, Q4_K, Q5_K, Q6_K). FP16 activation pipeline, on-the-fly weight dequantization into scratch buffer, GPU KV-cache. `CudaTransformerModel` implementing `IModel`. | Phase 1–2 |
 | 32 | **CPU/GPU hybrid** | Layer offloading: specify N layers on GPU, remainder on CPU. Automatic tensor transfer at layer boundaries. Useful when model doesn't fully fit in VRAM. | 31 |
 | 33 | **KV-cache quantization** | FP8 (E4M3) and INT8 KV-cache compression. Configurable per-model via `KvCacheConfig`. Extends effective context length. | 31 |
 
@@ -147,6 +147,7 @@ Not in the current roadmap, but the architecture should not preclude these:
 | **Pipeline parallelism** | Split layers across nodes for very large models (405B+) | Micro-batching scheduler, point-to-point communication via NCCL send/recv |
 | **T-MAC LUT-based matmul** | `vpshufb` table lookup for 1-4 bit weights. 4× throughput for ultra-low-bit. | New quant types, LUT-compatible repacking. |
 | **HNSW vocabulary projection** | ANN search replacing LM head GEMV. ~40 candidates from 128K vocab. | `IVocabProjection` interface, HNSW index at load time. |
+| **FP32 residual stream (CUDA)** | Keep residual/hidden buffers in FP32, activations in FP16. Currently the CUDA backend uses FP16 everywhere, which causes cumulative truncation in the residual stream. Measured: Qwen2.5-0.5B diverges at layer 1 (maxDiff=4.7 vs 0.3 for Llama), growing to maxDiff=14.9 by layer 24 — enough to flip the argmax token. Llama models tolerate FP16 residuals; Qwen/some architectures do not. llama.cpp uses FP32 residuals as standard practice. | `CudaForwardState`: Residual/HiddenState → FP32. New `fused_add_rmsnorm` variant: FP32 residual in/out, FP16 activation out. `LaunchRmsNorm` variant: FP32 input, FP16 output. Embedding → FP32 output. |
 | **JIT-specialized kernel codegen** | Source generators for format-specific kernels (QIGen-style). | `IKernelGenerator`, Roslyn source generator pipeline. |
 
 ## Version Milestones

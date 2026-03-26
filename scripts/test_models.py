@@ -12,6 +12,8 @@ Usage:
     python scripts/test_models.py --filter qwen,mistral    # multiple filters
     python scripts/test_models.py --list                   # show available test cases
     python scripts/test_models.py --download               # download missing models
+    python scripts/test_models.py --device gpu             # GPU-only
+    python scripts/test_models.py --device both            # run each test on CPU then GPU
 """
 
 from __future__ import annotations
@@ -208,7 +210,7 @@ def _find_cli() -> Path:
     return Path("dotnet")  # fallback to dotnet run
 
 
-def _run_test(cli: Path, model_path: Path, tc: TestCase) -> tuple[bool, str, float]:
+def _run_test(cli: Path, model_path: Path, tc: TestCase, device: str = "cpu") -> tuple[bool, str, float]:
     """
     Run a single test case with --json output. Returns (passed, detail_text, elapsed_seconds).
     """
@@ -227,6 +229,7 @@ def _run_test(cli: Path, model_path: Path, tc: TestCase) -> tuple[bool, str, flo
         "-n", str(tc.max_tokens),
         "-t", "0",  # greedy
         "--json",
+        "--device", device,
     ]
 
     start = time.monotonic()
@@ -253,10 +256,15 @@ def _run_test(cli: Path, model_path: Path, tc: TestCase) -> tuple[bool, str, flo
                 return False, line.strip(), elapsed
         return False, f"exit code {result.returncode}: {error_text[:200]}", elapsed
 
+    # Extract JSON from stdout — strip any non-JSON prefix (e.g., VRAM warnings on stderr leak)
+    raw = result.stdout.strip()
+    json_start = raw.find("{")
+    if json_start < 0:
+        return False, f"no JSON in output: {raw[:200]}", elapsed
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(raw[json_start:])
     except json.JSONDecodeError:
-        return False, f"invalid JSON: {result.stdout[:200]}", elapsed
+        return False, f"invalid JSON: {raw[:200]}", elapsed
 
     generated_text = data.get("text", "")
     timings = data.get("timings", {})
@@ -297,6 +305,9 @@ def main() -> int:
                         help="Download missing models before testing")
     parser.add_argument("--cached-only", action="store_true",
                         help="Only run tests for models already downloaded")
+    parser.add_argument("--device", type=str, default="cpu",
+                        choices=["cpu", "gpu", "both"],
+                        help="Compute device: cpu (default), gpu, or both")
     args = parser.parse_args()
 
     # Default to --cached-only when no explicit mode is given
@@ -340,10 +351,14 @@ def main() -> int:
     else:
         print(f"[cli] {cli}")
 
+    # Determine which devices to test
+    devices = ["cpu", "gpu"] if args.device == "both" else [args.device]
+
     # Run tests
     print()
-    print(f"{'Test':<35} {'Arch':<10} {'Result':<8} {'Time':>8}  Details")
-    print("=" * 105)
+    dev_col = "  Device" if len(devices) > 1 else ""
+    print(f"{'Test':<35} {'Arch':<10}{dev_col} {'Result':<8} {'Time':>8}  Details")
+    print("=" * (105 + len(dev_col)))
 
     passed = 0
     failed = 0
@@ -353,38 +368,39 @@ def main() -> int:
         # Check if model is available
         if not _model_is_cached(tc) and not args.download:
             skipped += 1
-            print(f"{tc.name:<35} {tc.arch:<10} {'SKIP':<8} {'':>8}  not cached (use --download)")
+            dev_label = "" if len(devices) == 1 else "        "
+            print(f"{tc.name:<35} {tc.arch:<10}{dev_label} {'SKIP':<8} {'':>8}  not cached (use --download)")
             continue
 
         # Resolve model (downloads if --download and not cached)
         try:
             model_path = resolve_model(tc.repo, tc.quant, quiet=True)
         except SystemExit:
-            failed += 1
-            print(f"{tc.name:<35} {tc.arch:<10} {'FAIL':<8} {'':>8}  model resolution failed")
+            failed += len(devices)
+            dev_label = "" if len(devices) == 1 else "        "
+            print(f"{tc.name:<35} {tc.arch:<10}{dev_label} {'FAIL':<8} {'':>8}  model resolution failed")
             continue
 
-        # Run the test
-        ok, detail, elapsed = _run_test(cli, model_path, tc)
-        time_str = f"{elapsed:.1f}s"
+        for device in devices:
+            ok, detail, elapsed = _run_test(cli, model_path, tc, device=device)
+            time_str = f"{elapsed:.1f}s"
+            dev_label = f"  {device:<6}" if len(devices) > 1 else ""
 
-        if ok:
-            passed += 1
-            # Show just the generated text after the prompt
-            if tc.prompt in detail:
-                detail = detail[detail.index(tc.prompt) + len(tc.prompt):]
-            # Truncate at "Generation Complete" or similar perf box text
-            for marker in ["Generation Complete", "Performance", "Prefill"]:
-                if marker in detail:
-                    detail = detail[:detail.index(marker)]
-            detail = detail.strip()[:60]
-            print(f"{tc.name:<35} {tc.arch:<10} {'PASS':<8} {time_str:>8}  {detail}")
-        else:
-            failed += 1
-            print(f"{tc.name:<35} {tc.arch:<10} {'FAIL':<8} {time_str:>8}  {detail}")
+            if ok:
+                passed += 1
+                if tc.prompt in detail:
+                    detail = detail[detail.index(tc.prompt) + len(tc.prompt):]
+                for marker in ["Generation Complete", "Performance", "Prefill"]:
+                    if marker in detail:
+                        detail = detail[:detail.index(marker)]
+                detail = detail.strip()[:60]
+                print(f"{tc.name:<35} {tc.arch:<10}{dev_label} {'PASS':<8} {time_str:>8}  {detail}")
+            else:
+                failed += 1
+                print(f"{tc.name:<35} {tc.arch:<10}{dev_label} {'FAIL':<8} {time_str:>8}  {detail}")
 
     # Summary
-    print("=" * 105)
+    print("=" * (105 + len(dev_col)))
     total = passed + failed + skipped
     print(f"\n{passed}/{total} passed, {failed} failed, {skipped} skipped")
 

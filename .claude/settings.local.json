@@ -38,7 +38,12 @@
       "Bash(python -c)",
       "Read(//c/Users/kkoko/.dotllm/models/**)",
       "Read(//c/Users/kkoko/.dotllm/test-cache/**)",
-      "Bash(./src/DotLLM.Cli/bin/Release/net10.0/DotLLM.Cli.exe run:*)"
+      "Bash(./src/DotLLM.Cli/bin/Release/net10.0/DotLLM.Cli.exe run:*)",
+      "Bash(nslookup:*)",
+      "Bash(bash build.sh)",
+      "Bash(export PATH=\"/c/Program Files \\(x86\\)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.41.34120/bin/Hostx64/x64:$PATH\")",
+      "Bash(nvcc -ptx -arch=compute_61 -o ptx/fused_add_rmsnorm.ptx kernels/fused_add_rmsnorm.cu)",
+      "Bash(bash native/build.sh)"
     ]
   }
 }

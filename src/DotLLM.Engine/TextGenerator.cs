@@ -20,16 +20,21 @@ public sealed class TextGenerator
 {
     private readonly IModel _model;
     private readonly ITokenizer _tokenizer;
+    private readonly Func<ModelConfig, int, Core.Attention.IKvCache>? _kvCacheFactory;
 
     /// <summary>
     /// Creates a new text generator.
     /// </summary>
     /// <param name="model">The model to use for forward passes.</param>
     /// <param name="tokenizer">The tokenizer for encoding/decoding text.</param>
-    public TextGenerator(IModel model, ITokenizer tokenizer)
+    /// <param name="kvCacheFactory">Optional factory for creating a KV-cache. When null, uses <see cref="SimpleKvCache"/>.
+    /// Parameters: (config, maxSeqLen).</param>
+    public TextGenerator(IModel model, ITokenizer tokenizer,
+                          Func<ModelConfig, int, Core.Attention.IKvCache>? kvCacheFactory = null)
     {
         _model = model;
         _tokenizer = tokenizer;
+        _kvCacheFactory = kvCacheFactory;
     }
 
     /// <summary>
@@ -92,11 +97,13 @@ public sealed class TextGenerator
 
         // Allocate KV-cache
         int cacheSize = Math.Min(promptLen + maxTokens, _model.Config.MaxSequenceLength);
-        using var kvCache = new SimpleKvCache(
-            _model.Config.NumLayers,
-            _model.Config.NumKvHeads,
-            _model.Config.HeadDim,
-            cacheSize);
+        using var kvCache = _kvCacheFactory != null
+            ? _kvCacheFactory(_model.Config, cacheSize)
+            : new SimpleKvCache(
+                _model.Config.NumLayers,
+                _model.Config.NumKvHeads,
+                _model.Config.HeadDim,
+                cacheSize);
 
         var generatedIds = new List<int>(maxTokens);
         var finishReason = FinishReason.Length;
@@ -245,11 +252,13 @@ public sealed class TextGenerator
 
         // Allocate KV-cache — disposed when the enumerator completes/disposes
         int cacheSize = Math.Min(promptLen + maxTokens, _model.Config.MaxSequenceLength);
-        using var kvCache = new SimpleKvCache(
-            _model.Config.NumLayers,
-            _model.Config.NumKvHeads,
-            _model.Config.HeadDim,
-            cacheSize);
+        using var kvCache = _kvCacheFactory != null
+            ? _kvCacheFactory(_model.Config, cacheSize)
+            : new SimpleKvCache(
+                _model.Config.NumLayers,
+                _model.Config.NumKvHeads,
+                _model.Config.HeadDim,
+                cacheSize);
 
         var generatedIds = new List<int>(maxTokens);
         long prefillTicks = 0;

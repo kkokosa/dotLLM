@@ -1,5 +1,7 @@
+using System.Runtime.CompilerServices;
 using BenchmarkDotNet.Attributes;
 using DotLLM.Benchmarks.Columns;
+using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Engine;
@@ -93,9 +95,53 @@ public class InferenceBenchmarks
 
         _gguf = GgufFile.Open(_modelPath);
         var config = GgufModelConfigExtractor.Extract(_gguf.Metadata);
-        _model = TransformerModel.LoadFromGguf(_gguf, config, ThreadingConfig.Auto);
         _tokenizer = GgufBpeTokenizerFactory.Load(_gguf.Metadata);
-        _generator = new TextGenerator(_model, _tokenizer);
+
+        var envDevice = Environment.GetEnvironmentVariable("DOTLLM_BENCH_DEVICE") ?? "cpu";
+        Func<ModelConfig, int, IKvCache>? kvFactory = null;
+
+        if (envDevice.StartsWith("gpu", StringComparison.OrdinalIgnoreCase))
+        {
+            // Isolated in a [NoInlining] method so the JIT never loads the DotLLM.Cuda
+            // assembly (and its cublas/nvcuda native deps) on the CPU-only path.
+            int gpuId = 0;
+            if (envDevice.Contains(':'))
+                int.TryParse(envDevice.Split(':')[1], out gpuId);
+            kvFactory = LoadGpuModel(_gguf, config, gpuId);
+        }
+        else
+        {
+            _model = TransformerModel.LoadFromGguf(_gguf, config, ThreadingConfig.Auto);
+            Console.WriteLine($"Device: CPU ({ThreadingConfig.Auto.EffectiveThreadCount} threads)");
+        }
+
+        _generator = new TextGenerator(_model, _tokenizer, kvFactory);
+    }
+
+    /// <summary>
+    /// Loads the model on GPU. Separated into its own method with <see cref="MethodImplOptions.NoInlining"/>
+    /// so that the JIT only resolves <c>DotLLM.Cuda</c> types (and their native cublas/nvcuda dependencies)
+    /// when this method is actually called — not when <c>Setup()</c> is compiled.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Func<ModelConfig, int, IKvCache> LoadGpuModel(GgufFile gguf, ModelConfig config, int gpuId)
+    {
+        try
+        {
+            var cudaModel = Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
+            _model = cudaModel;
+
+            var device = Cuda.CudaDevice.GetDevice(gpuId);
+            Console.WriteLine($"Device: GPU ({device})");
+
+            return (cfg, size) => cudaModel.CreateKvCache(size);
+        }
+        catch (DllNotFoundException ex)
+        {
+            throw new InvalidOperationException(
+                $"DOTLLM_BENCH_DEVICE=gpu but CUDA libraries not found. " +
+                $"Install CUDA Toolkit or use --device cpu. ({ex.Message})", ex);
+        }
     }
 
     [Benchmark(Description = "E2E inference (prefill + decode)")]

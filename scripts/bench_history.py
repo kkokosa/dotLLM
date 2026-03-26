@@ -7,6 +7,7 @@ displays a trend table at the end. The user's working tree stays undisturbed.
 
 Usage:
     python scripts/bench_history.py cpu --last 5
+    python scripts/bench_history.py gpu --last 5 --device gpu
     python scripts/bench_history.py cpu --from f3d3bf8
     python scripts/bench_history.py cpu --last 3 --model QuantFactory/SmolLM-135M-GGUF --quant Q8_0
 """
@@ -280,6 +281,7 @@ def _build_bench_compare_cmd(
     dotllm: bool,
     llamacpp: bool,
     llamacpp_bin: str | None,
+    device: str = "cpu",
 ) -> list[str]:
     """Build the subprocess command for bench_compare.py."""
     # Run bench_compare.py from the current tree (not the worktree) —
@@ -308,6 +310,8 @@ def _build_bench_compare_cmd(
         cmd.append("--llamacpp")
     if llamacpp_bin:
         cmd.extend(["--llamacpp-bin", llamacpp_bin])
+    if device != "cpu":
+        cmd.extend(["--device", device])
 
     return cmd
 
@@ -326,6 +330,7 @@ def _run_bench_for_commit(
     dotllm: bool,
     llamacpp: bool,
     llamacpp_bin: str | None,
+    device: str = "cpu",
 ) -> bool:
     """Run benchmark for a single commit. Returns True on success."""
     output_file = os.path.join(output_dir, f"{name}_{index}.json")
@@ -370,6 +375,7 @@ def _run_bench_for_commit(
             dotllm=dotllm,
             llamacpp=llamacpp,
             llamacpp_bin=llamacpp_bin,
+            device=device,
         )
 
         print(f"  Running bench_compare...")
@@ -658,6 +664,9 @@ def main() -> int:
                         help="Markdown output for trend table")
     parser.add_argument("--no-trend", action="store_true",
                         help="Skip final trend display")
+    parser.add_argument("--device", type=str, default="cpu",
+                        choices=["cpu", "gpu", "both"],
+                        help="Compute device: cpu (default), gpu, or both")
 
     args = parser.parse_args()
 
@@ -810,6 +819,7 @@ def main() -> int:
             dotllm=dotllm,
             llamacpp=llamacpp,
             llamacpp_bin=args.llamacpp_bin,
+            device=args.device,
         )
         if ok:
             successes += 1
