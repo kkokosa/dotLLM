@@ -1019,8 +1019,8 @@ def main() -> int:
     parser.add_argument("--label", type=str, default=None,
                         help="Human label for this benchmark run (used in --export-json)")
     parser.add_argument("--device", type=str, default="cpu",
-                        choices=["cpu", "gpu"],
-                        help="Compute device for dotLLM and llama.cpp (default: cpu)")
+                        choices=["cpu", "gpu", "both"],
+                        help="Compute device: cpu (default), gpu, or both (runs each engine on both devices)")
 
     args = parser.parse_args()
 
@@ -1066,8 +1066,8 @@ def main() -> int:
     estimated_tokens = max(1, len(prompt.split()) * 4 // 3)  # rough word→token estimate
     prompt_preview = prompt[:60] + "..." if len(prompt) > 60 else prompt
     print()
-    device = args.device
-    print(f"[config] Models: {len(resolved_models)}, Device: {device}, Threads: {os.cpu_count()} (auto)")
+    devices = ["cpu", "gpu"] if args.device == "both" else [args.device]
+    print(f"[config] Models: {len(resolved_models)}, Device: {args.device}, Threads: {os.cpu_count()} (auto)")
     print(f'[config] Prompt ({prompt_size_label}): "{prompt_preview}" (~{estimated_tokens} tokens est.)')
     print(f"[config] Max tokens: {args.tokens}")
     print()
@@ -1095,25 +1095,26 @@ def main() -> int:
             print(f"[bench] {model_label} ({i + 1}/{len(resolved_models)})")
             print(f"{'-' * 60}")
 
-        for name in engine_names:
-            if name not in ENGINES:
-                print(f"Unknown engine: {name}. Available: {', '.join(ENGINES.keys())}", file=sys.stderr)
-                return 1
+        for device in devices:
+            for name in engine_names:
+                if name not in ENGINES:
+                    print(f"Unknown engine: {name}. Available: {', '.join(ENGINES.keys())}", file=sys.stderr)
+                    return 1
 
-            fn = ENGINES[name]
-            results = fn(
-                model_path=resolved_model,
-                prompt=prompt,
-                max_tokens=args.tokens,
-                runs=args.runs,
-                llamacpp_bin=llamacpp_bin,
-                bdn_filter=args.bdn_filter,
-                bdn_project=args.bdn_project,
-                skip_bdn_build=args.skip_bdn_build,
-                iterations=args.iterations,
-                device=device,
-            )
-            all_results.extend(results)
+                fn = ENGINES[name]
+                results = fn(
+                    model_path=resolved_model,
+                    prompt=prompt,
+                    max_tokens=args.tokens,
+                    runs=args.runs,
+                    llamacpp_bin=llamacpp_bin,
+                    bdn_filter=args.bdn_filter,
+                    bdn_project=args.bdn_project,
+                    skip_bdn_build=args.skip_bdn_build,
+                    iterations=args.iterations,
+                    device=device,
+                )
+                all_results.extend(results)
 
     print_comparison(all_results, prompt, args.tokens)
 
@@ -1125,7 +1126,7 @@ def main() -> int:
             prompt_size_label,
             args.tokens,
             resolved_models,
-            device=device,
+            device=args.device,
         )
 
     return 0

@@ -665,8 +665,8 @@ def main() -> int:
     parser.add_argument("--no-trend", action="store_true",
                         help="Skip final trend display")
     parser.add_argument("--device", type=str, default="cpu",
-                        choices=["cpu", "gpu"],
-                        help="Compute device for dotLLM and llama.cpp (default: cpu)")
+                        choices=["cpu", "gpu", "both"],
+                        help="Compute device: cpu (default), gpu, or both")
 
     args = parser.parse_args()
 
