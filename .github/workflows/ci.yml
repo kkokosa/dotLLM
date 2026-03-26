@@ -51,7 +51,7 @@ jobs:
           restore-keys: nuget-${{ runner.os }}-
 
       - name: Unit Tests
-        run: dotnet test tests/DotLLM.Tests.Unit/ -c Release
+        run: dotnet test tests/DotLLM.Tests.Unit/ -c Release --filter "Category!=GPU"
 
   integration-tests:
     name: Integration Tests
