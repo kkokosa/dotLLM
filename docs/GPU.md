@@ -84,7 +84,7 @@ GGUF file (mmap'd on host)
 | Component | Formula | Example (Llama 3.2 1B, Q8_0) | Example (Llama 3 8B, Q4_K_M) |
 |-----------|---------|-------------------------------|-------------------------------|
 | Weights (quantized) | `quantized model size` | ~1.1 GB | ~4.9 GB |
-| Dequant scratch | `max(intermediateSize, qDim) × hiddenSize × 2` | ~32 MB | ~128 MB |
+| Dequant scratch | `max(numHeads×headDim, intermediateSize) × hiddenSize × 2` | ~32 MB | ~128 MB |
 | KV-cache (FP16) | `2 × layers × kvHeads × headDim × maxSeq × 2` | ~16 MB | ~512 MB |
 | Activation buffers | `~seqLen × hiddenSize × 10 × 2` | ~1 MB | ~10 MB |
 | **Total** | | **~1.15 GB** | **~5.5 GB** |
@@ -197,6 +197,7 @@ Supported GGUF quantization formats for GPU inference:
 | F16 | Yes | — | — | Direct upload, used by cuBLAS directly |
 | Q8_0 | Yes | Yes | Yes | Best quality quantized format |
 | Q4_0 | No | Yes | No | Dequant-only (no custom GEMV kernel) |
+| Q5_0 | No | Yes | No | Dequant-only (no custom GEMV kernel) |
 | Q4_K | No | Yes | Yes | Good quality-to-size ratio |
 | Q5_K | No | Yes | No | Dequant-only (no custom GEMV kernel) |
 | Q6_K | No | Yes | Yes | High quality, larger than Q4_K |
@@ -266,7 +267,7 @@ dotllm run model.gguf --prompt "Hello" --device cpu
 
 ## Prerequisites
 
-- **NVIDIA GPU**: Compute capability 6.1+ (Pascal and newer). Recommended: 7.0+ (Volta) for Tensor Cores.
+- **NVIDIA GPU**: Compute capability 6.1+ (Pascal and newer). Recommended: 7.0+ (Volta) for Tensor Core acceleration.
 - **NVIDIA GPU driver**: 525.60+ (CUDA 12.x compatibility).
 - **cuBLAS**: Required for GEMM. Installed with CUDA Toolkit.
 - **CUDA Toolkit**: Required only for compiling `.cu` → `.ptx` kernels. Pre-compiled PTX files can be distributed.

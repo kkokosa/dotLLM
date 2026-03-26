@@ -431,7 +431,7 @@ public sealed class CudaModule : IDisposable
     private nint _module;
     private readonly Dictionary<string, nint> _functions = new();
 
-    public static CudaModule LoadFromPtx(string ptxPath)
+    public static CudaModule LoadFromFile(string ptxPath)
     {
         byte[] ptxBytes = File.ReadAllBytes(ptxPath);
         var module = new CudaModule();
@@ -483,7 +483,7 @@ A simple shell script replaces the entire CMake build system:
 #!/bin/bash
 # native/build.sh — Compile all .cu kernels to PTX
 
-CUDA_ARCHS="compute_80 compute_89 compute_90"
+CUDA_ARCHS="compute_61"  # Pascal and newer; PTX is forward-compatible
 OUT_DIR="$(dirname "$0")/ptx"
 mkdir -p "$OUT_DIR"
 
@@ -610,25 +610,52 @@ First-time PTX loading incurs ~100–500ms per module as the driver compiles PTX
 
 All kernels compiled to PTX, loaded via `cuModuleLoadData`, launched via `cuLaunchKernel`:
 
+**FP16 pipeline (primary):**
+
 | Kernel | File | Function Name | Block Size | Grid Size | Shared Mem |
 |---|---|---|---|---|---|
 | RMS Norm | `rmsnorm.cu` | `rmsnorm_f16` | 256 | rows | Warp reduction |
+| Fused Add+RmsNorm | `fused_add_rmsnorm.cu` | `fused_add_rmsnorm_f16` | 256 | rows | Warp reduction |
+| Per-Head RmsNorm | `per_head_rmsnorm.cu` | `per_head_rmsnorm_f16` | 256 | heads × seqLen | Warp reduction |
 | RoPE | `rope.cu` | `rope_f16` | 256 | seqLen × numHeads | None |
+| Attention | `attention.cu` | `attention_f16` | 256 | numHeads × seqQ | Per-head scores |
 | SwiGLU | `swiglu.cu` | `swiglu_f16` | 256 | ceil(n/256) | None |
 | Add | `add.cu` | `add_f16` | 256 | ceil(n/256) | None |
-| Softmax | `softmax.cu` | `softmax_f16` | 256 | rows | Warp reduction |
-| Embedding | `embedding.cu` | `embedding_lookup` | 256 | seqLen | None |
-| Attention | `attention.cu` | `attention_f16` | 256 | numHeads × batchSize | Per-head scores |
 | Bias Add | `bias_add.cu` | `bias_add_f16` | 256 | ceil(n/256) | None |
-| Dequant Q8_0 | `dequant.cu` | `dequant_q8_0_f16` | 256 | ceil(blocks/256) | None |
-| Dequant Q4_0 | `dequant.cu` | `dequant_q4_0_f16` | 256 | ceil(blocks/256) | None |
-| Dequant Q4_K | `dequant.cu` | `dequant_q4_k_f16` | 256 | ceil(superblocks/X) | None |
-| Dequant Q5_K | `dequant.cu` | `dequant_q5_k_f16` | 256 | ceil(superblocks/X) | None |
-| Dequant Q6_K | `dequant.cu` | `dequant_q6_k_f16` | 256 | ceil(superblocks/X) | None |
-| FP16→FP32 | `convert.cu` | `convert_f16_to_f32` | 256 | ceil(n/256) | None |
-| FP32→FP16 | `convert.cu` | `convert_f32_to_f16` | 256 | ceil(n/256) | None |
+| Softmax | `softmax.cu` | `softmax_f16` | 256 | rows | Warp reduction |
+| Embedding (F32) | `embedding.cu` | `embedding_lookup_f32` | 256 | seqLen | None |
+| Embedding (F16) | `embedding.cu` | `embedding_lookup_f16` | 256 | seqLen | None |
+| Embedding (Q8_0) | `embedding.cu` | `embedding_lookup_q8_0` | 256 | seqLen | None |
 
-GEMM/GEMV operations use cuBLAS (`cublasHgemm` / `cublasGemmEx`) directly — no custom PTX kernel needed.
+**Dequantization (quantized weights → FP16 scratch):**
+
+| Kernel | File | Function Name |
+|---|---|---|
+| Dequant Q8_0 | `dequant.cu` | `dequant_q8_0_f16` |
+| Dequant Q4_0 | `dequant.cu` | `dequant_q4_0_f16` |
+| Dequant Q5_0 | `dequant.cu` | `dequant_q5_0_f16` |
+| Dequant Q4_K | `dequant.cu` | `dequant_q4_k_f16` |
+| Dequant Q5_K | `dequant.cu` | `dequant_q5_k_f16` |
+| Dequant Q6_K | `dequant.cu` | `dequant_q6_k_f16` |
+
+**Quantized GEMV (decode path — operate directly on quantized weights):**
+
+| Kernel | File | Function Name |
+|---|---|---|
+| Q8_0 GEMV | `quantized_gemv.cu` | `quantized_gemv_q8_0` |
+| Q4_K GEMV | `quantized_gemv.cu` | `quantized_gemv_q4_k` |
+| Q6_K GEMV | `quantized_gemv.cu` | `quantized_gemv_q6_k` |
+
+**Conversion:**
+
+| Kernel | File | Function Name |
+|---|---|---|
+| FP16→FP32 | `convert.cu` | `convert_f16_to_f32` |
+| FP32→FP16 | `convert.cu` | `convert_f32_to_f16` |
+
+FP32 diagnostic variants also exist (`*_f32.cu` files) for debugging precision issues.
+
+GEMM/GEMV for prefill use cuBLAS (`cublasHgemm` / `cublasGemmEx`) directly — no custom PTX kernel needed.
 
 ---
 
@@ -650,7 +677,7 @@ This is well-proven — llama.cpp, vLLM, and every CUDA inference engine uses th
 
 ### Runtime Requirements
 
-- **NVIDIA GPU**: Compute capability 7.0+ (Volta and newer). Recommended: 8.0+ (Ampere) for best Tensor Core performance.
+- **NVIDIA GPU**: Compute capability 6.1+ (Pascal and newer). Recommended: 7.0+ (Volta) for Tensor Core acceleration.
 - **NVIDIA GPU driver**: 525.60+ (for CUDA 12.x compatibility).
 - **CUDA Runtime**: not required — the Driver API (`libcuda.so`) is sufficient and ships with the driver.
 - **cuBLAS**: required for GEMM. Installed with CUDA Toolkit or available as a standalone redistributable.
@@ -665,7 +692,7 @@ This is well-proven — llama.cpp, vLLM, and every CUDA inference engine uses th
 ## Future Work
 
 - **Flash Attention**: replace naive attention kernel with tiled flash attention (shared memory, online softmax). Full Tensor Core access via `wmma` intrinsics in PTX.
-- **Quantized GEMV**: custom PTX kernels for Q4_K × FP16 decode, avoiding the dequant → FP16 → cuBLAS path. Critical for single-token decode throughput.
+- **Fused quantized GEMM for prefill**: Marlin-style dequant-in-register or llama.cpp MMQ-style fused matmul to eliminate per-projection dequant→scratch overhead during prefill. Decode path already uses custom quantized GEMV kernels (Q8_0, Q4_K, Q6_K).
 - **Multi-stream pipelining** (Step 32): overlap H2D transfer with compute across layers.
 - **NCCL integration** (Step 51): multi-GPU tensor parallelism. NCCL is another system library — same P/Invoke pattern, no shared library needed.
 - **Fatbin distribution**: ship pre-compiled SASS for common architectures to eliminate JIT overhead.
