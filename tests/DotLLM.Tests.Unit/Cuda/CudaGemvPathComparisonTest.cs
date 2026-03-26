@@ -32,7 +32,7 @@ public class CudaGemvPathComparisonTest
     public unsafe void CompareGemvPaths_RealModelWeights_Layer0_QProjection()
     {
         try { Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available"); }
-        catch (DllNotFoundException) { Skip.Always("CUDA driver not installed"); }
+        catch (DllNotFoundException) { Skip.If(true, "CUDA driver not installed"); }
 
         string modelPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -117,7 +117,7 @@ public class CudaGemvPathComparisonTest
     public unsafe void CompareGemvPaths_AllProjections_Layer0()
     {
         try { Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available"); }
-        catch (DllNotFoundException) { Skip.Always("CUDA driver not installed"); }
+        catch (DllNotFoundException) { Skip.If(true, "CUDA driver not installed"); }
 
         string modelPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
