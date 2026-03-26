@@ -40,10 +40,15 @@ public class CudaGemvPathComparisonTest
     private static bool CudaAvailableProbe() => CudaDevice.IsAvailable();
 
     [SkippableFact]
-    public unsafe void CompareGemvPaths_RealModelWeights_Layer0_QProjection()
+    public void CompareGemvPaths_RealModelWeights_Layer0_QProjection()
     {
         Skip.IfNot(IsCudaDriverPresent(), "No CUDA GPU available");
+        CompareGemvPaths_RealModelWeights_Layer0_QProjection_Impl();
+    }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private unsafe void CompareGemvPaths_RealModelWeights_Layer0_QProjection_Impl()
+    {
         string modelPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".dotllm", "models", "QuantFactory", "SmolLM-135M-GGUF", "SmolLM-135M.Q8_0.gguf");
@@ -57,7 +62,6 @@ public class CudaGemvPathComparisonTest
         _out.WriteLine($"Layer 0 Q: quant={lw.QQuantType}, output={lw.QOutputDim}, input={lw.QInputDim}");
         _out.WriteLine($"Layer 0 K: quant={lw.KQuantType}, output={lw.KOutputDim}, input={lw.KInputDim}");
 
-        // Generate a realistic input vector (RmsNorm output — typically small magnitudes)
         var rng = new Random(42);
         float[] x = new float[lw.QInputDim];
         for (int i = 0; i < x.Length; i++)
@@ -65,15 +69,12 @@ public class CudaGemvPathComparisonTest
 
         int n = lw.QOutputDim, k = lw.QInputDim;
 
-        // === Path A: CPU MatMul.GemvQ8_0 (quantizes x to Q8_0 internally) ===
         float[] pathA = new float[n];
         fixed (float* pX = x, pY = pathA)
             MatMul.GemvQ8_0((byte*)lw.QWeight, pX, pY, n, k);
 
-        // === Path C: F32 scalar reference (dequant weight × F32 input) ===
         float[] pathC = DequantAndGemvReference((byte*)lw.QWeight, x, n, k);
 
-        // === Path B: GPU quantized_gemv_q8_0_f32in ===
         float[] pathB;
         {
             using var ctx = CudaContext.Create(0);
@@ -91,7 +92,6 @@ public class CudaGemvPathComparisonTest
             CudaDriverApi.cuMemAlloc_v2(out nint devX, (nuint)xBytes).ThrowOnError();
             CudaDriverApi.cuMemAlloc_v2(out nint devY, (nuint)yBytes).ThrowOnError();
 
-            // Upload the SAME weight bytes from mmap to GPU
             CudaDriverApi.cuMemcpyHtoD_v2(devW, lw.QWeight, (nuint)wBytes).ThrowOnError();
             fixed (float* pX = x)
                 CudaDriverApi.cuMemcpyHtoD_v2(devX, (nint)pX, (nuint)xBytes).ThrowOnError();
@@ -108,7 +108,6 @@ public class CudaGemvPathComparisonTest
             CudaDriverApi.cuMemFree_v2(devY);
         }
 
-        // === Compare all pairs ===
         var (abMax, abMean) = CompareArrays(pathA, pathB);
         var (acMax, acMean) = CompareArrays(pathA, pathC);
         var (bcMax, bcMean) = CompareArrays(pathB, pathC);
@@ -118,15 +117,19 @@ public class CudaGemvPathComparisonTest
         _out.WriteLine($"  |B-C| (GPU vs F32ref):   max={bcMax:E4}  mean={bcMean:E4}");
         _out.WriteLine($"\n  If |A-B| ≈ |A-C| >> |B-C|, diff is from CPU's Q8 input quantization.");
         _out.WriteLine($"  If |B-C| >> |A-C|, the GPU kernel has a bug.");
-
-        // Also check: which path is closer to the F32 reference?
         _out.WriteLine($"\n  GPU is closer to F32 ref than CPU: {bcMean < acMean}");
     }
 
     [SkippableFact]
-    public unsafe void CompareGemvPaths_AllProjections_Layer0()
+    public void CompareGemvPaths_AllProjections_Layer0()
     {
         Skip.IfNot(IsCudaDriverPresent(), "No CUDA GPU available");
+        CompareGemvPaths_AllProjections_Layer0_Impl();
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private unsafe void CompareGemvPaths_AllProjections_Layer0_Impl()
+    {
 
         string modelPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
