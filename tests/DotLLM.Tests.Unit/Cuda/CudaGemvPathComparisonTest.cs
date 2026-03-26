@@ -28,10 +28,21 @@ public class CudaGemvPathComparisonTest
     private readonly ITestOutputHelper _out;
     public CudaGemvPathComparisonTest(ITestOutputHelper output) => _out = output;
 
+    private static bool IsCudaDriverPresent()
+    {
+        string lib = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "nvcuda.dll" : "libcuda.so.1";
+        if (!NativeLibrary.TryLoad(lib, out nint h)) return false;
+        NativeLibrary.Free(h);
+        return CudaAvailableProbe();
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool CudaAvailableProbe() => CudaDevice.IsAvailable();
+
     [SkippableFact]
     public unsafe void CompareGemvPaths_RealModelWeights_Layer0_QProjection()
     {
-        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+        Skip.IfNot(IsCudaDriverPresent(), "No CUDA GPU available");
 
         string modelPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -115,7 +126,7 @@ public class CudaGemvPathComparisonTest
     [SkippableFact]
     public unsafe void CompareGemvPaths_AllProjections_Layer0()
     {
-        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+        Skip.IfNot(IsCudaDriverPresent(), "No CUDA GPU available");
 
         string modelPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
