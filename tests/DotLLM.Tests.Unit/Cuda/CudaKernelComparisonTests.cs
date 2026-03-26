@@ -175,6 +175,47 @@ public class CudaKernelComparisonTests : IDisposable
         CompareResults("RoPE K", cpuK, gpuK, tolerance: 0.001f);
     }
 
+    [SkippableFact]
+    public unsafe void RoPEF32_NeoX_MatchesCpuReference()
+    {
+        SkipIfUnavailable();
+
+        // Use Qwen2.5-0.5B dimensions: hidden=896, heads=14, kv_heads=2, head_dim=64
+        int numHeads = 14;
+        int numKvHeads = 2;
+        int headDim = 64;
+        float theta = 1000000.0f; // Qwen2.5 uses 1M theta
+        int seqLen = 4;
+        int ropeDim = headDim; // full rotation
+        int halfRope = ropeDim / 2;
+        var rng = new Random(42);
+
+        float[] q = RandomF32(rng, seqLen * numHeads * headDim);
+        float[] k = RandomF32(rng, seqLen * numKvHeads * headDim);
+        int[] positions = new int[seqLen];
+        for (int i = 0; i < seqLen; i++) positions[i] = i;
+
+        // CPU reference: NeoX (non-interleaved)
+        int maxPos = seqLen + 1;
+        float[] cosTable = new float[maxPos * halfRope];
+        float[] sinTable = new float[maxPos * halfRope];
+        RoPE.PrecomputeFrequencyTable(maxPos, ropeDim, theta, cosTable, sinTable);
+
+        float[] cpuQ = (float[])q.Clone();
+        float[] cpuK = (float[])k.Clone();
+        RoPE.Execute(cpuQ, cpuK, positions, numHeads, numKvHeads, headDim, ropeDim,
+                     cosTable, sinTable, Core.Configuration.RoPEType.NeoX);
+
+        // GPU: NeoX (rope_type=1)
+        float[] gpuQ = (float[])q.Clone();
+        float[] gpuK = (float[])k.Clone();
+        RunGpuRoPE(gpuQ, gpuK, positions, seqLen, numHeads, numKvHeads, headDim, ropeDim,
+                   theta, ropeType: 1); // 1 = NeoX in CUDA kernel
+
+        CompareResults("RoPE-NeoX Q", cpuQ, gpuQ, tolerance: 0.001f);
+        CompareResults("RoPE-NeoX K", cpuK, gpuK, tolerance: 0.001f);
+    }
+
     private unsafe void RunGpuRoPE(float[] q, float[] k, int[] positions,
                                     int seqLen, int numHeads, int numKvHeads, int headDim,
                                     int ropeDim, float theta, int ropeType)

@@ -23,7 +23,7 @@ public class CudaDecodeDebugTest
     public CudaDecodeDebugTest(ITestOutputHelper output) => _out = output;
 
     [SkippableFact]
-    public unsafe void DebugDecode_FailingPrompt_15Tokens()
+    public unsafe void DebugDecode_SmolLM_15Tokens()
     {
         Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
 
@@ -32,9 +32,197 @@ public class CudaDecodeDebugTest
             ".dotllm", "models", "QuantFactory", "SmolLM-135M-GGUF", "SmolLM-135M.Q8_0.gguf");
         Skip.If(!File.Exists(modelPath), "SmolLM-135M Q8_0 GGUF not found");
 
+        RunDecodeComparison(modelPath, "Tell best meal is", 15);
+    }
+
+    [SkippableFact]
+    public unsafe void DebugDecode_Qwen25_15Tokens()
+    {
+        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+
+        string modelPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dotllm", "models", "Qwen", "Qwen2.5-0.5B-Instruct-GGUF", "qwen2.5-0.5b-instruct-q8_0.gguf");
+        Skip.If(!File.Exists(modelPath), "Qwen2.5-0.5B-Instruct Q8_0 GGUF not found");
+
+        RunDecodeComparison(modelPath, "The capital of France is", 15);
+    }
+
+    [SkippableFact]
+    public unsafe void DebugDecode_Qwen3_15Tokens()
+    {
+        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+
+        string modelPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dotllm", "models", "Qwen", "Qwen3-0.6B-GGUF", "qwen3-0.6b-q8_0.gguf");
+        Skip.If(!File.Exists(modelPath), "Qwen3-0.6B Q8_0 GGUF not found");
+
+        RunDecodeComparison(modelPath, "The capital of France is", 15);
+    }
+
+    /// <summary>
+    /// Llama-3.2-1B: larger model, check if per-layer error is similar to Qwen.
+    /// </summary>
+    [SkippableFact]
+    public unsafe void DebugDecode_Llama1B_LayerBisect()
+    {
+        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+
+        string modelPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dotllm", "models", "bartowski", "Llama-3.2-1B-Instruct-GGUF", "Llama-3.2-1B-Instruct-Q8_0.gguf");
+        Skip.If(!File.Exists(modelPath), "Llama-3.2-1B-Instruct Q8_0 GGUF not found");
+
+        RunLayerBisect(modelPath, "The capital of France is");
+    }
+
+    /// <summary>
+    /// Baseline: SmolLM layer bisect for comparison against Qwen.
+    /// </summary>
+    [SkippableFact]
+    public unsafe void DebugDecode_SmolLM_LayerBisect()
+    {
+        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+
+        string modelPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dotllm", "models", "QuantFactory", "SmolLM-135M-GGUF", "SmolLM-135M.Q8_0.gguf");
+        Skip.If(!File.Exists(modelPath), "SmolLM-135M Q8_0 GGUF not found");
+
+        RunLayerBisect(modelPath, "The capital of France is");
+    }
+
+    /// <summary>
+    /// Bisects which layer first causes divergence by running 1..N layers on both CPU and GPU.
+    /// </summary>
+    [SkippableFact]
+    public unsafe void DebugDecode_Qwen25_LayerBisect()
+    {
+        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+
+        string modelPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dotllm", "models", "Qwen", "Qwen2.5-0.5B-Instruct-GGUF", "qwen2.5-0.5b-instruct-q8_0.gguf");
+        Skip.If(!File.Exists(modelPath), "Qwen2.5-0.5B-Instruct Q8_0 GGUF not found");
+
+        RunLayerBisect(modelPath, "The capital of France is");
+    }
+
+    /// <summary>
+    /// Isolates whether the error comes from NeoX RoPE, Q/K biases, or both.
+    /// Runs GPU with each feature disabled independently and compares error vs baseline.
+    /// </summary>
+    [SkippableFact]
+    public unsafe void DebugDecode_Qwen25_FeatureIsolation()
+    {
+        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+
+        string modelPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dotllm", "models", "Qwen", "Qwen2.5-0.5B-Instruct-GGUF", "qwen2.5-0.5b-instruct-q8_0.gguf");
+        Skip.If(!File.Exists(modelPath), "Qwen2.5-0.5B-Instruct Q8_0 GGUF not found");
+
+        var gguf = GgufFile.Open(modelPath);
+        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
+
+        int[] promptTokens = GgufBpeTokenizerFactory.Load(gguf.Metadata).Encode("The capital of France is");
+        int[] positions = new int[promptTokens.Length];
+        for (int i = 0; i < positions.Length; i++) positions[i] = i;
+
+        string ptxDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "native", "ptx"));
+
+        // Baseline: full GPU (NeoX RoPE + biases)
+        RunFeatureTest("Baseline (NeoX+bias)", gguf, config, promptTokens, positions, ptxDir,
+            ropeOverride: -1, skipBias: false);
+        // Test 1: Force Norm RoPE (wrong results, but shows error contribution of RoPE type)
+        RunFeatureTest("Force Norm RoPE", gguf, config, promptTokens, positions, ptxDir,
+            ropeOverride: 0, skipBias: false);
+        // Test 2: Skip biases (wrong results, but shows error contribution of biases)
+        RunFeatureTest("Skip biases", gguf, config, promptTokens, positions, ptxDir,
+            ropeOverride: -1, skipBias: true);
+        // Test 3: Both disabled
+        RunFeatureTest("Norm RoPE + no bias", gguf, config, promptTokens, positions, ptxDir,
+            ropeOverride: 0, skipBias: true);
+    }
+
+    private unsafe void RunFeatureTest(string label, GgufFile gguf, ModelConfig config,
+        int[] promptTokens, int[] positions, string ptxDir, int ropeOverride, bool skipBias)
+    {
+        var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
+        cpuModel.DebugMaxLayers = 1;
+
+        var gpuModel = CudaTransformerModel.LoadFromGguf(gguf, config, 0, ptxDir);
+        gpuModel.DebugMaxLayers = 1;
+        gpuModel.DebugRopeTypeOverride = ropeOverride;
+        gpuModel.DebugSkipBias = skipBias;
+
+        using var cpuLogits = cpuModel.Forward(promptTokens, positions, -1);
+        using var gpuLogits = gpuModel.Forward(promptTokens, positions, 0);
+
+        var (maxDiff, meanDiff) = CompareLogitArrays((float*)cpuLogits.DataPointer,
+            (float*)gpuLogits.DataPointer, config.VocabSize);
+
+        _out.WriteLine($"{label,-25} → maxDiff={maxDiff:F4} meanDiff={meanDiff:F4}");
+
+        cpuModel.Dispose();
+        gpuModel.Dispose();
+    }
+
+    private unsafe void RunLayerBisect(string modelPath, string prompt)
+    {
         var gguf = GgufFile.Open(modelPath);
         var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
         var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+
+        _out.WriteLine($"Model: {Path.GetFileName(modelPath)}");
+        _out.WriteLine($"Config: {config.Architecture} {config.NumLayers}L/{config.HiddenSize}H " +
+                       $"heads={config.NumAttentionHeads} kvHeads={config.NumKvHeads} headDim={config.HeadDim}");
+        _out.WriteLine($"RoPE: type={config.RoPEConfig?.Type} dim={config.RoPEConfig?.DimensionCount} theta={config.RoPEConfig?.Theta}");
+
+        int[] promptTokens = tokenizer.Encode(prompt);
+        int[] positions = new int[promptTokens.Length];
+        for (int i = 0; i < positions.Length; i++) positions[i] = i;
+
+        string ptxDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "native", "ptx"));
+
+        // -1 = embedding+LM head only, then layers 1..6 (fine-grained), then 8, 12, 16, 20, 24
+        foreach (int maxLayers in new[] { -1, 1, 2, 3, 4, 5, 6, 8, 12, 16, 20, 24 })
+        {
+            if (maxLayers > config.NumLayers) break;
+
+            var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
+            cpuModel.DebugMaxLayers = maxLayers;
+            var gpuModel = CudaTransformerModel.LoadFromGguf(gguf, config, 0, ptxDir);
+            gpuModel.DebugMaxLayers = maxLayers;
+
+            using var cpuLogits = cpuModel.Forward(promptTokens, positions, -1);
+            using var gpuLogits = gpuModel.Forward(promptTokens, positions, 0);
+
+            int cpuToken = ArgMax((float*)cpuLogits.DataPointer, config.VocabSize);
+            int gpuToken = ArgMax((float*)gpuLogits.DataPointer, config.VocabSize);
+            var (maxDiff, meanDiff) = CompareLogitArrays((float*)cpuLogits.DataPointer,
+                (float*)gpuLogits.DataPointer, config.VocabSize);
+
+            string marker = cpuToken != gpuToken ? " *** DIVERGED ***" : "";
+            _out.WriteLine($"Layers={maxLayers:D2} → CPU:{cpuToken} GPU:{gpuToken}  " +
+                            $"maxDiff={maxDiff:F4} meanDiff={meanDiff:F4}{marker}");
+
+            cpuModel.Dispose();
+            gpuModel.Dispose();
+        }
+    }
+
+    private unsafe void RunDecodeComparison(string modelPath, string prompt, int decodeSteps)
+    {
+        var gguf = GgufFile.Open(modelPath);
+        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
+        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+
+        _out.WriteLine($"Model: {Path.GetFileName(modelPath)}");
+        _out.WriteLine($"Config: {config.Architecture} {config.NumLayers}L/{config.HiddenSize}H " +
+                       $"heads={config.NumAttentionHeads} kvHeads={config.NumKvHeads} headDim={config.HeadDim}");
+        _out.WriteLine($"RoPE: type={config.RoPEConfig?.Type} dim={config.RoPEConfig?.DimensionCount} theta={config.RoPEConfig?.Theta}");
 
         // CPU model
         var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
@@ -45,8 +233,7 @@ public class CudaDecodeDebugTest
         var gpuModel = CudaTransformerModel.LoadFromGguf(gguf, config, 0, ptxDir);
         var gpuKv = gpuModel.CreateKvCache(64);
 
-        // Failing prompt
-        int[] promptTokens = tokenizer.Encode("Tell best meal is");
+        int[] promptTokens = tokenizer.Encode(prompt);
         _out.WriteLine($"Prompt tokens ({promptTokens.Length}): [{string.Join(", ", promptTokens)}]");
 
         int[] positions = new int[promptTokens.Length];
@@ -65,11 +252,11 @@ public class CudaDecodeDebugTest
                         $"GPU: {gpuToken} ({tokenizer.Decode([gpuToken])})  " +
                         $"maxDiff={maxDiff:F4} meanDiff={meanDiff:F4}");
 
-        // Decode 15 tokens — always force SAME token (CPU's choice) for both
+        // Decode tokens — always force SAME token (CPU's choice) for both
         int nextToken = cpuToken;
         int nextPos = promptTokens.Length;
 
-        for (int step = 0; step < 15; step++)
+        for (int step = 0; step < decodeSteps; step++)
         {
             using var cpuL = cpuModel.Forward([nextToken], [nextPos], -1, cpuKv);
             using var gpuL = gpuModel.Forward([nextToken], [nextPos], 0, gpuKv);

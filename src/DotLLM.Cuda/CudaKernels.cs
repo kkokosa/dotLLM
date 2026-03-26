@@ -148,13 +148,10 @@ public sealed unsafe class CudaKernels : IDisposable
         int nArg = hiddenSize;
         float epsArg = eps;
 
-        void*[] args = [&inputArg, &weightArg, &outputArg, &nArg, &epsArg];
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_rmsnormFunc,
+        void** args = stackalloc void*[] {&inputArg, &weightArg, &outputArg, &nArg, &epsArg};
+        CudaDriverApi.cuLaunchKernel(_rmsnormFunc,
                 (uint)rows, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Fused residual-add + RMS normalization. Avoids FP16 truncation at residual junction.</summary>
@@ -165,13 +162,10 @@ public sealed unsafe class CudaKernels : IDisposable
         int nArg = hiddenSize;
         float epsArg = eps;
 
-        void*[] args = [&resArg, &xArg, &wArg, &outArg, &nArg, &epsArg];
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_fusedAddRmsNormFunc,
+        void** args = stackalloc void*[] {&resArg, &xArg, &wArg, &outArg, &nArg, &epsArg};
+        CudaDriverApi.cuLaunchKernel(_fusedAddRmsNormFunc,
                 (uint)rows, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Full FP32 RMS normalization: FP32 input, FP32 weight, FP32 output.</summary>
@@ -182,13 +176,10 @@ public sealed unsafe class CudaKernels : IDisposable
         int nArg = hiddenSize;
         float epsArg = eps;
 
-        void*[] args = [&inputArg, &weightArg, &outputArg, &nArg, &epsArg];
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_rmsnormF32Func,
+        void** args = stackalloc void*[] {&inputArg, &weightArg, &outputArg, &nArg, &epsArg};
+        CudaDriverApi.cuLaunchKernel(_rmsnormF32Func,
                 (uint)rows, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Quantized GEMV with FP32 input: y_f32[n] = W_q8_0[n,k] @ x_f32[k].</summary>
@@ -198,13 +189,10 @@ public sealed unsafe class CudaKernels : IDisposable
         nint wArg = quantWeight, xArg = xF32, yArg = yF32;
         int nArg = n, kArg = k;
 
-        void*[] args = [&wArg, &xArg, &yArg, &nArg, &kArg];
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_quantizedGemvQ8_0F32InFunc,
+        void** args = stackalloc void*[] {&wArg, &xArg, &yArg, &nArg, &kArg};
+        CudaDriverApi.cuLaunchKernel(_quantizedGemvQ8_0F32InFunc,
                 (uint)n, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>RMS normalization with FP32 input, FP32 weight, FP16 output. For FP32 residual stream.</summary>
@@ -215,13 +203,10 @@ public sealed unsafe class CudaKernels : IDisposable
         int nArg = hiddenSize;
         float epsArg = eps;
 
-        void*[] args = [&inputArg, &weightArg, &outputArg, &nArg, &epsArg];
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_rmsnormF32InF16OutFunc,
+        void** args = stackalloc void*[] {&inputArg, &weightArg, &outputArg, &nArg, &epsArg};
+        CudaDriverApi.cuLaunchKernel(_rmsnormF32InF16OutFunc,
                 (uint)rows, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>FP32 element-wise add: output_f32 = a_f32 + b_f32.</summary>
@@ -230,15 +215,12 @@ public sealed unsafe class CudaKernels : IDisposable
         nint aArg = a, bArg = b, outArg = output;
         int nArg = n;
 
-        void*[] args = [&aArg, &bArg, &outArg, &nArg];
+        void** args = stackalloc void*[] {&aArg, &bArg, &outArg, &nArg};
         uint gridDim = (uint)((n + BlockSize - 1) / BlockSize);
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_addF32Func,
+        CudaDriverApi.cuLaunchKernel(_addF32Func,
                 gridDim, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Mixed add: output_f32 = a_f32 + b_f16. For adding FP16 projection output into FP32 residual.</summary>
@@ -247,15 +229,12 @@ public sealed unsafe class CudaKernels : IDisposable
         nint aArg = aF32, bArg = bF16, outArg = outputF32;
         int nArg = n;
 
-        void*[] args = [&aArg, &bArg, &outArg, &nArg];
+        void** args = stackalloc void*[] {&aArg, &bArg, &outArg, &nArg};
         uint gridDim = (uint)((n + BlockSize - 1) / BlockSize);
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_addF32F16Func,
+        CudaDriverApi.cuLaunchKernel(_addF32F16Func,
                 gridDim, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Embedding lookup with FP32 output for the residual stream.</summary>
@@ -274,14 +253,11 @@ public sealed unsafe class CudaKernels : IDisposable
             _ => throw new NotSupportedException($"FP32 embedding lookup not supported for {embedDtype}.")
         };
 
-        void*[] args = [&tableArg, &idsArg, &outArg, &slArg, &hsArg];
+        void** args = stackalloc void*[] {&tableArg, &idsArg, &outArg, &slArg, &hsArg};
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(func,
+        CudaDriverApi.cuLaunchKernel(func,
                 (uint)seqLen, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>FP32 RoPE: in-place rotation on FP32 Q and K.</summary>
@@ -294,19 +270,16 @@ public sealed unsafe class CudaKernels : IDisposable
         int hdArg = headDim, rdArg = ropeDim, rtArg = ropeType;
         float thetaArg = theta;
 
-        void*[] args = [&qArg, &kArg, &posArg, &slArg, &nhArg, &nkvArg,
-                        &hdArg, &rdArg, &thetaArg, &rtArg];
+        void** args = stackalloc void*[] {&qArg, &kArg, &posArg, &slArg, &nhArg, &nkvArg,
+                        &hdArg, &rdArg, &thetaArg, &rtArg};
 
         int halfRope = ropeDim / 2;
         int totalPairs = seqLen * Math.Max(numHeads, numKvHeads) * halfRope;
         uint gridDim = (uint)((totalPairs + BlockSize - 1) / BlockSize);
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_ropeF32Func,
+        CudaDriverApi.cuLaunchKernel(_ropeF32Func,
                 gridDim, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>FP32 attention: Q/K/V/output all FP32.</summary>
@@ -320,20 +293,17 @@ public sealed unsafe class CudaKernels : IDisposable
         int nhArg = numHeads, nkvArg = numKvHeads, hdArg = headDim;
         int poArg = positionOffset, swArg = slidingWindow;
 
-        void*[] args = [&qArg, &kArg, &vArg, &outArg,
+        void** args = stackalloc void*[] {&qArg, &kArg, &vArg, &outArg,
                         &sqArg, &skvArg, &nhArg, &nkvArg, &hdArg,
-                        &poArg, &swArg];
+                        &poArg, &swArg};
 
         int numBlocks = seqQ * numHeads;
         // Shared: scores[seqKv] + output_accum[headDim] + 1 scratch float
         uint sharedBytes = (uint)((seqKv + headDim + 1) * sizeof(float));
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_attentionF32Func,
+        CudaDriverApi.cuLaunchKernel(_attentionF32Func,
                 (uint)numBlocks, 1, 1, BlockSize, 1, 1,
-                sharedBytes, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                sharedBytes, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>FP32 SwiGLU: out = SiLU(gate) * up, all FP32.</summary>
@@ -343,15 +313,12 @@ public sealed unsafe class CudaKernels : IDisposable
         nint gateArg = gate, upArg = up, outArg = output;
         int nArg = n, slArg = seqLen;
 
-        void*[] args = [&gateArg, &upArg, &outArg, &nArg, &slArg];
+        void** args = stackalloc void*[] {&gateArg, &upArg, &outArg, &nArg, &slArg};
         uint gridDim = (uint)((n * seqLen + BlockSize - 1) / BlockSize);
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_swigluF32Func,
+        CudaDriverApi.cuLaunchKernel(_swigluF32Func,
                 gridDim, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>FP32 bias add: output_f32[i] += bias_f16[i % dim].</summary>
@@ -360,15 +327,12 @@ public sealed unsafe class CudaKernels : IDisposable
         nint outArg = output, biasArg = biasF16;
         int dimArg = dim, slArg = seqLen;
 
-        void*[] args = [&outArg, &biasArg, &dimArg, &slArg];
+        void** args = stackalloc void*[] {&outArg, &biasArg, &dimArg, &slArg};
         uint gridDim = (uint)((dim * seqLen + BlockSize - 1) / BlockSize);
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_biasAddF32Func,
+        CudaDriverApi.cuLaunchKernel(_biasAddF32Func,
                 gridDim, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>FP32 per-head RmsNorm: FP32 data, FP16 weight.</summary>
@@ -379,14 +343,11 @@ public sealed unsafe class CudaKernels : IDisposable
         float epsArg = eps;
         int nhArg = numHeads, hdArg = headDim, slArg = seqLen;
 
-        void*[] args = [&qkArg, &wArg, &epsArg, &nhArg, &hdArg, &slArg];
+        void** args = stackalloc void*[] {&qkArg, &wArg, &epsArg, &nhArg, &hdArg, &slArg};
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_perHeadRmsNormF32Func,
+        CudaDriverApi.cuLaunchKernel(_perHeadRmsNormF32Func,
                 (uint)(seqLen * numHeads), 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Rotary position embedding. In-place on Q and K.</summary>
@@ -399,19 +360,16 @@ public sealed unsafe class CudaKernels : IDisposable
         int hdArg = headDim, rdArg = ropeDim, rtArg = ropeType;
         float thetaArg = theta;
 
-        void*[] args = [&qArg, &kArg, &posArg, &slArg, &nhArg, &nkvArg,
-                        &hdArg, &rdArg, &thetaArg, &rtArg];
+        void** args = stackalloc void*[] {&qArg, &kArg, &posArg, &slArg, &nhArg, &nkvArg,
+                        &hdArg, &rdArg, &thetaArg, &rtArg};
 
         int halfRope = ropeDim / 2;
         int totalPairs = seqLen * Math.Max(numHeads, numKvHeads) * halfRope;
         uint gridDim = (uint)((totalPairs + BlockSize - 1) / BlockSize);
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_ropeFunc,
+        CudaDriverApi.cuLaunchKernel(_ropeFunc,
                 gridDim, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Fused SwiGLU: out = SiLU(gate) * up.</summary>
@@ -421,16 +379,13 @@ public sealed unsafe class CudaKernels : IDisposable
         nint gateArg = gate, upArg = up, outArg = output;
         int nArg = n, slArg = seqLen;
 
-        void*[] args = [&gateArg, &upArg, &outArg, &nArg, &slArg];
+        void** args = stackalloc void*[] {&gateArg, &upArg, &outArg, &nArg, &slArg};
         int total = n * seqLen;
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_swigluFunc,
+        CudaDriverApi.cuLaunchKernel(_swigluFunc,
                 gridDim, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Element-wise add: output = a + b.</summary>
@@ -439,15 +394,12 @@ public sealed unsafe class CudaKernels : IDisposable
         nint aArg = a, bArg = b, outArg = output;
         int nArg = n;
 
-        void*[] args = [&aArg, &bArg, &outArg, &nArg];
+        void** args = stackalloc void*[] {&aArg, &bArg, &outArg, &nArg};
         uint gridDim = (uint)((n + BlockSize - 1) / BlockSize);
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_addFunc,
+        CudaDriverApi.cuLaunchKernel(_addFunc,
                 gridDim, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Softmax over last dimension. One block per row.</summary>
@@ -456,14 +408,11 @@ public sealed unsafe class CudaKernels : IDisposable
         nint inputArg = input, outputArg = output;
         int rowsArg = rows, colsArg = cols;
 
-        void*[] args = [&inputArg, &outputArg, &rowsArg, &colsArg];
+        void** args = stackalloc void*[] {&inputArg, &outputArg, &rowsArg, &colsArg};
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_softmaxFunc,
+        CudaDriverApi.cuLaunchKernel(_softmaxFunc,
                 (uint)rows, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Embedding lookup with per-format dispatch.</summary>
@@ -482,14 +431,11 @@ public sealed unsafe class CudaKernels : IDisposable
             _ => throw new NotSupportedException($"Embedding type {embedDtype} not supported on GPU.")
         };
 
-        void*[] args = [&tableArg, &idsArg, &outArg, &slArg, &hsArg];
+        void** args = stackalloc void*[] {&tableArg, &idsArg, &outArg, &slArg, &hsArg};
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(func,
+        CudaDriverApi.cuLaunchKernel(func,
                 (uint)seqLen, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Naive scaled dot-product attention with causal mask and GQA.</summary>
@@ -503,20 +449,17 @@ public sealed unsafe class CudaKernels : IDisposable
         int nhArg = numHeads, nkvArg = numKvHeads, hdArg = headDim;
         int poArg = positionOffset, swArg = slidingWindow;
 
-        void*[] args = [&qArg, &kArg, &vArg, &outArg,
+        void** args = stackalloc void*[] {&qArg, &kArg, &vArg, &outArg,
                         &sqArg, &skvArg, &nhArg, &nkvArg, &hdArg,
-                        &poArg, &swArg];
+                        &poArg, &swArg};
 
         int numBlocks = seqQ * numHeads;
         // Shared memory: scores[seqKv] + output_accum[headDim], all float
         uint sharedBytes = (uint)((seqKv + headDim) * sizeof(float));
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_attentionFunc,
+        CudaDriverApi.cuLaunchKernel(_attentionFunc,
                 (uint)numBlocks, 1, 1, BlockSize, 1, 1,
-                sharedBytes, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                sharedBytes, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Bias add: output[t, :] += bias[:].</summary>
@@ -525,16 +468,13 @@ public sealed unsafe class CudaKernels : IDisposable
         nint outArg = output, biasArg = bias;
         int dimArg = dim, slArg = seqLen;
 
-        void*[] args = [&outArg, &biasArg, &dimArg, &slArg];
+        void** args = stackalloc void*[] {&outArg, &biasArg, &dimArg, &slArg};
         int total = dim * seqLen;
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_biasAddFunc,
+        CudaDriverApi.cuLaunchKernel(_biasAddFunc,
                 gridDim, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Per-head RMS norm (QK-norm, Qwen3-style).</summary>
@@ -545,15 +485,12 @@ public sealed unsafe class CudaKernels : IDisposable
         float epsArg = eps;
         int nhArg = numHeads, hdArg = headDim, slArg = seqLen;
 
-        void*[] args = [&qkArg, &wArg, &epsArg, &nhArg, &hdArg, &slArg];
+        void** args = stackalloc void*[] {&qkArg, &wArg, &epsArg, &nhArg, &hdArg, &slArg};
         int numBlocks = seqLen * numHeads;
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_perHeadRmsNormFunc,
+        CudaDriverApi.cuLaunchKernel(_perHeadRmsNormFunc,
                 (uint)numBlocks, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Convert FP16 → FP32.</summary>
@@ -562,15 +499,12 @@ public sealed unsafe class CudaKernels : IDisposable
         nint srcArg = src, dstArg = dst;
         int nArg = n;
 
-        void*[] args = [&srcArg, &dstArg, &nArg];
+        void** args = stackalloc void*[] {&srcArg, &dstArg, &nArg};
         uint gridDim = (uint)((n + BlockSize - 1) / BlockSize);
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_convertF16ToF32Func,
+        CudaDriverApi.cuLaunchKernel(_convertF16ToF32Func,
                 gridDim, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Convert FP32 → FP16.</summary>
@@ -579,15 +513,12 @@ public sealed unsafe class CudaKernels : IDisposable
         nint srcArg = src, dstArg = dst;
         int nArg = n;
 
-        void*[] args = [&srcArg, &dstArg, &nArg];
+        void** args = stackalloc void*[] {&srcArg, &dstArg, &nArg};
         uint gridDim = (uint)((n + BlockSize - 1) / BlockSize);
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(_convertF32ToF16Func,
+        CudaDriverApi.cuLaunchKernel(_convertF32ToF16Func,
                 gridDim, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Quantized GEMV: y[n] = W_quant[n,k] @ x[k]. Operates directly on quantized weights.</summary>
@@ -608,14 +539,11 @@ public sealed unsafe class CudaKernels : IDisposable
         if (func == 0)
             throw new NotSupportedException($"Quantized GEMV not supported for {qt}.");
 
-        void*[] args = [&wArg, &xArg, &yArg, &nArg, &kArg];
+        void** args = stackalloc void*[] {&wArg, &xArg, &yArg, &nArg, &kArg};
 
-        fixed (void** argsPtr = args)
-        {
-            CudaDriverApi.cuLaunchKernel(func,
+        CudaDriverApi.cuLaunchKernel(func,
                 (uint)n, 1, 1, BlockSize, 1, 1,
-                0, stream, (nint)argsPtr, 0).ThrowOnError();
-        }
+                0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Whether a quantization type has a custom quantized GEMV kernel.</summary>
@@ -649,12 +577,11 @@ public sealed unsafe class CudaKernels : IDisposable
             {
                 int totalBlocks = totalElements / 32;
                 int tbArg = totalBlocks;
-                void*[] args = [&srcArg, &dstArg, &tbArg];
+                void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
                 uint gridDim = (uint)((totalBlocks + BlockSize - 1) / BlockSize);
-                fixed (void** argsPtr = args)
-                    CudaDriverApi.cuLaunchKernel(_dequantQ8_0Func,
+                CudaDriverApi.cuLaunchKernel(_dequantQ8_0Func,
                         gridDim, 1, 1, BlockSize, 1, 1,
-                        0, stream, (nint)argsPtr, 0).ThrowOnError();
+                        0, stream, (nint)args, 0).ThrowOnError();
                 return;
             }
 
@@ -662,12 +589,11 @@ public sealed unsafe class CudaKernels : IDisposable
             {
                 int totalBlocks = totalElements / 32;
                 int tbArg = totalBlocks;
-                void*[] args = [&srcArg, &dstArg, &tbArg];
+                void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
                 uint gridDim = (uint)((totalBlocks + BlockSize - 1) / BlockSize);
-                fixed (void** argsPtr = args)
-                    CudaDriverApi.cuLaunchKernel(_dequantQ4_0Func,
+                CudaDriverApi.cuLaunchKernel(_dequantQ4_0Func,
                         gridDim, 1, 1, BlockSize, 1, 1,
-                        0, stream, (nint)argsPtr, 0).ThrowOnError();
+                        0, stream, (nint)args, 0).ThrowOnError();
                 return;
             }
 
@@ -675,12 +601,11 @@ public sealed unsafe class CudaKernels : IDisposable
             {
                 int totalBlocks = totalElements / 32;
                 int tbArg = totalBlocks;
-                void*[] args = [&srcArg, &dstArg, &tbArg];
+                void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
                 uint gridDim = (uint)((totalBlocks + BlockSize - 1) / BlockSize);
-                fixed (void** argsPtr = args)
-                    CudaDriverApi.cuLaunchKernel(_dequantQ5_0Func,
+                CudaDriverApi.cuLaunchKernel(_dequantQ5_0Func,
                         gridDim, 1, 1, BlockSize, 1, 1,
-                        0, stream, (nint)argsPtr, 0).ThrowOnError();
+                        0, stream, (nint)args, 0).ThrowOnError();
                 return;
             }
 
@@ -688,12 +613,11 @@ public sealed unsafe class CudaKernels : IDisposable
             {
                 int totalSuperblocks = totalElements / 256;
                 int tsbArg = totalSuperblocks;
-                void*[] args = [&srcArg, &dstArg, &tsbArg];
+                void** args = stackalloc void*[] {&srcArg, &dstArg, &tsbArg};
                 uint gridDim = (uint)((totalSuperblocks + BlockSize - 1) / BlockSize);
-                fixed (void** argsPtr = args)
-                    CudaDriverApi.cuLaunchKernel(_dequantQ4_KFunc,
+                CudaDriverApi.cuLaunchKernel(_dequantQ4_KFunc,
                         gridDim, 1, 1, BlockSize, 1, 1,
-                        0, stream, (nint)argsPtr, 0).ThrowOnError();
+                        0, stream, (nint)args, 0).ThrowOnError();
                 return;
             }
 
@@ -701,12 +625,11 @@ public sealed unsafe class CudaKernels : IDisposable
             {
                 int totalSuperblocks = totalElements / 256;
                 int tsbArg = totalSuperblocks;
-                void*[] args = [&srcArg, &dstArg, &tsbArg];
+                void** args = stackalloc void*[] {&srcArg, &dstArg, &tsbArg};
                 uint gridDim = (uint)((totalSuperblocks + BlockSize - 1) / BlockSize);
-                fixed (void** argsPtr = args)
-                    CudaDriverApi.cuLaunchKernel(_dequantQ5_KFunc,
+                CudaDriverApi.cuLaunchKernel(_dequantQ5_KFunc,
                         gridDim, 1, 1, BlockSize, 1, 1,
-                        0, stream, (nint)argsPtr, 0).ThrowOnError();
+                        0, stream, (nint)args, 0).ThrowOnError();
                 return;
             }
 
@@ -714,12 +637,11 @@ public sealed unsafe class CudaKernels : IDisposable
             {
                 int totalSuperblocks = totalElements / 256;
                 int tsbArg = totalSuperblocks;
-                void*[] args = [&srcArg, &dstArg, &tsbArg];
+                void** args = stackalloc void*[] {&srcArg, &dstArg, &tsbArg};
                 uint gridDim = (uint)((totalSuperblocks + BlockSize - 1) / BlockSize);
-                fixed (void** argsPtr = args)
-                    CudaDriverApi.cuLaunchKernel(_dequantQ6_KFunc,
+                CudaDriverApi.cuLaunchKernel(_dequantQ6_KFunc,
                         gridDim, 1, 1, BlockSize, 1, 1,
-                        0, stream, (nint)argsPtr, 0).ThrowOnError();
+                        0, stream, (nint)args, 0).ThrowOnError();
                 return;
             }
 

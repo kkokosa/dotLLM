@@ -36,6 +36,15 @@ public sealed unsafe class CudaTransformerModel : IModel
     /// <summary>Non-null when model weights exceed available VRAM. Caller should display after loading.</summary>
     public string? VramWarning { get; }
 
+    /// <summary>Debug: limit the number of transformer layers processed. 0 = all layers (default). -1 = skip all layers (embedding + LM head only).</summary>
+    internal int DebugMaxLayers { get; set; }
+
+    /// <summary>Debug: override RoPE type. -1 = use model's type (default).</summary>
+    internal int DebugRopeTypeOverride { get; set; } = -1;
+
+    /// <summary>Debug: skip bias add operations.</summary>
+    internal bool DebugSkipBias { get; set; }
+
     private CudaTransformerModel(
         ModelConfig config, CudaWeights weights, CudaForwardState state,
         CudaStream stream, CudaCublasHandle cublas, CudaContext context,
@@ -165,7 +174,20 @@ public sealed unsafe class CudaTransformerModel : IModel
 
         // 4. Transformer layers — FP16 activations, cuBLAS GEMM for prefill, quantized GEMV for decode,
         //    FusedAddRmsNorm at residual junctions to avoid FP16 truncation.
-        for (int layer = 0; layer < Config.NumLayers; layer++)
+        int numLayers = DebugMaxLayers switch
+        {
+            < 0 => 0,   // skip all layers (embedding + LM head only)
+            0 => Config.NumLayers,
+            _ => Math.Min(DebugMaxLayers, Config.NumLayers)
+        };
+
+        // When skipping all layers, treat embedding output as final hidden state
+        if (numLayers == 0)
+        {
+            CudaDriverApi.cuMemcpyDtoDAsync_v2(_state.HiddenState, _state.Residual, (nuint)hiddenBytes, s).ThrowOnError();
+        }
+
+        for (int layer = 0; layer < numLayers; layer++)
         {
             ref readonly var lw = ref _weights.Layers[layer];
 
@@ -177,9 +199,9 @@ public sealed unsafe class CudaTransformerModel : IModel
             Project(lw.VQuant, lw.VQuantType, lw.V, _state.NormOutput, _state.V, lw.VOutputDim, lw.VInputDim, seqLen);
 
             // Optional biases (FP16)
-            if (lw.QBias != 0) _kernels.LaunchBiasAdd(_state.Q, lw.QBias, lw.QOutputDim, seqLen, s);
-            if (lw.KBias != 0) _kernels.LaunchBiasAdd(_state.K, lw.KBias, lw.KOutputDim, seqLen, s);
-            if (lw.VBias != 0) _kernels.LaunchBiasAdd(_state.V, lw.VBias, lw.VOutputDim, seqLen, s);
+            if (lw.QBias != 0 && !DebugSkipBias) _kernels.LaunchBiasAdd(_state.Q, lw.QBias, lw.QOutputDim, seqLen, s);
+            if (lw.KBias != 0 && !DebugSkipBias) _kernels.LaunchBiasAdd(_state.K, lw.KBias, lw.KOutputDim, seqLen, s);
+            if (lw.VBias != 0 && !DebugSkipBias) _kernels.LaunchBiasAdd(_state.V, lw.VBias, lw.VOutputDim, seqLen, s);
 
             // Optional QK-norms (FP16)
             if (lw.QNormWeight != 0)
@@ -188,9 +210,10 @@ public sealed unsafe class CudaTransformerModel : IModel
                 _kernels.LaunchPerHeadRmsNorm(_state.K, lw.KNormWeight, eps, numKvHeads, headDim, seqLen, s);
 
             // RoPE (FP16, in-place on Q and K)
+            int effectiveRopeType = DebugRopeTypeOverride >= 0 ? DebugRopeTypeOverride : _ropeType;
             _kernels.LaunchRoPE(_state.Q, _state.K, _state.PositionsDevice,
                 seqLen, numHeads, numKvHeads, headDim,
-                _ropeDim, _ropeTheta, _ropeType, s);
+                _ropeDim, _ropeTheta, effectiveRopeType, s);
 
             // KV-cache update + Attention (FP16)
             var cudaKvCache = kvCache as CudaKvCache;
@@ -238,7 +261,7 @@ public sealed unsafe class CudaTransformerModel : IModel
             if (lw.DownBias != 0) _kernels.LaunchBiasAdd(_state.NormOutput, lw.DownBias, lw.DownOutputDim, seqLen, s);
 
             // ── FUSED: FFN residual + next layer's attention norm ──
-            if (layer < Config.NumLayers - 1)
+            if (layer < numLayers - 1)
             {
                 ref readonly var nextLw = ref _weights.Layers[layer + 1];
                 _kernels.LaunchFusedAddRmsNorm(_state.Residual, _state.NormOutput, nextLw.AttnNormWeight, _state.NormOutput,
@@ -246,7 +269,7 @@ public sealed unsafe class CudaTransformerModel : IModel
             }
             else
             {
-                // Last layer: plain add → HiddenState for final norm
+                // Last processed layer: plain add → HiddenState for final norm
                 _kernels.LaunchAdd(_state.Residual, _state.NormOutput, _state.HiddenState,
                     seqLen * hiddenSize, s);
             }

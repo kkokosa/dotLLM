@@ -155,9 +155,15 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         }
         loadSw.Stop();
 
-        // Display VRAM warning after spinner completes (so it stays visible)
+        // Display VRAM warning after spinner completes (so it stays visible).
+        // In JSON mode, write to stderr so it doesn't corrupt the JSON output.
         if (model is DotLLM.Cuda.CudaTransformerModel cudaCheck && cudaCheck.VramWarning is not null)
-            AnsiConsole.MarkupLine($"[yellow]WARNING: {Markup.Escape(cudaCheck.VramWarning)}[/]");
+        {
+            if (settings.Json)
+                Console.Error.WriteLine($"WARNING: {cudaCheck.VramWarning}");
+            else
+                AnsiConsole.MarkupLine($"[yellow]WARNING: {Markup.Escape(cudaCheck.VramWarning)}[/]");
+        }
 
         var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
 

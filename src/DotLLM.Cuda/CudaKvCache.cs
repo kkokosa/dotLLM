@@ -64,6 +64,9 @@ public sealed class CudaKvCache : IKvCache
         for (int i = 0; i < seqLen; i++)
         {
             int pos = positions[i];
+            if ((uint)pos >= (uint)_maxSeqLen)
+                throw new ArgumentOutOfRangeException(nameof(positions),
+                    $"Position {pos} at index {i} exceeds max KV-cache length {_maxSeqLen}.");
             nint kDst = _keys[layerIndex] + (nint)(pos * rowBytes);
             nint vDst = _values[layerIndex] + (nint)(pos * rowBytes);
             nint kSrc = keysDevice + (nint)(i * rowBytes);

@@ -256,10 +256,15 @@ def _run_test(cli: Path, model_path: Path, tc: TestCase, device: str = "cpu") ->
                 return False, line.strip(), elapsed
         return False, f"exit code {result.returncode}: {error_text[:200]}", elapsed
 
+    # Extract JSON from stdout — strip any non-JSON prefix (e.g., VRAM warnings on stderr leak)
+    raw = result.stdout.strip()
+    json_start = raw.find("{")
+    if json_start < 0:
+        return False, f"no JSON in output: {raw[:200]}", elapsed
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(raw[json_start:])
     except json.JSONDecodeError:
-        return False, f"invalid JSON: {result.stdout[:200]}", elapsed
+        return False, f"invalid JSON: {raw[:200]}", elapsed
 
     generated_text = data.get("text", "")
     timings = data.get("timings", {})

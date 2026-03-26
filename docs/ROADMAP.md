@@ -147,6 +147,7 @@ Not in the current roadmap, but the architecture should not preclude these:
 | **Pipeline parallelism** | Split layers across nodes for very large models (405B+) | Micro-batching scheduler, point-to-point communication via NCCL send/recv |
 | **T-MAC LUT-based matmul** | `vpshufb` table lookup for 1-4 bit weights. 4× throughput for ultra-low-bit. | New quant types, LUT-compatible repacking. |
 | **HNSW vocabulary projection** | ANN search replacing LM head GEMV. ~40 candidates from 128K vocab. | `IVocabProjection` interface, HNSW index at load time. |
+| **FP32 residual stream (CUDA)** | Keep residual/hidden buffers in FP32, activations in FP16. Currently the CUDA backend uses FP16 everywhere, which causes cumulative truncation in the residual stream. Measured: Qwen2.5-0.5B diverges at layer 1 (maxDiff=4.7 vs 0.3 for Llama), growing to maxDiff=14.9 by layer 24 — enough to flip the argmax token. Llama models tolerate FP16 residuals; Qwen/some architectures do not. llama.cpp uses FP32 residuals as standard practice. | `CudaForwardState`: Residual/HiddenState → FP32. New `fused_add_rmsnorm` variant: FP32 residual in/out, FP16 activation out. `LaunchRmsNorm` variant: FP32 input, FP16 output. Embedding → FP32 output. |
 | **JIT-specialized kernel codegen** | Source generators for format-specific kernels (QIGen-style). | `IKernelGenerator`, Roslyn source generator pipeline. |
 
 ## Version Milestones

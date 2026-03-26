@@ -42,6 +42,9 @@ public sealed unsafe class TransformerModel : IModel
     /// <summary>Total bytes allocated for inference scratch buffers.</summary>
     public long ComputeMemoryBytes => _state.AllocatedBytes;
 
+    /// <summary>Debug: limit the number of transformer layers processed. 0 = all layers (default). -1 = skip all layers (embedding + LM head only).</summary>
+    internal int DebugMaxLayers { get; set; }
+
     private TransformerModel(ModelConfig config, TransformerWeights weights, TransformerForwardState state,
                        GgufFile gguf, int ropeDim, RoPEType ropeType,
                        ComputeThreadPool? threadPool, bool ownsPool)
@@ -172,7 +175,14 @@ public sealed unsafe class TransformerModel : IModel
 
         // 2. TRANSFORMER LAYERS
         var repackedLayers = _weights.RepackedLayers;
-        for (int layer = 0; layer < Config.NumLayers; layer++)
+        int numLayers = DebugMaxLayers switch
+        {
+            < 0 => 0,
+            0 => Config.NumLayers,
+            _ => Math.Min(DebugMaxLayers, Config.NumLayers)
+        };
+
+        for (int layer = 0; layer < numLayers; layer++)
         {
             ref readonly var lw = ref _weights.Layers[layer];
             var rl = repackedLayers?[layer];

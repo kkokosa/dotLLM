@@ -112,9 +112,10 @@ internal sealed class CudaForwardState : IDisposable
         _currentSeqLen = newCapacity;
     }
 
-    private static nint AllocDevice(long bytes)
+    private nint AllocDevice(long bytes)
     {
         CudaDriverApi.cuMemAlloc_v2(out nint ptr, (nuint)bytes).ThrowOnError();
+        AllocatedBytes += bytes;
         return ptr;
     }
 
