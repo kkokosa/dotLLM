@@ -1,9 +1,9 @@
+using System.Runtime.CompilerServices;
 using BenchmarkDotNet.Attributes;
 using DotLLM.Benchmarks.Columns;
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
-using DotLLM.Cuda;
 using DotLLM.Engine;
 using DotLLM.HuggingFace;
 using DotLLM.Models.Architectures;
@@ -102,16 +102,12 @@ public class InferenceBenchmarks
 
         if (envDevice.StartsWith("gpu", StringComparison.OrdinalIgnoreCase))
         {
+            // Isolated in a [NoInlining] method so the JIT never loads the DotLLM.Cuda
+            // assembly (and its cublas/nvcuda native deps) on the CPU-only path.
             int gpuId = 0;
             if (envDevice.Contains(':'))
                 int.TryParse(envDevice.Split(':')[1], out gpuId);
-
-            var cudaModel = CudaTransformerModel.LoadFromGguf(_gguf, config, gpuId);
-            _model = cudaModel;
-            kvFactory = (cfg, size) => cudaModel.CreateKvCache(size);
-
-            var device = CudaDevice.GetDevice(gpuId);
-            Console.WriteLine($"Device: GPU ({device})");
+            kvFactory = LoadGpuModel(_gguf, config, gpuId);
         }
         else
         {
@@ -120,6 +116,23 @@ public class InferenceBenchmarks
         }
 
         _generator = new TextGenerator(_model, _tokenizer, kvFactory);
+    }
+
+    /// <summary>
+    /// Loads the model on GPU. Separated into its own method with <see cref="MethodImplOptions.NoInlining"/>
+    /// so that the JIT only resolves <c>DotLLM.Cuda</c> types (and their native cublas/nvcuda dependencies)
+    /// when this method is actually called — not when <c>Setup()</c> is compiled.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Func<ModelConfig, int, IKvCache> LoadGpuModel(GgufFile gguf, ModelConfig config, int gpuId)
+    {
+        var cudaModel = Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
+        _model = cudaModel;
+
+        var device = Cuda.CudaDevice.GetDevice(gpuId);
+        Console.WriteLine($"Device: GPU ({device})");
+
+        return (cfg, size) => cudaModel.CreateKvCache(size);
     }
 
     [Benchmark(Description = "E2E inference (prefill + decode)")]
