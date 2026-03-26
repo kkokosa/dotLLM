@@ -126,13 +126,22 @@ public class InferenceBenchmarks
     [MethodImpl(MethodImplOptions.NoInlining)]
     private Func<ModelConfig, int, IKvCache> LoadGpuModel(GgufFile gguf, ModelConfig config, int gpuId)
     {
-        var cudaModel = Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
-        _model = cudaModel;
+        try
+        {
+            var cudaModel = Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
+            _model = cudaModel;
 
-        var device = Cuda.CudaDevice.GetDevice(gpuId);
-        Console.WriteLine($"Device: GPU ({device})");
+            var device = Cuda.CudaDevice.GetDevice(gpuId);
+            Console.WriteLine($"Device: GPU ({device})");
 
-        return (cfg, size) => cudaModel.CreateKvCache(size);
+            return (cfg, size) => cudaModel.CreateKvCache(size);
+        }
+        catch (DllNotFoundException ex)
+        {
+            throw new InvalidOperationException(
+                $"DOTLLM_BENCH_DEVICE=gpu but CUDA libraries not found. " +
+                $"Install CUDA Toolkit or use --device cpu. ({ex.Message})", ex);
+        }
     }
 
     [Benchmark(Description = "E2E inference (prefill + decode)")]
