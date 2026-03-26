@@ -253,6 +253,8 @@ dotnet test
 
 > Integration tests automatically download several GGUF models (~4.5 GB total) from HuggingFace to `~/.dotllm/test-cache/` on first run. The first `dotnet test` will take a while; subsequent runs use the cache. To run only unit tests (no downloads): `dotnet test tests/DotLLM.Tests.Unit`.
 
+> **GPU tests** (tagged `Category=GPU`) require an NVIDIA GPU and run full model inference — they can take 20-30 minutes. They are skipped automatically on machines without CUDA. To exclude them explicitly: `dotnet test tests/DotLLM.Tests.Unit/ --filter "Category!=GPU"`
+
 **Model correctness smoke tests** (`scripts/test_models.py`) run dotLLM CLI with greedy decoding across architectures (Llama, Mistral, Phi, Qwen) and verify expected output:
 
 ```bash
