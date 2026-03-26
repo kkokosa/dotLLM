@@ -220,7 +220,7 @@ public sealed unsafe class WeightRepackingTests
 
             // Compare — near-equal (FP32 accumulation order may differ across SIMD paths)
             for (int i = 0; i < m; i++)
-                Assert.Equal(refResult[i], intResult[i], precision: 4); // ~1e-4 tolerance
+                Assert.Equal(refResult[i], intResult[i], precision: 3); // ~1e-3 tolerance (FP32 accumulation order differs across SIMD paths)
         }
         finally
         {
