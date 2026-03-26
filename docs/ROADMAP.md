@@ -78,7 +78,7 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
-| 31 | **CUDA backend** | Native C/CUDA library: cuBLAS GEMM for matmul, custom kernels for flash attention, RMSNorm+SiLU fused, RoPE, quantized matmul (Q4_K_M, Q8_0). `CudaBackend` implementing `IBackend`. | Phase 1–2 |
+| 31 | **CUDA backend** :white_check_mark: | PTX kernels loaded via CUDA Driver API P/Invoke — no native shared library. cuBLAS HGEMM for prefill, custom quantized GEMV for decode (Q8_0, Q4_K, Q6_K). Dequantization kernels (Q8_0, Q4_0, Q5_0, Q4_K, Q5_K, Q6_K). FP16 activation pipeline, on-the-fly weight dequantization into scratch buffer, GPU KV-cache. `CudaTransformerModel` implementing `IModel`. | Phase 1–2 |
 | 32 | **CPU/GPU hybrid** | Layer offloading: specify N layers on GPU, remainder on CPU. Automatic tensor transfer at layer boundaries. Useful when model doesn't fully fit in VRAM. | 31 |
 | 33 | **KV-cache quantization** | FP8 (E4M3) and INT8 KV-cache compression. Configurable per-model via `KvCacheConfig`. Extends effective context length. | 31 |
 

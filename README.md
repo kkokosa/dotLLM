@@ -16,9 +16,9 @@
 
 ## About
 
-dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around llama.cpp or Python libraries. All orchestration, model loading, tokenization, sampling, and CPU compute are implemented in pure C#, with a thin C/CUDA native library for GPU kernels. It targets transformer-based models (Llama, Mistral, Phi, Qwen, DeepSeek) with SIMD-optimized CPU and CUDA GPU backends.
+dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around llama.cpp or Python libraries. All orchestration, model loading, tokenization, sampling, and CPU compute are implemented in pure C#, with CUDA GPU acceleration via PTX kernels loaded through the CUDA Driver API (no native shared library). It targets transformer-based models (Llama, Mistral, Phi, Qwen, DeepSeek) with SIMD-optimized CPU and CUDA GPU backends.
 
-> **Status**: Phase 2 complete — dotLLM supports Q4_K_M quantization, chat templates, streaming generation, multi-threaded CPU inference, and multiple architectures (Llama, Mistral, Phi, Qwen). See [Roadmap](#roadmap) for Phase 3 (CPU performance optimization).
+> **Status**: Phase 4 in progress — CUDA GPU backend operational (PTX kernels, cuBLAS HGEMM, quantized GEMV, FP16 pipeline). CPU backend has SIMD-optimized inference with Q4_K_M quantization, chat templates, streaming, multi-threading, NUMA-aware pinning. Supports Llama, Mistral, Phi, Qwen architectures. See [Roadmap](#roadmap).
 
 ## Key Features
 
@@ -106,7 +106,11 @@ dotnet run --project src/DotLLM.Cli -c Release -- run QuantFactory/SmolLM-135M-G
 dotnet run --project src/DotLLM.Cli -c Release -- run QuantFactory/SmolLM-135M-GGUF \
     -p "Test" -q Q8_0
 
-# Threading options
+# GPU inference (requires NVIDIA GPU + CUDA Toolkit)
+dotnet run --project src/DotLLM.Cli -c Release -- run QuantFactory/SmolLM-135M-GGUF \
+    -p "The capital of France is" --device gpu
+
+# Threading options (CPU)
 dotnet run --project src/DotLLM.Cli -c Release -- run QuantFactory/SmolLM-135M-GGUF \
     -p "Test" --threads 8 --decode-threads 4 --numa-pin
 ```
@@ -191,6 +195,7 @@ History cleared.
 | `--numa-pin` | | false | Pin to NUMA-local cores |
 | `--pcore-only` | | false | Pin to P-cores only (Intel hybrid) |
 | `--quant` | `-q` | *(auto)* | Quantization filter (e.g., Q4_K_M) |
+| `--device` | `-d` | cpu | Compute device: `cpu`, `gpu`, `gpu:0`, `gpu:1` |
 | `--json` | | false | JSON output (`run` only) |
 
 **Model management** (`model`) — search, download, and list GGUF models from HuggingFace:
@@ -400,6 +405,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 
 ## News
 
+- **2026-03** — CUDA GPU backend: PTX kernels via CUDA Driver API P/Invoke (no native shared library), cuBLAS HGEMM for prefill, custom quantized GEMV for decode (Q8_0, Q4_K, Q6_K), FP16 activation pipeline, on-the-fly weight dequantization, GPU KV-cache, `--device gpu` CLI flag, `--device both` benchmarking ([#70](https://github.com/kkokosa/dotLLM/issues/70))
 - **2026-03** — NUMA-aware threading: adaptive spin-wait dispatch (generation counter with event fallback), NUMA topology detection (Windows/Linux), P-core/E-core awareness, CPU affinity pinning, auto-reduced decode thread count ([#57](https://github.com/kkokosa/dotLLM/issues/57))
 - **2026-03** — Operator fusion: fused RMSNorm+quantize (decode-only, eliminates normOut intermediate buffer) and tiled SwiGLU (1KB L1-resident sigmoid buffer) reduce DRAM roundtrips on the decode hot path ([#56](https://github.com/kkokosa/dotLLM/issues/56))
 - **2026-03** — Fast approximate exp/softmax: Schraudolph IEEE-754 bit-manipulation trick replaces polynomial exp (~3 SIMD ops vs ~12) in attention softmax. AVX2/AVX-512 fused shift+exp+sum pass eliminates 3 separate TensorPrimitives calls. Sampling softmax keeps full precision ([#55](https://github.com/kkokosa/dotLLM/issues/55))
@@ -428,7 +434,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 | **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | Done (9/9) |
 | **2 — Practical Local Inference** | Engine metrics, benchmarks, Q4_K_M, chat templates, streaming, multi-threading, more architectures | Done (10/10) |
 | **3 — CPU Performance** | Decode dispatch, Q8_1 input, weight repacking, outer-product GEMM, tiled attention, fast exp, fusion, NUMA | In Progress (7/8) |
-| **4 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Planned |
+| **4 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | In Progress (1/3) |
 | **5 — Constrained Decoding & API** | JSON mode, JSON Schema, regex/CFG, tool calling, logit bias, OpenAI API server | Planned |
 | **6 — Production Serving** | Continuous batching, paged KV-cache, prompt caching, speculative decoding, metrics | Planned |
 | **7 — Expand** | Hooks, logit lens, LoRA, MLA, SAE, multi-GPU, ROCm | Planned |
@@ -446,6 +452,8 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed steps, dependencies, and mil
 - [Sampling pipeline](docs/SAMPLING.md)
 - [Constrained decoding](docs/CONSTRAINED_DECODING.md)
 - [KV-cache management](docs/KV_CACHE.md)
+- [GPU inference](docs/GPU.md)
+- [CUDA backend architecture](docs/CUDA.md)
 - [Batch scheduling](docs/SCHEDULING.md)
 - [Full roadmap](docs/ROADMAP.md)
 
