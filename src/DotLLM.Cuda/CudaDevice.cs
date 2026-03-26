@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using DotLLM.Cuda.Interop;
@@ -52,23 +53,35 @@ public sealed class CudaDevice
         try
         {
             // Probe for the CUDA driver library before any P/Invoke.
-            // On systems without NVIDIA drivers, the JIT would throw
-            // DllNotFoundException when compiling the P/Invoke call sites.
+            // This must happen BEFORE any reference to CudaDriverApi, because
+            // the JIT resolves [LibraryImport] P/Invoke stubs when compiling
+            // a method — triggering DllNotFoundException on systems without CUDA.
             string cudaLib = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
                 ? "nvcuda.dll" : "libcuda.so.1";
             if (!NativeLibrary.TryLoad(cudaLib, out nint handle))
                 return false;
             NativeLibrary.Free(handle);
 
-            CudaLibraryResolver.Register();
-            CudaDriverApi.cuInit(0).ThrowOnError();
-            CudaDriverApi.cuDeviceGetCount(out int count).ThrowOnError();
-            return count > 0;
+            return ProbeGpuCount();
         }
         catch
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Isolated in <see cref="MethodImplOptions.NoInlining"/> so the JIT only resolves
+    /// CudaDriverApi P/Invoke stubs when this method is actually called — after the
+    /// NativeLibrary.TryLoad probe confirms libcuda is present.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool ProbeGpuCount()
+    {
+        CudaLibraryResolver.Register();
+        CudaDriverApi.cuInit(0).ThrowOnError();
+        CudaDriverApi.cuDeviceGetCount(out int count).ThrowOnError();
+        return count > 0;
     }
 
     /// <summary>Returns the number of CUDA-capable GPUs.</summary>
