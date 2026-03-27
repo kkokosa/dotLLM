@@ -1010,6 +1010,224 @@ def print_comparison(results: list[EngineResult], prompt: str, max_tokens: int) 
     print()
 
 
+def print_pivoted_summary(results: list[EngineResult]) -> None:
+    """Print three pivoted summary tables: prefill latency, prefill throughput, decode throughput.
+
+    Each table has one row per model, columns grouped by engine/mode.
+    """
+    if not results:
+        return
+
+    # Classify each result into a column key and engine group
+    # Column key: "cpu", "gpu", "h25%", "h50%", "lc", "lc-gpu", etc.
+    def _column_key(r: EngineResult) -> tuple[str, str]:
+        """Returns (group, col_key) for an EngineResult."""
+        eng = r.engine
+        if eng == "dotLLM" or eng == "dotLLM-cli":
+            return ("dotLLM", "cpu")
+        if eng == "dotLLM (gpu)" or eng == "dotLLM-cli (gpu)":
+            return ("dotLLM", "gpu")
+        if "hybrid" in eng:
+            # "dotLLM-cli (hybrid 8L)" → extract layer count
+            import re
+            m = re.search(r"hybrid (\d+)L", eng)
+            if m:
+                return ("dotLLM", f"h{m.group(1)}L")
+            return ("dotLLM", eng)
+        if eng == "llama.cpp":
+            return ("llama.cpp", "lc")
+        if eng == "llama.cpp (gpu)":
+            return ("llama.cpp", "lc-gpu")
+        return ("other", eng)
+
+    # Discover columns in order: dotLLM group first, then llama.cpp
+    dotllm_cols: list[str] = []
+    llamacpp_cols: list[str] = []
+    other_cols: list[str] = []
+    seen: set[str] = set()
+
+    for r in results:
+        group, col = _column_key(r)
+        if col not in seen:
+            seen.add(col)
+            if group == "dotLLM":
+                dotllm_cols.append(col)
+            elif group == "llama.cpp":
+                llamacpp_cols.append(col)
+            else:
+                other_cols.append(col)
+
+    all_cols = dotllm_cols + llamacpp_cols + other_cols
+
+    if len(all_cols) < 2:
+        return  # Not enough columns for a pivot to be useful
+
+    # Build data: { model: { col_key: EngineResult } }
+    pivot: dict[str, dict[str, EngineResult]] = {}
+    model_order: list[str] = []
+    for r in results:
+        _, col = _column_key(r)
+        if r.model not in pivot:
+            pivot[r.model] = {}
+            model_order.append(r.model)
+        pivot[r.model][col] = r
+
+    # Column layout
+    name_w = max(max((len(m) for m in model_order), default=20), 20)
+    quant_w = 7
+    col_w = 8
+    gap = "    "  # gap between engine groups
+
+    # Build header with group labels
+    def _make_header(title: str, note: str) -> tuple[str, str, str]:
+        """Returns (title_line, group_line, sep)."""
+        # Group header line
+        group_line = f"{'Model':<{name_w}} {'Quant':<{quant_w}}"
+        dotllm_width = len(dotllm_cols) * (col_w + 2) - 2 if dotllm_cols else 0
+        llamacpp_width = len(llamacpp_cols) * (col_w + 2) - 2 if llamacpp_cols else 0
+
+        if dotllm_cols:
+            dotllm_header = "dotLLM".center(dotllm_width)
+            group_line += f"  {dotllm_header}"
+        if llamacpp_cols:
+            group_line += f"{gap}{'llama.cpp'.center(llamacpp_width)}"
+        for c in other_cols:
+            group_line += f"  {c:>{col_w}}"
+
+        # Column header line
+        col_line = f"{'':<{name_w}} {'':<{quant_w}}"
+        first_in_group = True
+        for c in dotllm_cols:
+            col_line += f"  {c:>{col_w}}"
+            first_in_group = False
+        first_in_group = True
+        for c in llamacpp_cols:
+            prefix = gap if first_in_group else "  "
+            col_line += f"{prefix}{c:>{col_w}}"
+            first_in_group = False
+        for c in other_cols:
+            col_line += f"  {c:>{col_w}}"
+
+        total_w = max(len(group_line), len(col_line))
+        sep = "-" * total_w
+        title_line = f"{title:<{total_w - len(note)}}{note}"
+        return title_line, group_line + "\n" + col_line, sep
+
+    def _format_cell(value: float, best_val: float, higher_is_better: bool) -> str:
+        """Format a cell value with * for best."""
+        if value <= 0:
+            return "--"
+        cell = f"{value:.1f}"
+        is_best = (higher_is_better and value >= best_val - 0.01) or \
+                  (not higher_is_better and value <= best_val + 0.01)
+        if is_best:
+            cell += "*"
+        return cell
+
+    def _print_table(title: str, note: str, higher_is_better: bool,
+                     get_value) -> None:
+        title_line, header, sep = _make_header(title, note)
+        print()
+        print(title_line)
+        print(header)
+        print(sep)
+
+        for model in model_order:
+            row = pivot[model]
+            # Extract quant from model name (e.g., "SmolLM-135M.Q4_K_M" → "Q4_KM")
+            parts = model.rsplit(".", 1)
+            display_name = parts[0] if len(parts) > 1 else model
+            quant = parts[1] if len(parts) > 1 else "?"
+            # Shorten common quant labels
+            quant = quant.replace("_K_M", "_KM").replace("_K_S", "_KS")
+
+            # Find best value across all columns
+            values = {}
+            for c in all_cols:
+                if c in row:
+                    values[c] = get_value(row[c])
+
+            if not values:
+                continue
+
+            if higher_is_better:
+                best_val = max(v for v in values.values() if v > 0) if any(v > 0 for v in values.values()) else 0
+            else:
+                positives = [v for v in values.values() if v > 0]
+                best_val = min(positives) if positives else 0
+
+            line = f"{display_name:<{name_w}} {quant:<{quant_w}}"
+            first_in_group = True
+            for c in dotllm_cols:
+                if c in values:
+                    line += f"  {_format_cell(values[c], best_val, higher_is_better):>{col_w}}"
+                else:
+                    line += f"  {'--':>{col_w}}"
+                first_in_group = False
+            first_in_group = True
+            for c in llamacpp_cols:
+                prefix = gap if first_in_group else "  "
+                if c in values:
+                    line += f"{prefix}{_format_cell(values[c], best_val, higher_is_better):>{col_w}}"
+                else:
+                    line += f"{prefix}{'--':>{col_w}}"
+                first_in_group = False
+            for c in other_cols:
+                if c in values:
+                    line += f"  {_format_cell(values[c], best_val, higher_is_better):>{col_w}}"
+                else:
+                    line += f"  {'--':>{col_w}}"
+
+            print(line)
+
+        print(sep)
+
+    # Print the three tables
+    _print_table("Prefill Latency (ms)", "* = fastest (lowest)",
+                 False, lambda r: r.prefill_ms)
+    _print_table("Prefill Throughput (tok/s)", "* = fastest (highest)",
+                 True, lambda r: r.prefill_tok_per_sec)
+    _print_table("Decode Throughput (tok/s)", "* = fastest (highest)",
+                 True, lambda r: r.decode_tok_per_sec)
+
+    print("  Best-of-N values across runs.")
+    print()
+
+
+def load_results_from_json(path: str) -> tuple[list[EngineResult], dict]:
+    """Load benchmark results from an exported JSON file.
+
+    Returns (results, metadata) where metadata contains label, timestamp, config, etc.
+    """
+    with open(path) as f:
+        data = json.load(f)
+
+    results: list[EngineResult] = []
+    for r in data.get("results", []):
+        results.append(EngineResult(
+            engine=r.get("engine", "?"),
+            model=r.get("model", "?"),
+            prefill_ms=r.get("prefill_ms", 0),
+            decode_ms=r.get("decode_ms", 0),
+            prefill_tokens=r.get("prefill_tokens", 0),
+            decode_tokens=r.get("decode_tokens", 0),
+            prefill_tok_per_sec=r.get("prefill_tok_per_sec", 0),
+            decode_tok_per_sec=r.get("decode_tok_per_sec", 0),
+            decode_ms_per_tok=r.get("decode_ms_per_tok", 0),
+            total_tok_per_sec=r.get("total_tok_per_sec", 0),
+            bdn_mean_ns=r.get("bdn_mean_ns"),
+            bdn_stddev_ns=r.get("bdn_stddev_ns"),
+            median_prefill_tok_per_sec=r.get("median_prefill_tok_per_sec", 0),
+            median_decode_tok_per_sec=r.get("median_decode_tok_per_sec", 0),
+            median_prefill_ms=r.get("median_prefill_ms", 0),
+            median_decode_ms=r.get("median_decode_ms", 0),
+            decode_cv=r.get("decode_cv", 0),
+            prefill_cv=r.get("prefill_cv", 0),
+        ))
+
+    return results, data
+
+
 def _get_git_metadata() -> dict:
     """Capture git commit, branch, and dirty state."""
     info: dict = {"commit": "unknown", "branch": "unknown", "dirty": True}
@@ -1130,8 +1348,34 @@ def main() -> int:
                         help="Comma-separated fractions (0-1) of layers to offload to GPU. "
                              "E.g. '0.25,0.5,0.75' runs hybrid mode at 25%%, 50%%, 75%% of layers. "
                              "Adds runs alongside the regular --device mode.")
+    parser.add_argument("--show", type=str, default=None,
+                        help="Load results from a JSON file and display summary tables (no benchmarks run). "
+                             "E.g. --show results.json")
 
     args = parser.parse_args()
+
+    # --show mode: load JSON and display, then exit
+    if args.show:
+        results, meta = load_results_from_json(args.show)
+        if not results:
+            print(f"No results found in {args.show}", file=sys.stderr)
+            return 1
+        config = meta.get("config", {})
+        label = meta.get("label", "")
+        ts = meta.get("timestamp", "")
+        system = meta.get("system", {})
+        print(f"[show] {args.show}")
+        if label:
+            print(f"  Label: {label}")
+        if ts:
+            print(f"  Time:  {ts}")
+        if system:
+            cpu = system.get("cpu", "?")
+            ram = system.get("ram_gb", "?")
+            print(f"  CPU:   {cpu} ({ram} GB)")
+        print_comparison(results, "N/A", config.get("max_tokens", 0))
+        print_pivoted_summary(results)
+        return 0
 
     # Resolve prompt: --prompt overrides --prompt-size
     if args.prompt is not None:
@@ -1249,6 +1493,7 @@ def main() -> int:
                     all_results.extend(results)
 
     print_comparison(all_results, prompt, args.tokens)
+    print_pivoted_summary(all_results)
 
     if args.export_json:
         export_results_json(
