@@ -717,7 +717,11 @@ def run_dotllm_cli(
     ms_per_tok = best_dc_ms / decode_tokens if decode_tokens > 0 else 0
 
     if gpu_layers is not None:
-        engine_label = f"dotLLM-cli (hybrid {gpu_layers}L)"
+        hybrid_pct = kwargs.get("hybrid_pct")
+        if hybrid_pct is not None:
+            engine_label = f"dotLLM-cli (h{hybrid_pct}%)"
+        else:
+            engine_label = f"dotLLM-cli (hybrid {gpu_layers}L)"
     elif device != "cpu":
         engine_label = f"dotLLM-cli ({device})"
     else:
@@ -1010,6 +1014,22 @@ def print_comparison(results: list[EngineResult], prompt: str, max_tokens: int) 
     print()
 
 
+def _split_model_quant(model: str) -> tuple[str, str]:
+    """Split a model name like 'SmolLM-135M.Q4_K_M' or 'Llama-3.2-1B-Instruct-Q4_K_M' into (name, quant).
+
+    Handles both dot and hyphen separators before the quant suffix.
+    """
+    # Match known quant suffixes at end, preceded by . or -
+    m = re.search(r'[.\-]((?:Q\d+_\w+|Q\d+_\d+|F16|F32|BF16|IQ\d+_\w+))$', model, re.IGNORECASE)
+    if m:
+        name = model[:m.start()]
+        quant = m.group(1)
+        # Shorten common labels for column display
+        quant = quant.replace("_K_M", "_KM").replace("_K_S", "_KS")
+        return name, quant
+    return model, "?"
+
+
 def print_pivoted_summary(results: list[EngineResult]) -> None:
     """Print three pivoted summary tables: prefill latency, prefill throughput, decode throughput.
 
@@ -1023,17 +1043,18 @@ def print_pivoted_summary(results: list[EngineResult]) -> None:
     def _column_key(r: EngineResult) -> tuple[str, str]:
         """Returns (group, col_key) for an EngineResult."""
         eng = r.engine
-        if eng == "dotLLM" or eng == "dotLLM-cli":
+        if eng in ("dotLLM", "dotLLM-cli"):
             return ("dotLLM", "cpu")
-        if eng == "dotLLM (gpu)" or eng == "dotLLM-cli (gpu)":
+        if eng in ("dotLLM (gpu)", "dotLLM-cli (gpu)"):
             return ("dotLLM", "gpu")
-        if "hybrid" in eng:
-            # "dotLLM-cli (hybrid 8L)" → extract layer count
-            import re
-            m = re.search(r"hybrid (\d+)L", eng)
-            if m:
-                return ("dotLLM", f"h{m.group(1)}L")
-            return ("dotLLM", eng)
+        # New format: "dotLLM-cli (h25%)"
+        m = re.search(r"\(h(\d+)%\)", eng)
+        if m:
+            return ("dotLLM", f"h{m.group(1)}%")
+        # Legacy format: "dotLLM-cli (hybrid 8L)"
+        m = re.search(r"hybrid (\d+)L", eng)
+        if m:
+            return ("dotLLM", f"h{m.group(1)}L")
         if eng == "llama.cpp":
             return ("llama.cpp", "lc")
         if eng == "llama.cpp (gpu)":
@@ -1134,12 +1155,7 @@ def print_pivoted_summary(results: list[EngineResult]) -> None:
 
         for model in model_order:
             row = pivot[model]
-            # Extract quant from model name (e.g., "SmolLM-135M.Q4_K_M" → "Q4_KM")
-            parts = model.rsplit(".", 1)
-            display_name = parts[0] if len(parts) > 1 else model
-            quant = parts[1] if len(parts) > 1 else "?"
-            # Shorten common quant labels
-            quant = quant.replace("_K_M", "_KM").replace("_K_S", "_KS")
+            display_name, quant = _split_model_quant(model)
 
             # Find best value across all columns
             values = {}
@@ -1489,6 +1505,7 @@ def main() -> int:
                         max_tokens=args.tokens,
                         runs=args.runs,
                         gpu_layers=gl,
+                        hybrid_pct=pct,
                     )
                     all_results.extend(results)
 
