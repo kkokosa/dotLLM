@@ -4,6 +4,7 @@
     <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
     <InternalsVisibleTo Include="DotLLM.Tests.Integration" />
     <InternalsVisibleTo Include="DotLLM.Benchmarks" />
+    <InternalsVisibleTo Include="DotLLM.Cuda" />
     <InternalsVisibleTo Include="DotLLM.Models" />
   </ItemGroup>
 

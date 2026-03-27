@@ -94,6 +94,11 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [DefaultValue("cpu")]
         public string Device { get; set; } = "cpu";
 
+        [CommandOption("--gpu-layers")]
+        [Description("Number of transformer layers to offload to GPU. 0 = CPU only. " +
+                     "Omit for default (0 with --device cpu, all with --device gpu).")]
+        public int? GpuLayers { get; set; }
+
         [CommandOption("--quant|-q")]
         [Description("Quantization filter when multiple GGUF files exist (e.g., Q4_K_M, Q8_0).")]
         public string? Quant { get; set; }
@@ -130,14 +135,21 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             config = GgufModelConfigExtractor.Extract(gguf.Metadata);
             tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
-            if (settings.Device.StartsWith("gpu", StringComparison.OrdinalIgnoreCase))
+            int gpuLayers = ResolveGpuLayers(settings, config);
+            if (gpuLayers <= 0)
+            {
+                model = TransformerModel.LoadFromGguf(gguf, config,
+                    new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly));
+            }
+            else if (gpuLayers >= config.NumLayers)
             {
                 int gpuId = ParseGpuId(settings.Device);
                 model = DotLLM.Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
             }
             else
             {
-                model = TransformerModel.LoadFromGguf(gguf, config,
+                int gpuId = ParseGpuId(settings.Device);
+                model = DotLLM.Cuda.HybridTransformerModel.LoadFromGguf(gguf, config, gpuLayers, gpuId,
                     new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly));
             }
         }
@@ -157,12 +169,14 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
         // Display VRAM warning after spinner completes (so it stays visible).
         // In JSON mode, write to stderr so it doesn't corrupt the JSON output.
-        if (model is DotLLM.Cuda.CudaTransformerModel cudaCheck && cudaCheck.VramWarning is not null)
+        string? vramWarning = (model as DotLLM.Cuda.CudaTransformerModel)?.VramWarning
+                           ?? (model as DotLLM.Cuda.HybridTransformerModel)?.VramWarning;
+        if (vramWarning is not null)
         {
             if (settings.Json)
-                Console.Error.WriteLine($"WARNING: {cudaCheck.VramWarning}");
+                Console.Error.WriteLine($"WARNING: {vramWarning}");
             else
-                AnsiConsole.MarkupLine($"[yellow]WARNING: {Markup.Escape(cudaCheck.VramWarning)}[/]");
+                AnsiConsole.MarkupLine($"[yellow]WARNING: {Markup.Escape(vramWarning)}[/]");
         }
 
         var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
@@ -186,9 +200,12 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             // Build compact pre-gen header rule
             var quantLabel = InferQuantLabel(resolvedPath, settings.Quant);
             var samplingLabel = BuildSamplingLabel(settings);
-            var deviceLabel = model is DotLLM.Cuda.CudaTransformerModel
-                ? DotLLM.Cuda.CudaDevice.GetDevice(ParseGpuId(settings.Device)).ToString()
-                : $"{threadingInfo.EffectiveThreadCount} threads";
+            var deviceLabel = model switch
+            {
+                DotLLM.Cuda.CudaTransformerModel => DotLLM.Cuda.CudaDevice.GetDevice(ParseGpuId(settings.Device)).ToString(),
+                DotLLM.Cuda.HybridTransformerModel h => $"hybrid {h.NumGpuLayers}gpu/{config.NumLayers - h.NumGpuLayers}cpu",
+                _ => $"{threadingInfo.EffectiveThreadCount} threads"
+            };
             var segments = $"{config.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {deviceLabel} | {samplingLabel}";
             AnsiConsole.Write(new Rule($"[grey]dotllm | {Markup.Escape(segments)}[/]").LeftJustified());
             AnsiConsole.WriteLine();
@@ -202,6 +219,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
             if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
                 kvFactory = (cfg, size) => cudaModel.CreateKvCache(size);
+            else if (model is DotLLM.Cuda.HybridTransformerModel hybridModel)
+                kvFactory = (cfg, size) => hybridModel.CreateKvCache(size);
 
             var generator = new TextGenerator(model, tokenizer, kvFactory);
             var totalSw = Stopwatch.StartNew();
@@ -372,6 +391,15 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
         var match = Regex.Match(Path.GetFileName(resolvedPath), @"\.(Q[\w]+)\.gguf$", RegexOptions.IgnoreCase);
         return match.Success ? match.Groups[1].Value : "unknown";
+    }
+
+    private static int ResolveGpuLayers(Settings settings, ModelConfig config)
+    {
+        if (settings.GpuLayers.HasValue)
+            return Math.Clamp(settings.GpuLayers.Value, 0, config.NumLayers);
+        // Default: 0 for cpu device, all layers for gpu device
+        return settings.Device.StartsWith("gpu", StringComparison.OrdinalIgnoreCase)
+            ? config.NumLayers : 0;
     }
 
     private static int ParseGpuId(string device)

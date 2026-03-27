@@ -282,6 +282,7 @@ def _build_bench_compare_cmd(
     llamacpp: bool,
     llamacpp_bin: str | None,
     device: str = "cpu",
+    hybrid_modes: str | None = None,
 ) -> list[str]:
     """Build the subprocess command for bench_compare.py."""
     # Run bench_compare.py from the current tree (not the worktree) —
@@ -312,6 +313,8 @@ def _build_bench_compare_cmd(
         cmd.extend(["--llamacpp-bin", llamacpp_bin])
     if device != "cpu":
         cmd.extend(["--device", device])
+    if hybrid_modes:
+        cmd.extend(["--hybrid-modes", hybrid_modes])
 
     return cmd
 
@@ -331,6 +334,7 @@ def _run_bench_for_commit(
     llamacpp: bool,
     llamacpp_bin: str | None,
     device: str = "cpu",
+    hybrid_modes: str | None = None,
 ) -> bool:
     """Run benchmark for a single commit. Returns True on success."""
     output_file = os.path.join(output_dir, f"{name}_{index}.json")
@@ -376,6 +380,7 @@ def _run_bench_for_commit(
             llamacpp=llamacpp,
             llamacpp_bin=llamacpp_bin,
             device=device,
+            hybrid_modes=hybrid_modes,
         )
 
         print(f"  Running bench_compare...")
@@ -667,6 +672,9 @@ def main() -> int:
     parser.add_argument("--device", type=str, default="cpu",
                         choices=["cpu", "gpu", "both"],
                         help="Compute device: cpu (default), gpu, or both")
+    parser.add_argument("--hybrid-modes", type=str, default=None,
+                        help="Comma-separated fractions (0-1) of layers to offload to GPU. "
+                             "Passed through to bench_compare.py.")
 
     args = parser.parse_args()
 
@@ -820,6 +828,7 @@ def main() -> int:
             llamacpp=llamacpp,
             llamacpp_bin=args.llamacpp_bin,
             device=args.device,
+            hybrid_modes=args.hybrid_modes,
         )
         if ok:
             successes += 1

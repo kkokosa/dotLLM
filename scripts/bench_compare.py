@@ -131,6 +131,97 @@ class EngineResult:
     all_prefill_ms: list[float] | None = None
 
 
+# ---------------------------------------------------------------------------
+# GGUF metadata utilities
+# ---------------------------------------------------------------------------
+
+# GGUF value-type sizes (for skipping KV pairs when searching for block_count)
+_GGUF_TYPE_SIZE: dict[int, int | None] = {
+    0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1,  # u8..bool
+    8: None,  # STRING: variable
+    9: None,  # ARRAY: variable
+    10: 8, 11: 8, 12: 8,  # u64, i64, f64
+}
+
+
+def _get_gguf_layers(path: str | Path) -> int:
+    """Read the transformer block count from a GGUF file's metadata.
+
+    Scans metadata KV pairs for a key ending in '.block_count' and returns
+    its uint32 value.  Returns 0 if the key is not found.
+    """
+    import struct
+
+    path = Path(path)
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        if magic != b"GGUF":
+            return 0
+        version = struct.unpack("<I", f.read(4))[0]
+        _tensor_count = struct.unpack("<Q", f.read(8))[0]
+        kv_count = struct.unpack("<Q", f.read(8))[0]
+
+        for _ in range(kv_count):
+            # Key: uint64 length + bytes
+            key_len = struct.unpack("<Q", f.read(8))[0]
+            key = f.read(key_len).decode("utf-8", errors="replace")
+            # Value type: uint32
+            vtype = struct.unpack("<I", f.read(4))[0]
+
+            if key.endswith(".block_count"):
+                # We expect UINT32 (type 4) or INT32 (type 5)
+                if vtype in (4, 5):
+                    return struct.unpack("<I", f.read(4))[0]
+                elif vtype in (10, 11):  # UINT64 / INT64
+                    return struct.unpack("<Q", f.read(8))[0]
+
+            # Skip value
+            _skip_gguf_value(f, vtype, version)
+
+    return 0
+
+
+def _skip_gguf_value(f, vtype: int, version: int = 3) -> None:
+    """Skip a single GGUF metadata value in the file stream."""
+    import struct
+
+    fixed = _GGUF_TYPE_SIZE.get(vtype)
+    if fixed is not None:
+        f.read(fixed)
+    elif vtype == 8:  # STRING
+        slen = struct.unpack("<Q", f.read(8))[0]
+        f.read(slen)
+    elif vtype == 9:  # ARRAY
+        elem_type = struct.unpack("<I", f.read(4))[0]
+        count = struct.unpack("<Q", f.read(8))[0]
+        for _ in range(count):
+            _skip_gguf_value(f, elem_type, version)
+    else:
+        # Unknown type — can't skip safely
+        raise ValueError(f"Unknown GGUF value type {vtype}")
+
+
+def parse_hybrid_modes(raw: str | None) -> list[float]:
+    """Parse a comma-separated string of fractions (0.0–1.0) into a sorted list.
+
+    Example: '0.25, 0.5, 0.75' → [0.25, 0.5, 0.75]
+    """
+    if not raw:
+        return []
+    fractions = []
+    for part in raw.split(","):
+        val = float(part.strip())
+        if not (0 < val < 1):
+            raise ValueError(f"Hybrid mode fraction must be in (0, 1), got {val}")
+        fractions.append(val)
+    return sorted(set(fractions))
+
+
+def compute_gpu_layers(num_layers: int, fraction: float) -> int:
+    """Convert a fraction (0.0–1.0) to a concrete gpu-layers count, clamped to [1, num_layers-1]."""
+    return max(1, min(int(round(fraction * num_layers)), num_layers - 1))
+
+
 def _default_models_dir() -> Path:
     """Return the default models directory, matching HuggingFaceDownloader.DefaultModelsDirectory."""
     env = os.environ.get("DOTLLM_MODELS_DIR")
@@ -534,9 +625,15 @@ def run_dotllm_cli(
     max_tokens: int,
     runs: int,
     device: str = "gpu",
+    gpu_layers: int | None = None,
     **kwargs,
 ) -> list[EngineResult]:
-    """Run dotLLM via CLI N times (for GPU benchmarking) and compute stats."""
+    """Run dotLLM via CLI N times (for GPU benchmarking) and compute stats.
+
+    Args:
+        gpu_layers: If set, pass --gpu-layers N to the CLI (hybrid mode).
+                    Overrides --device (uses implicit device from gpu-layers).
+    """
     if not model_path:
         print("[dotLLM-cli] No --model path provided, skipping.", file=sys.stderr)
         return []
@@ -548,8 +645,11 @@ def run_dotllm_cli(
         "-n", str(max_tokens),
         "-t", "0",
         "--json",
-        "--device", device,
     ]
+    if gpu_layers is not None:
+        cmd.extend(["--gpu-layers", str(gpu_layers)])
+    else:
+        cmd.extend(["--device", device])
 
     # Print command (truncate prompt)
     display_cmd = list(cmd)
@@ -616,7 +716,12 @@ def run_dotllm_cli(
     total_tok_s = total_tokens / (total_ms / 1000.0) if total_ms > 0 else 0
     ms_per_tok = best_dc_ms / decode_tokens if decode_tokens > 0 else 0
 
-    engine_label = f"dotLLM-cli ({device})" if device != "cpu" else "dotLLM-cli"
+    if gpu_layers is not None:
+        engine_label = f"dotLLM-cli (hybrid {gpu_layers}L)"
+    elif device != "cpu":
+        engine_label = f"dotLLM-cli ({device})"
+    else:
+        engine_label = "dotLLM-cli"
 
     return [EngineResult(
         engine=engine_label,
@@ -1021,6 +1126,10 @@ def main() -> int:
     parser.add_argument("--device", type=str, default="cpu",
                         choices=["cpu", "gpu", "both"],
                         help="Compute device: cpu (default), gpu, or both (runs each engine on both devices)")
+    parser.add_argument("--hybrid-modes", type=str, default=None,
+                        help="Comma-separated fractions (0-1) of layers to offload to GPU. "
+                             "E.g. '0.25,0.5,0.75' runs hybrid mode at 25%%, 50%%, 75%% of layers. "
+                             "Adds runs alongside the regular --device mode.")
 
     args = parser.parse_args()
 
@@ -1086,6 +1195,9 @@ def main() -> int:
     # Resolve llama.cpp binary
     llamacpp_bin = _find_llamacpp_bin(args.llamacpp_bin)
 
+    # Parse hybrid modes
+    hybrid_modes = parse_hybrid_modes(args.hybrid_modes)
+
     all_results: list[EngineResult] = []
 
     for i, resolved_model in enumerate(resolved_models):
@@ -1115,6 +1227,26 @@ def main() -> int:
                     device=device,
                 )
                 all_results.extend(results)
+
+        # Hybrid mode runs (dotLLM only — llama.cpp uses -ngl which is separate)
+        if hybrid_modes:
+            num_layers = _get_gguf_layers(resolved_model)
+            if num_layers == 0:
+                print(f"[hybrid] WARNING: Could not read block_count from {resolved_model}, skipping hybrid modes",
+                      file=sys.stderr)
+            else:
+                for frac in hybrid_modes:
+                    gl = compute_gpu_layers(num_layers, frac)
+                    pct = int(frac * 100)
+                    print(f"\n[hybrid] Running hybrid mode: {gl}/{num_layers} layers on GPU ({pct}%)")
+                    results = run_dotllm_cli(
+                        model_path=resolved_model,
+                        prompt=prompt,
+                        max_tokens=args.tokens,
+                        runs=args.runs,
+                        gpu_layers=gl,
+                    )
+                    all_results.extend(results)
 
     print_comparison(all_results, prompt, args.tokens)
 
