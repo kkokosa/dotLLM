@@ -289,11 +289,132 @@ See [CUDA.md](CUDA.md) for detailed prerequisites and build instructions.
 - **Decode**: 3–10× over CPU (bandwidth-bound, HBM advantage)
 - **Target**: >50 tok/s decode on consumer GPU (RTX 3090/4090) with 7B model
 
+## Hybrid CPU/GPU Inference
+
+When a model doesn't fully fit in VRAM, hybrid mode runs part of the model on GPU and the rest on CPU. The `--gpu-layers N` option specifies how many transformer layers execute on GPU (bottom layers), with the remainder on CPU (top layers). The embedding lookup runs on GPU, while the final RMSNorm and LM head run on CPU. This matches llama.cpp's `--n-gpu-layers` convention.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                    GPU (FP16)                    │
+│                                                  │
+│  Token IDs ─► Embedding Lookup ─► Hidden (FP16)  │
+│                                                  │
+│  Layer 0:  RmsNorm → Q/K/V → RoPE → Attn →      │
+│            O → Add+RmsNorm → Gate/Up → SwiGLU →  │
+│            Down → Add+RmsNorm                     │
+│  ...                                             │
+│  Layer N-1: (same, but last uses plain Add)      │
+│                                                  │
+│  HiddenState [seqLen, hiddenSize] FP16           │
+├──────────── D2H Transfer (PCIe) ─────────────────┤
+│  FP16 → FP32 conversion                         │
+│                                                  │
+│                    CPU (FP32)                     │
+│                                                  │
+│  Layer N:  RmsNorm → Q/K/V → RoPE → Attn →      │
+│            O → Add → RmsNorm → Gate/Up →         │
+│            SwiGLU → Down → Add                    │
+│  ...                                             │
+│  Layer L-1: (same)                               │
+│                                                  │
+│  Final RmsNorm → LM Head → Logits [vocabSize]    │
+└──────────────────────────────────────────────────┘
+```
+
+### CLI Usage
+
+```bash
+# Full GPU (default when --device gpu)
+dotllm run model.gguf -d gpu -p "Hello"
+
+# Hybrid: 20 of 32 layers on GPU, 12 on CPU
+dotllm run model.gguf --gpu-layers 20 -p "Hello"
+
+# CPU only (default, or explicit)
+dotllm run model.gguf --gpu-layers 0 -p "Hello"
+
+# Chat mode hybrid
+dotllm chat model.gguf --gpu-layers 20
+```
+
+Unlike llama.cpp's `-ngl`, the short form is not available (Spectre.Console requires single-character short options). Use the full `--gpu-layers` flag.
+
+### Layer Assignment
+
+Layers are assigned bottom-up: GPU gets layers 0..N-1 (lower/earlier layers), CPU gets layers N..L-1 (upper/later layers). Rationale:
+
+- Lower layers benefit most from GPU compute throughput (large matrix multiplications)
+- The LM head (vocabSize × hiddenSize projection) runs on CPU since the hidden state already resides there after CPU layers, avoiding a large vocab-sized D2H transfer
+- The embedding lookup runs on GPU (small H2D transfer of token IDs, large embedding table stays in VRAM)
+
+### KV-Cache Split
+
+GPU layers store their KV-cache in FP16 GPU device memory (`CudaKvCache`). CPU layers store their KV-cache in FP32 host memory (`SimpleKvCache`). A `HybridKvCache` routes KV operations by layer index:
+
+- Layers 0..N-1: GPU cache, updated via device-side copies (`UpdateDevice`)
+- Layers N..L-1: CPU cache, updated via standard `IKvCache.Update()` with remapped indices
+
+Both caches advance in lockstep — same positions, same sequence length — since the model processes all layers for every token.
+
+### Boundary Transfer
+
+At the GPU/CPU boundary (after the last GPU layer), the hidden state tensor `[seqLen, hiddenSize]` is:
+
+1. Copied D2H as FP16 (2 bytes/element) via `cuMemcpyDtoH`
+2. Converted FP16 → FP32 on the CPU host (scalar `Half→float` loop)
+
+Transfer sizes for hiddenSize = 4096:
+
+| Phase | Tokens | FP16 Transfer | Time (PCIe 4.0 x16) |
+|-------|--------|---------------|---------------------|
+| Decode | 1 | 8 KB | ~0.3 μs |
+| Prefill 128 | 128 | 1 MB | ~30 μs |
+| Prefill 1024 | 1024 | 8 MB | ~250 μs |
+| Prefill 4096 | 4096 | 32 MB | ~1 ms |
+
+The boundary transfer is negligible for decode and small relative to compute for prefill.
+
+### VRAM Estimation
+
+In hybrid mode, VRAM usage is proportional to the number of GPU layers:
+
+- **GPU weights**: Only layers 0..N-1 uploaded (quantized + optional FP16 copies)
+- **Token embeddings**: Always on GPU (relatively small)
+- **GPU KV-cache**: FP16, only for N layers: `2 × N × numKvHeads × headDim × maxSeqLen × 2 bytes`
+- **GPU scratch buffers**: Fixed size regardless of layer count (activation buffers for one layer at a time)
+- **Output weights (LM head)**: NOT on GPU — CPU handles final projection
+
+Approximate formula:
+
+```
+VRAM ≈ (N / L) × model_weight_bytes + embed_bytes + gpu_kv_cache + gpu_scratch
+```
+
+### Edge Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| `--gpu-layers 0` | Pure CPU, no CUDA initialization (safe on machines without GPU) |
+| `--gpu-layers N >= L` | Pure GPU, identical to `--device gpu` |
+| `--gpu-layers 1` | Single layer on GPU — minimal GPU acceleration, validates pipeline |
+| `--device gpu --gpu-layers N` | Explicit GPU device with partial offload — uses specified GPU ordinal |
+
+### Numerical Precision
+
+GPU layers compute in FP16 (Half precision). At the boundary, the hidden state is converted FP16 → FP32 for CPU layers. This introduces a small quantization error (~5e-4 relative error) compared to pure-FP32 CPU execution, identical to the error in pure-GPU mode. The final logits match pure-GPU output for the GPU layers and pure-CPU output for the CPU layers.
+
+### Implementation
+
+- `HybridTransformerModel` — `IModel` implementation orchestrating split forward pass
+- `HybridKvCache` — Routes `IKvCache` operations to `CudaKvCache` or `SimpleKvCache` by layer
+- `CudaWeights.LoadFromGguf(numGpuLayers)` — Partial weight upload to VRAM
+
 ## Future Work
 
 - **Flash Attention**: Replace naive attention with tiled flash attention for O(N) memory and better SM utilization
 - **Fused Quantized GEMM**: Custom PTX kernels for Q4_K × FP16 (Marlin-style or MMQ-style) to eliminate per-projection dequant overhead during prefill
-- **CPU/GPU hybrid** (Step 32): Layer offloading when model doesn't fully fit in VRAM
 - **KV-cache quantization** (Step 33): FP8/INT8 KV-cache compression
 - **Multi-GPU** (Step 51): NCCL-based tensor parallelism
 - **Fatbin distribution**: Pre-compiled SASS for common architectures to eliminate JIT overhead

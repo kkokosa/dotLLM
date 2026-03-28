@@ -99,12 +99,25 @@ internal sealed class CudaWeights : IDisposable
     }
 
     /// <summary>
-    /// Uploads all weights from CPU (GGUF mmap) to GPU. Quantized weights are
+    /// Uploads weights from CPU (GGUF mmap) to GPU. Quantized weights are
     /// dequantized to FP16 on-device to avoid transferring the larger FP16 data over PCIe.
     /// </summary>
+    /// <param name="cpuWeights">CPU-side weights (mmap'd from GGUF).</param>
+    /// <param name="config">Model configuration.</param>
+    /// <param name="kernels">Loaded PTX kernels for dequantization.</param>
+    /// <param name="stream">CUDA stream for async uploads.</param>
+    /// <param name="numGpuLayers">Number of layers to upload. -1 = all layers.
+    /// When less than total layers (hybrid mode), output norm and LM head are skipped
+    /// since the CPU handles final projection.</param>
     public static CudaWeights LoadFromGguf(TransformerWeights cpuWeights, ModelConfig config,
-                                              CudaKernels kernels, nint stream)
+                                              CudaKernels kernels, nint stream,
+                                              int numGpuLayers = -1)
     {
+        int layerCount = numGpuLayers < 0
+            ? config.NumLayers
+            : Math.Min(numGpuLayers, config.NumLayers);
+        bool isHybrid = layerCount < config.NumLayers;
+
         var allocs = new List<nint>();
 
         // Token embeddings — upload in original format if the embedding kernel supports it,
@@ -124,24 +137,33 @@ internal sealed class CudaWeights : IDisposable
             tokenEmbedQt = QuantizationType.F16;
         }
 
-        // Output norm (float[] → FP16)
-        nint outputNorm = UploadNormWeight(cpuWeights.OutputNormWeight, allocs, kernels, stream);
+        // Output norm + LM head: skip in hybrid mode (CPU handles final norm + LM head)
+        nint outputNorm = 0;
+        nint outputWeight = 0;
+        nint outputWeightQuant = 0;
 
-        // LM head — too large for the per-projection dequant scratch (vocabSize × hiddenSize).
-        // Create a persistent FP16 copy unless it has a custom quantized GEMV kernel
-        // (Q8_0/Q4_K/Q6_K can use quantized GEMV directly → no FP16 copy needed).
-        bool lmHeadHasGemv = CudaKernels.HasQuantizedGemv(cpuWeights.OutputQuantType);
-        nint outputWeight = (!IsQuantized(cpuWeights.OutputQuantType) || !lmHeadHasGemv)
-            ? UploadAndDequant(cpuWeights.OutputWeight, cpuWeights.OutputQuantType,
-                cpuWeights.OutputOutputDim, cpuWeights.OutputInputDim, allocs, kernels, stream)
-            : 0;
+        if (!isHybrid)
+        {
+            // Output norm (float[] → FP16)
+            outputNorm = UploadNormWeight(cpuWeights.OutputNormWeight, allocs, kernels, stream);
+
+            // LM head — too large for the per-projection dequant scratch (vocabSize × hiddenSize).
+            // Create a persistent FP16 copy unless it has a custom quantized GEMV kernel
+            // (Q8_0/Q4_K/Q6_K can use quantized GEMV directly → no FP16 copy needed).
+            bool lmHeadHasGemv = CudaKernels.HasQuantizedGemv(cpuWeights.OutputQuantType);
+            outputWeight = (!IsQuantized(cpuWeights.OutputQuantType) || !lmHeadHasGemv)
+                ? UploadAndDequant(cpuWeights.OutputWeight, cpuWeights.OutputQuantType,
+                    cpuWeights.OutputOutputDim, cpuWeights.OutputInputDim, allocs, kernels, stream)
+                : 0;
+        }
 
         // Per-layer weights — skip persistent FP16 copies only for types with custom
         // quantized GEMV kernels (Q8_0, Q4_K, Q6_K). These can dequant on-the-fly into
         // a scratch buffer for prefill GEMM, and use the GEMV kernel directly for decode.
         // All other types (Q5_0, Q4_0, Q5_K, F16, F32) keep a persistent FP16 copy.
-        var layers = new CudaLayerWeights[config.NumLayers];
-        for (int i = 0; i < config.NumLayers; i++)
+        // In hybrid mode, only upload the first layerCount layers.
+        var layers = new CudaLayerWeights[layerCount];
+        for (int i = 0; i < layerCount; i++)
         {
             ref readonly var lw = ref cpuWeights.Layers[i];
 
@@ -192,9 +214,12 @@ internal sealed class CudaWeights : IDisposable
         // Sync to ensure all uploads are complete
         CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
 
-        // LM head quantized copy for decode
-        nint outputWeightQuant = UploadQuantized(cpuWeights.OutputWeight, cpuWeights.OutputQuantType,
-            cpuWeights.OutputOutputDim, cpuWeights.OutputInputDim, allocs);
+        // LM head quantized copy for decode (skip in hybrid mode — CPU handles LM head)
+        if (!isHybrid)
+        {
+            outputWeightQuant = UploadQuantized(cpuWeights.OutputWeight, cpuWeights.OutputQuantType,
+                cpuWeights.OutputOutputDim, cpuWeights.OutputInputDim, allocs);
+        }
 
         return new CudaWeights(layers, tokenEmbed, tokenEmbedQt,
             outputNorm, outputWeight, cpuWeights.OutputOutputDim, cpuWeights.OutputInputDim,

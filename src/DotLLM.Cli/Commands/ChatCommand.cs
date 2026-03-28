@@ -110,6 +110,12 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         [DefaultValue("cpu")]
         public string Device { get; set; } = "cpu";
 
+        /// <summary>Number of GPU layers for hybrid offloading.</summary>
+        [CommandOption("--gpu-layers")]
+        [Description("Number of transformer layers to offload to GPU. 0 = CPU only. " +
+                     "Omit for default (0 with --device cpu, all with --device gpu).")]
+        public int? GpuLayers { get; set; }
+
         /// <summary>Quantization filter.</summary>
         [CommandOption("--quant|-q")]
         [Description("Quantization filter when multiple GGUF files exist (e.g., Q4_K_M, Q8_0).")]
@@ -141,7 +147,14 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                 ctx.Status("Loading tokenizer...");
                 tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
-                if (settings.Device.StartsWith("gpu", StringComparison.OrdinalIgnoreCase))
+                int gpuLayers = ResolveGpuLayers(settings, config);
+                if (gpuLayers <= 0)
+                {
+                    var threading = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
+                    ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {threading.EffectiveThreadCount} threads)...");
+                    model = TransformerModel.LoadFromGguf(gguf, config, threading);
+                }
+                else if (gpuLayers >= config.NumLayers)
                 {
                     int gpuId = settings.Device.IndexOf(':') is int ci and > 0
                         ? int.Parse(settings.Device.AsSpan(ci + 1))
@@ -151,15 +164,20 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                 }
                 else
                 {
+                    int gpuId = settings.Device.IndexOf(':') is int ci2 and > 0
+                        ? int.Parse(settings.Device.AsSpan(ci2 + 1))
+                        : 0;
                     var threading = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
-                    ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {config.HiddenSize} hidden, {threading.EffectiveThreadCount} threads)...");
-                    model = TransformerModel.LoadFromGguf(gguf, config, threading);
+                    ctx.Status($"Loading {config.Architecture} model ({gpuLayers} GPU + {config.NumLayers - gpuLayers} CPU layers)...");
+                    model = DotLLM.Cuda.HybridTransformerModel.LoadFromGguf(gguf, config, gpuLayers, gpuId, threading);
                 }
             });
 
         // Display VRAM warning after spinner completes (so it stays visible)
-        if (model is DotLLM.Cuda.CudaTransformerModel cudaCheck && cudaCheck.VramWarning is not null)
-            AnsiConsole.MarkupLine($"[yellow]WARNING: {Markup.Escape(cudaCheck.VramWarning)}[/]");
+        string? vramWarning = (model as DotLLM.Cuda.CudaTransformerModel)?.VramWarning
+                           ?? (model as DotLLM.Cuda.HybridTransformerModel)?.VramWarning;
+        if (vramWarning is not null)
+            AnsiConsole.MarkupLine($"[yellow]WARNING: {Markup.Escape(vramWarning)}[/]");
 
         // Create chat template from GGUF metadata, fallback to ChatML
         string bosTokenStr = tokenizer!.DecodeToken(tokenizer.BosTokenId);
@@ -213,6 +231,8 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
         if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
             kvFactory = (cfg, size) => cudaModel.CreateKvCache(size);
+        else if (model is DotLLM.Cuda.HybridTransformerModel hybridModel)
+            kvFactory = (cfg, size) => hybridModel.CreateKvCache(size);
 
         var generator = new TextGenerator(model!, tokenizer!, kvFactory);
 
@@ -334,6 +354,14 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                 $"{ttftMs:F0} ms TTFT, {prefillTokSec:F1} prefill tok/s, {decodeTokSec:F1} decode tok/s]][/]");
             Console.WriteLine();
         }
+    }
+
+    private static int ResolveGpuLayers(Settings settings, ModelConfig config)
+    {
+        if (settings.GpuLayers.HasValue)
+            return Math.Clamp(settings.GpuLayers.Value, 0, config.NumLayers);
+        return settings.Device.StartsWith("gpu", StringComparison.OrdinalIgnoreCase)
+            ? config.NumLayers : 0;
     }
 
     private static string InferQuantLabel(string resolvedPath, string? quantFlag)

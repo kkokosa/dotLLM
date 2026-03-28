@@ -18,7 +18,7 @@
 
 dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around llama.cpp or Python libraries. All orchestration, model loading, tokenization, sampling, and CPU compute are implemented in pure C#, with CUDA GPU acceleration via PTX kernels loaded through the CUDA Driver API (no native shared library). It targets transformer-based models (Llama, Mistral, Phi, Qwen, DeepSeek) with SIMD-optimized CPU and CUDA GPU backends.
 
-> **Status**: Phase 4 in progress — CUDA GPU backend operational (PTX kernels, cuBLAS HGEMM, quantized GEMV, FP16 pipeline). CPU backend has SIMD-optimized inference with Q4_K_M quantization, chat templates, streaming, multi-threading, NUMA-aware pinning. Supports Llama, Mistral, Phi, Qwen architectures. See [Roadmap](#roadmap).
+> **Status**: Phase 4 in progress — CUDA GPU backend with CPU/GPU hybrid layer offloading (`--gpu-layers N`). PTX kernels, cuBLAS HGEMM, quantized GEMV, FP16 pipeline. CPU backend has SIMD-optimized inference with Q4_K_M quantization, chat templates, streaming, multi-threading, NUMA-aware pinning. Supports Llama, Mistral, Phi, Qwen architectures. See [Roadmap](#roadmap).
 
 ## Key Features
 
@@ -407,6 +407,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 
 ## News
 
+- **2026-03** — CPU/GPU hybrid layer offloading: `--gpu-layers N` to run first N layers on GPU, remainder on CPU. Automatic FP16→FP32 hidden state transfer at boundary. Split KV-cache (GPU FP16 + CPU FP32). Partial VRAM usage proportional to offloaded layers ([#72](https://github.com/kkokosa/dotLLM/issues/72))
 - **2026-03** — CUDA GPU backend: PTX kernels via CUDA Driver API P/Invoke (no native shared library), cuBLAS HGEMM for prefill, custom quantized GEMV for decode (Q8_0, Q4_K, Q6_K), FP16 activation pipeline, on-the-fly weight dequantization, GPU KV-cache, `--device gpu` CLI flag, `--device both` benchmarking ([#70](https://github.com/kkokosa/dotLLM/issues/70))
 - **2026-03** — NUMA-aware threading: adaptive spin-wait dispatch (generation counter with event fallback), NUMA topology detection (Windows/Linux), P-core/E-core awareness, CPU affinity pinning, auto-reduced decode thread count ([#57](https://github.com/kkokosa/dotLLM/issues/57))
 - **2026-03** — Operator fusion: fused RMSNorm+quantize (decode-only, eliminates normOut intermediate buffer) and tiled SwiGLU (1KB L1-resident sigmoid buffer) reduce DRAM roundtrips on the decode hot path ([#56](https://github.com/kkokosa/dotLLM/issues/56))
@@ -436,7 +437,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 | **1 — End-to-End Generation** | GGUF loading, dequantization, CPU ops, tokenizer, attention, forward pass, KV-cache, sampling | Done (9/9) |
 | **2 — Practical Local Inference** | Engine metrics, benchmarks, Q4_K_M, chat templates, streaming, multi-threading, more architectures | Done (10/10) |
 | **3 — CPU Performance** | Decode dispatch, Q8_1 input, weight repacking, outer-product GEMM, tiled attention, fast exp, fusion, NUMA | In Progress (7/8) |
-| **4 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | In Progress (1/3) |
+| **4 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | In Progress (2/3) |
 | **5 — Constrained Decoding & API** | JSON mode, JSON Schema, regex/CFG, tool calling, logit bias, OpenAI API server | Planned |
 | **6 — Production Serving** | Continuous batching, paged KV-cache, prompt caching, speculative decoding, metrics | Planned |
 | **7 — Expand** | Hooks, logit lens, LoRA, MLA, SAE, multi-GPU, ROCm | Planned |

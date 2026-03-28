@@ -27,9 +27,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-# Reuse model resolution from bench_compare
+# Reuse model resolution and hybrid utilities from bench_compare
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bench_compare import resolve_model
+from bench_compare import resolve_model, parse_hybrid_modes, compute_gpu_layers, _get_gguf_layers
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +45,7 @@ class TestCase:
     arch: str
     prompt: str
     expected: str  # substring that must appear in generated output
+    layers: int = 0  # transformer block count (0 = unknown, read from GGUF at runtime)
     max_tokens: int = 2
     notes: str = ""
 
@@ -59,6 +60,7 @@ TEST_CASES: list[TestCase] = [
         arch="Llama",
         prompt="The capital of France is",
         expected="Paris",
+        layers=30,
         notes="baseline Llama arch, SentencePiece",
     ),
     TestCase(
@@ -68,6 +70,7 @@ TEST_CASES: list[TestCase] = [
         arch="Llama",
         prompt="The capital of France is",
         expected="Paris",
+        layers=30,
         notes="SmolLM2, SentencePiece",
     ),
     TestCase(
@@ -77,6 +80,7 @@ TEST_CASES: list[TestCase] = [
         arch="Llama",
         prompt="The capital of France is",
         expected="Paris",
+        layers=16,
         notes="Llama 3.2, tiktoken, Q4_K_M",
     ),
     TestCase(
@@ -86,6 +90,7 @@ TEST_CASES: list[TestCase] = [
         arch="Llama",
         prompt="The capital of France is",
         expected="Paris",
+        layers=16,
         notes="Llama 3.2, tiktoken, Q8_0",
     ),
     TestCase(
@@ -95,6 +100,7 @@ TEST_CASES: list[TestCase] = [
         arch="Llama",
         prompt="The capital of France is",
         expected="Paris",
+        layers=28,
         notes="Llama 3.2 3B, tiktoken, Q4_K_M",
     ),
     TestCase(
@@ -104,6 +110,7 @@ TEST_CASES: list[TestCase] = [
         arch="Llama",
         prompt="The capital of France is",
         expected="Paris",
+        layers=28,
         notes="Llama 3.2 3B, tiktoken, Q8_0",
     ),
     TestCase(
@@ -113,6 +120,7 @@ TEST_CASES: list[TestCase] = [
         arch="Llama",
         prompt="Stolicą Polski jest",
         expected="Warszawa",
+        layers=28,
         max_tokens=3,
         notes="Polish 1.5B, Llama arch",
     ),
@@ -123,6 +131,7 @@ TEST_CASES: list[TestCase] = [
         arch="Llama",
         prompt="Stolicą Polski jest",
         expected="Warszawa",
+        layers=48,
         max_tokens=3,
         notes="Polish 11B, Llama arch, Q4_K_M",
     ),
@@ -135,6 +144,7 @@ TEST_CASES: list[TestCase] = [
         arch="Qwen",
         prompt="The capital of France is",
         expected="Paris",
+        layers=24,
         notes="tiktoken, tied embeddings, Q/K biases",
     ),
     TestCase(
@@ -144,6 +154,7 @@ TEST_CASES: list[TestCase] = [
         arch="Qwen",
         prompt="The capital of France is",
         expected="Paris",
+        layers=28,
         notes="QK-norms, explicit head_dim",
     ),
 
@@ -155,6 +166,7 @@ TEST_CASES: list[TestCase] = [
         arch="Phi",
         prompt="The capital of France is",
         expected="Paris",
+        layers=32,
         notes="fused QKV + fused gate_up FFN, phi3 arch",
     ),
     TestCase(
@@ -164,6 +176,7 @@ TEST_CASES: list[TestCase] = [
         arch="Phi",
         prompt="The capital of France is",
         expected="Paris",
+        layers=32,
         notes="Phi-4 mini",
     ),
 
@@ -175,6 +188,7 @@ TEST_CASES: list[TestCase] = [
         arch="Mistral",
         prompt="The capital of France is",
         expected="Paris",
+        layers=24,
         notes="mistral3 arch string",
     ),
     TestCase(
@@ -184,6 +198,7 @@ TEST_CASES: list[TestCase] = [
         arch="Mistral",
         prompt="The capital of France is",
         expected="Paris",
+        layers=32,
         notes="sliding window, Q4_K_M",
     ),
     TestCase(
@@ -193,6 +208,7 @@ TEST_CASES: list[TestCase] = [
         arch="Mistral",
         prompt="The capital of France is",
         expected="Paris",
+        layers=32,
         notes="sliding window, Q8_0",
     ),
 ]
@@ -210,9 +226,23 @@ def _find_cli() -> Path:
     return Path("dotnet")  # fallback to dotnet run
 
 
-def _run_test(cli: Path, model_path: Path, tc: TestCase, device: str = "cpu") -> tuple[bool, str, float]:
+@dataclass
+class TestResult:
+    """Result of a single test run."""
+    passed: bool
+    detail: str
+    elapsed: float
+    decode_tok_s: float = 0.0
+    prefill_tok_s: float = 0.0
+
+
+def _run_test(cli: Path, model_path: Path, tc: TestCase, device: str = "cpu",
+              gpu_layers: int | None = None) -> TestResult:
     """
-    Run a single test case with --json output. Returns (passed, detail_text, elapsed_seconds).
+    Run a single test case with --json output.
+
+    Args:
+        gpu_layers: If set, pass --gpu-layers N to the CLI (hybrid mode).
     """
     if cli.name == "dotnet":
         cmd = [
@@ -229,8 +259,11 @@ def _run_test(cli: Path, model_path: Path, tc: TestCase, device: str = "cpu") ->
         "-n", str(tc.max_tokens),
         "-t", "0",  # greedy
         "--json",
-        "--device", device,
     ]
+    if gpu_layers is not None:
+        cmd += ["--gpu-layers", str(gpu_layers)]
+    else:
+        cmd += ["--device", device]
 
     start = time.monotonic()
     try:
@@ -242,39 +275,41 @@ def _run_test(cli: Path, model_path: Path, tc: TestCase, device: str = "cpu") ->
             errors="replace",
         )
     except subprocess.TimeoutExpired:
-        return False, "TIMEOUT (600s)", time.monotonic() - start
+        return TestResult(False, "TIMEOUT (600s)", time.monotonic() - start)
     except FileNotFoundError:
-        return False, f"CLI not found: {cli}", time.monotonic() - start
+        return TestResult(False, f"CLI not found: {cli}", time.monotonic() - start)
 
     elapsed = time.monotonic() - start
 
     if result.returncode != 0:
         error_text = result.stderr.strip() or result.stdout.strip()
-        # Find "Error: ..." line
         for line in error_text.splitlines():
             if "Error:" in line:
-                return False, line.strip(), elapsed
-        return False, f"exit code {result.returncode}: {error_text[:200]}", elapsed
+                return TestResult(False, line.strip(), elapsed)
+        return TestResult(False, f"exit code {result.returncode}: {error_text[:200]}", elapsed)
 
-    # Extract JSON from stdout — strip any non-JSON prefix (e.g., VRAM warnings on stderr leak)
+    # Extract JSON from stdout
     raw = result.stdout.strip()
     json_start = raw.find("{")
     if json_start < 0:
-        return False, f"no JSON in output: {raw[:200]}", elapsed
+        return TestResult(False, f"no JSON in output: {raw[:200]}", elapsed)
     try:
         data = json.loads(raw[json_start:])
     except json.JSONDecodeError:
-        return False, f"invalid JSON: {raw[:200]}", elapsed
+        return TestResult(False, f"invalid JSON: {raw[:200]}", elapsed)
 
     generated_text = data.get("text", "")
     timings = data.get("timings", {})
-    tok_s = timings.get("decode_tok_s", 0) or timings.get("prefill_tok_s", 0)
+    decode_tok_s = timings.get("decode_tok_s", 0) or 0
+    prefill_tok_s = timings.get("prefill_tok_s", 0) or 0
+    tok_s = decode_tok_s or prefill_tok_s
 
     if tc.expected in generated_text:
         detail = f"{generated_text.strip()[:50]}  ({tok_s:.1f} tok/s)"
-        return True, detail, elapsed
+        return TestResult(True, detail, elapsed, decode_tok_s, prefill_tok_s)
     else:
-        return False, f"expected '{tc.expected}' not in: '{generated_text[:100]}'", elapsed
+        detail = f"expected '{tc.expected}' not in: '{generated_text[:100]}'"
+        return TestResult(False, detail, elapsed, decode_tok_s, prefill_tok_s)
 
 
 def _model_is_cached(tc: TestCase) -> bool:
@@ -308,6 +343,9 @@ def main() -> int:
     parser.add_argument("--device", type=str, default="cpu",
                         choices=["cpu", "gpu", "both"],
                         help="Compute device: cpu (default), gpu, or both")
+    parser.add_argument("--hybrid-modes", type=str, default=None,
+                        help="Comma-separated fractions (0-1) of layers to offload to GPU. "
+                             "E.g. '0.25,0.5' runs hybrid mode tests alongside regular device tests.")
     args = parser.parse_args()
 
     # Default to --cached-only when no explicit mode is given
@@ -354,57 +392,196 @@ def main() -> int:
     # Determine which devices to test
     devices = ["cpu", "gpu"] if args.device == "both" else [args.device]
 
+    # Parse hybrid modes
+    hybrid_modes = parse_hybrid_modes(args.hybrid_modes)
+
+    # Build run configs: list of (label, device, gpu_layers)
+    # Regular device runs + hybrid mode runs
+    has_hybrid = len(hybrid_modes) > 0
+    show_mode_col = len(devices) > 1 or has_hybrid
+
     # Run tests
     print()
-    dev_col = "  Device" if len(devices) > 1 else ""
-    print(f"{'Test':<35} {'Arch':<10}{dev_col} {'Result':<8} {'Time':>8}  Details")
-    print("=" * (105 + len(dev_col)))
+    mode_col = "  Mode    " if show_mode_col else ""
+    print(f"{'Test':<35} {'Arch':<10}{mode_col} {'Result':<8} {'Time':>8}  Details")
+    print("=" * (115 if show_mode_col else 105))
 
     passed = 0
     failed = 0
     skipped = 0
 
+    # Collect throughput data for summary table: { tc.name: { mode_key: (decode_tok_s, passed) } }
+    throughput_data: dict[str, dict[str, tuple[float, bool]]] = {}
+    # Ordered mode keys for column headers
+    mode_keys: list[str] = list(devices)
+    for frac in hybrid_modes:
+        mode_keys.append(f"h{int(frac * 100)}%")
+
+    def _clean_detail(detail: str, prompt: str) -> str:
+        if prompt in detail:
+            detail = detail[detail.index(prompt) + len(prompt):]
+        for marker in ["Generation Complete", "Performance", "Prefill"]:
+            if marker in detail:
+                detail = detail[:detail.index(marker)]
+        return detail.strip()[:60]
+
     for tc in cases:
         # Check if model is available
         if not _model_is_cached(tc) and not args.download:
             skipped += 1
-            dev_label = "" if len(devices) == 1 else "        "
-            print(f"{tc.name:<35} {tc.arch:<10}{dev_label} {'SKIP':<8} {'':>8}  not cached (use --download)")
+            mode_label = "" if not show_mode_col else "          "
+            print(f"{tc.name:<35} {tc.arch:<10}{mode_label} {'SKIP':<8} {'':>8}  not cached (use --download)")
             continue
 
         # Resolve model (downloads if --download and not cached)
         try:
             model_path = resolve_model(tc.repo, tc.quant, quiet=True)
         except SystemExit:
-            failed += len(devices)
-            dev_label = "" if len(devices) == 1 else "        "
-            print(f"{tc.name:<35} {tc.arch:<10}{dev_label} {'FAIL':<8} {'':>8}  model resolution failed")
+            num_runs = len(devices) + len(hybrid_modes)
+            failed += num_runs
+            mode_label = "" if not show_mode_col else "          "
+            print(f"{tc.name:<35} {tc.arch:<10}{mode_label} {'FAIL':<8} {'':>8}  model resolution failed")
             continue
 
-        for device in devices:
-            ok, detail, elapsed = _run_test(cli, model_path, tc, device=device)
-            time_str = f"{elapsed:.1f}s"
-            dev_label = f"  {device:<6}" if len(devices) > 1 else ""
+        # Determine layer count for hybrid modes
+        num_layers = tc.layers
+        if hybrid_modes and num_layers == 0:
+            num_layers = _get_gguf_layers(str(model_path))
+            if num_layers == 0:
+                print(f"  [hybrid] WARNING: Could not determine layer count for {tc.name}, skipping hybrid")
 
-            if ok:
+        row: dict[str, tuple[float, bool]] = {}
+
+        # Regular device runs
+        for device in devices:
+            r = _run_test(cli, model_path, tc, device=device)
+            time_str = f"{r.elapsed:.1f}s"
+            mode_label = f"  {device:<8}" if show_mode_col else ""
+
+            if r.passed:
                 passed += 1
-                if tc.prompt in detail:
-                    detail = detail[detail.index(tc.prompt) + len(tc.prompt):]
-                for marker in ["Generation Complete", "Performance", "Prefill"]:
-                    if marker in detail:
-                        detail = detail[:detail.index(marker)]
-                detail = detail.strip()[:60]
-                print(f"{tc.name:<35} {tc.arch:<10}{dev_label} {'PASS':<8} {time_str:>8}  {detail}")
+                detail = _clean_detail(r.detail, tc.prompt)
+                print(f"{tc.name:<35} {tc.arch:<10}{mode_label} {'PASS':<8} {time_str:>8}  {detail}")
             else:
                 failed += 1
-                print(f"{tc.name:<35} {tc.arch:<10}{dev_label} {'FAIL':<8} {time_str:>8}  {detail}")
+                print(f"{tc.name:<35} {tc.arch:<10}{mode_label} {'FAIL':<8} {time_str:>8}  {r.detail}")
+
+            row[device] = (r.decode_tok_s, r.passed)
+
+        # Hybrid mode runs
+        if hybrid_modes and num_layers > 0:
+            for frac in hybrid_modes:
+                gl = compute_gpu_layers(num_layers, frac)
+                pct = int(frac * 100)
+                hybrid_label = f"  h{pct}%({gl}L)" if show_mode_col else ""
+
+                r = _run_test(cli, model_path, tc, gpu_layers=gl)
+                time_str = f"{r.elapsed:.1f}s"
+
+                if r.passed:
+                    passed += 1
+                    detail = _clean_detail(r.detail, tc.prompt)
+                    print(f"{tc.name:<35} {tc.arch:<10}{hybrid_label} {'PASS':<8} {time_str:>8}  {detail}")
+                else:
+                    failed += 1
+                    print(f"{tc.name:<35} {tc.arch:<10}{hybrid_label} {'FAIL':<8} {time_str:>8}  {r.detail}")
+
+                row[f"h{pct}%"] = (r.decode_tok_s, r.passed)
+
+        if row:
+            throughput_data[tc.name] = row
 
     # Summary
-    print("=" * (105 + len(dev_col)))
+    sep_width = 115 if show_mode_col else 105
+    print("=" * sep_width)
     total = passed + failed + skipped
     print(f"\n{passed}/{total} passed, {failed} failed, {skipped} skipped")
 
+    # Throughput summary table (only when multiple modes were tested)
+    if len(mode_keys) > 1 and throughput_data:
+        _print_throughput_summary(throughput_data, mode_keys, cases, hybrid_modes)
+
     return 1 if failed > 0 else 0
+
+
+def _print_throughput_summary(
+    data: dict[str, dict[str, tuple[float, bool]]],
+    mode_keys: list[str],
+    cases: list[TestCase],
+    hybrid_modes: list[float],
+) -> None:
+    """Print a pivoted throughput summary table after the test results."""
+    # Build quant lookup from test cases
+    quant_map = {tc.name: tc.quant or "f16" for tc in cases}
+    layers_map = {tc.name: tc.layers for tc in cases}
+
+    # Column widths: fixed width per mode column for alignment
+    name_w = 28
+    quant_w = 7
+    col_w = 9  # width for each tok/s column
+    best_w = 6
+
+    # Build column headers with layer counts where applicable
+    col_headers: list[str] = []
+    for key in mode_keys:
+        col_headers.append(key)
+
+    # Print header
+    print()
+    print("Throughput Summary (decode tok/s)")
+    print()
+
+    # Header row
+    header = f"{'Model':<{name_w}} {'Quant':<{quant_w}}"
+    for ch in col_headers:
+        header += f"  {ch:>{col_w}}"
+    header += f"  {'Best':>{best_w}}"
+    print(header)
+
+    sep = "-" * len(header)
+    print(sep)
+
+    for tc_name, row in data.items():
+        quant = quant_map.get(tc_name, "?")
+        # Truncate long model names
+        display_name = tc_name[:name_w].rstrip()
+
+        line = f"{display_name:<{name_w}} {quant:<{quant_w}}"
+
+        # Find best tok/s (only from modes that have data)
+        best_tok_s = -1.0
+        best_key = ""
+        for key in mode_keys:
+            if key in row:
+                tok_s, _ = row[key]
+                if tok_s > best_tok_s:
+                    best_tok_s = tok_s
+                    best_key = key
+
+        for key in mode_keys:
+            if key not in row:
+                line += f"  {'--':>{col_w}}"
+                continue
+
+            tok_s, ok = row[key]
+            is_best = (key == best_key and best_tok_s > 0)
+
+            if tok_s > 0:
+                cell = f"{tok_s:.1f}"
+                if not ok:
+                    cell += "x"
+                if is_best:
+                    cell += "*"
+                line += f"  {cell:>{col_w}}"
+            else:
+                cell = "--x" if not ok else "--"
+                line += f"  {cell:>{col_w}}"
+
+        line += f"  {best_key:>{best_w}}"
+        print(line)
+
+    print(sep)
+    print(f"  * = fastest    x = correctness failed    -- = no data")
 
 
 if __name__ == "__main__":
