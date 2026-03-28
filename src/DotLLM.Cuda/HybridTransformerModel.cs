@@ -208,6 +208,12 @@ public sealed unsafe class HybridTransformerModel : IModel
         => Forward(tokenIds, positions, deviceId, kvCache: null);
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// SYNC WARNING: The GPU phase (layers 0..N-1) replicates logic from
+    /// CudaTransformerModel.Forward and the CPU phase (layers N..L-1) replicates logic
+    /// from TransformerModel.Forward. Bug fixes to attention, FFN, or norm logic may
+    /// need to be applied in all three locations.
+    /// </remarks>
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
                            int deviceId, IKvCache? kvCache)
     {
@@ -972,15 +978,14 @@ public sealed unsafe class HybridTransformerModel : IModel
     }
 
     /// <summary>
-    /// Converts FP16 data to FP32 on the CPU. Cold path — executed once per forward pass
-    /// at the GPU/CPU boundary.
+    /// Converts FP16 data to FP32 on the CPU using vectorized TensorPrimitives.
+    /// Executed once per forward pass at the GPU/CPU boundary.
     /// </summary>
     private static void ConvertFp16ToFp32(nint srcFp16, nint dstFp32, int count)
     {
-        Half* src = (Half*)srcFp16;
-        float* dst = (float*)dstFp32;
-        for (int i = 0; i < count; i++)
-            dst[i] = (float)src[i];
+        var src = new ReadOnlySpan<Half>((Half*)srcFp16, count);
+        var dst = new Span<float>((float*)dstFp32, count);
+        TensorPrimitives.ConvertToSingle(src, dst);
     }
 
     /// <inheritdoc/>

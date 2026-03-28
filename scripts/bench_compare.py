@@ -158,12 +158,14 @@ def _get_gguf_layers(path: str | Path) -> int:
         if magic != b"GGUF":
             return 0
         version = struct.unpack("<I", f.read(4))[0]
-        _tensor_count = struct.unpack("<Q", f.read(8))[0]
-        kv_count = struct.unpack("<Q", f.read(8))[0]
+        # GGUF v2 uses 32-bit counts, v3+ uses 64-bit
+        cnt_fmt, cnt_size = ("<I", 4) if version == 2 else ("<Q", 8)
+        _tensor_count = struct.unpack(cnt_fmt, f.read(cnt_size))[0]
+        kv_count = struct.unpack(cnt_fmt, f.read(cnt_size))[0]
 
         for _ in range(kv_count):
-            # Key: uint64 length + bytes
-            key_len = struct.unpack("<Q", f.read(8))[0]
+            # Key: length (v2=uint32, v3=uint64) + bytes
+            key_len = struct.unpack(cnt_fmt, f.read(cnt_size))[0]
             key = f.read(key_len).decode("utf-8", errors="replace")
             # Value type: uint32
             vtype = struct.unpack("<I", f.read(4))[0]
@@ -185,15 +187,18 @@ def _skip_gguf_value(f, vtype: int, version: int = 3) -> None:
     """Skip a single GGUF metadata value in the file stream."""
     import struct
 
+    # GGUF v2 uses 32-bit lengths/counts, v3+ uses 64-bit
+    cnt_fmt, cnt_size = ("<I", 4) if version == 2 else ("<Q", 8)
+
     fixed = _GGUF_TYPE_SIZE.get(vtype)
     if fixed is not None:
         f.read(fixed)
     elif vtype == 8:  # STRING
-        slen = struct.unpack("<Q", f.read(8))[0]
+        slen = struct.unpack(cnt_fmt, f.read(cnt_size))[0]
         f.read(slen)
     elif vtype == 9:  # ARRAY
         elem_type = struct.unpack("<I", f.read(4))[0]
-        count = struct.unpack("<Q", f.read(8))[0]
+        count = struct.unpack(cnt_fmt, f.read(cnt_size))[0]
         for _ in range(count):
             _skip_gguf_value(f, elem_type, version)
     else:
@@ -1489,7 +1494,7 @@ def main() -> int:
                 all_results.extend(results)
 
         # Hybrid mode runs (dotLLM only — llama.cpp uses -ngl which is separate)
-        if hybrid_modes:
+        if hybrid_modes and "dotllm" in engine_names:
             num_layers = _get_gguf_layers(resolved_model)
             if num_layers == 0:
                 print(f"[hybrid] WARNING: Could not read block_count from {resolved_model}, skipping hybrid modes",

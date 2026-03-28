@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using DotLLM.Core.Attention;
 using DotLLM.Core.Tensors;
 using DotLLM.Engine.KvCache;
@@ -21,7 +22,15 @@ public sealed class HybridKvCache : IKvCache
     internal SimpleKvCache CpuCache { get; }
 
     /// <inheritdoc/>
-    public int CurrentLength => Math.Max(GpuCache.CurrentLength, CpuCache.CurrentLength);
+    public int CurrentLength
+    {
+        get
+        {
+            Debug.Assert(GpuCache.CurrentLength == CpuCache.CurrentLength,
+                "GPU and CPU KV-caches must advance in lockstep.");
+            return CpuCache.CurrentLength;
+        }
+    }
 
     /// <inheritdoc/>
     public int MaxLength => CpuCache.MaxLength;
@@ -42,6 +51,8 @@ public sealed class HybridKvCache : IKvCache
     /// <inheritdoc/>
     public void Update(ITensor keys, ITensor values, ReadOnlySpan<int> positions, int layerIndex)
     {
+        Debug.Assert(layerIndex >= _numGpuLayers,
+            $"Layer {layerIndex} is a GPU layer — should use GpuCache.UpdateDevice().");
         if (layerIndex < _numGpuLayers)
             throw new InvalidOperationException(
                 $"Layer {layerIndex} is a GPU layer — use GpuCache.UpdateDevice() instead of IKvCache.Update().");
@@ -52,6 +63,8 @@ public sealed class HybridKvCache : IKvCache
     /// <inheritdoc/>
     public void Update(TensorRef keys, TensorRef values, ReadOnlySpan<int> positions, int layerIndex)
     {
+        Debug.Assert(layerIndex >= _numGpuLayers,
+            $"Layer {layerIndex} is a GPU layer — should use GpuCache.UpdateDevice().");
         if (layerIndex < _numGpuLayers)
             throw new InvalidOperationException(
                 $"Layer {layerIndex} is a GPU layer — use GpuCache.UpdateDevice() instead of IKvCache.Update().");
@@ -62,6 +75,8 @@ public sealed class HybridKvCache : IKvCache
     /// <inheritdoc/>
     public ITensor GetKeys(int layerIndex)
     {
+        Debug.Assert(layerIndex >= _numGpuLayers,
+            $"Layer {layerIndex} is a GPU layer — should use GpuCache.GetKeysPtr().");
         if (layerIndex < _numGpuLayers)
             throw new InvalidOperationException(
                 $"Layer {layerIndex} is a GPU layer — use GpuCache.GetKeysPtr() instead.");
@@ -72,6 +87,8 @@ public sealed class HybridKvCache : IKvCache
     /// <inheritdoc/>
     public ITensor GetValues(int layerIndex)
     {
+        Debug.Assert(layerIndex >= _numGpuLayers,
+            $"Layer {layerIndex} is a GPU layer — should use GpuCache.GetValuesPtr().");
         if (layerIndex < _numGpuLayers)
             throw new InvalidOperationException(
                 $"Layer {layerIndex} is a GPU layer — use GpuCache.GetValuesPtr() instead.");
