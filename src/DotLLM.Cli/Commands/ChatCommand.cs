@@ -120,6 +120,24 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         [CommandOption("--quant|-q")]
         [Description("Quantization filter when multiple GGUF files exist (e.g., Q4_K_M, Q8_0).")]
         public string? Quant { get; set; }
+
+        /// <summary>KV-cache key quantization type.</summary>
+        [CommandOption("--cache-type-k")]
+        [Description("KV-cache key quantization: f32 (default), q8_0, q4_0.")]
+        [DefaultValue("f32")]
+        public string CacheTypeK { get; set; } = "f32";
+
+        /// <summary>KV-cache value quantization type.</summary>
+        [CommandOption("--cache-type-v")]
+        [Description("KV-cache value quantization: f32 (default), q8_0, q4_0.")]
+        [DefaultValue("f32")]
+        public string CacheTypeV { get; set; } = "f32";
+
+        /// <summary>Mixed-precision window size for KV-cache quantization.</summary>
+        [CommandOption("--cache-window")]
+        [Description("Mixed-precision window: recent N tokens in full precision (0 = all quantized). Only used when --cache-type-k or --cache-type-v is set.")]
+        [DefaultValue(0)]
+        public int CacheWindow { get; set; }
     }
 
     /// <inheritdoc/>
@@ -228,11 +246,26 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         if (!string.IsNullOrEmpty(settings.SystemPrompt))
             history.Add(new ChatMessage { Role = "system", Content = settings.SystemPrompt });
 
+        var kvConfig = new KvCacheConfig(
+            ParseKvCacheDType(settings.CacheTypeK),
+            ParseKvCacheDType(settings.CacheTypeV),
+            settings.CacheWindow);
+
         Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
         if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
-            kvFactory = (cfg, size) => cudaModel.CreateKvCache(size);
+        {
+            kvFactory = kvConfig.IsQuantized
+                ? (cfg, size) => cudaModel.CreateKvCache(size, kvConfig)
+                : (cfg, size) => cudaModel.CreateKvCache(size);
+        }
         else if (model is DotLLM.Cuda.HybridTransformerModel hybridModel)
             kvFactory = (cfg, size) => hybridModel.CreateKvCache(size);
+        else if (kvConfig.IsQuantized)
+        {
+            kvFactory = (cfg, size) => new DotLLM.Engine.KvCache.QuantizedKvCache(
+                cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, size,
+                kvConfig.KeyDType, kvConfig.ValueDType, kvConfig.MixedPrecisionWindowSize);
+        }
 
         var generator = new TextGenerator(model!, tokenizer!, kvFactory);
 
@@ -386,6 +419,14 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         if (settings.Seed.HasValue) parts.Add($"seed={settings.Seed.Value}");
         return string.Join(", ", parts);
     }
+
+    private static KvCacheDType ParseKvCacheDType(string value) => value.ToLowerInvariant() switch
+    {
+        "f32" or "fp32" => KvCacheDType.F32,
+        "q8_0" or "q8" => KvCacheDType.Q8_0,
+        "q4_0" or "q4" => KvCacheDType.Q4_0,
+        _ => throw new ArgumentException($"Unknown KV-cache type: '{value}'. Supported: f32, q8_0, q4_0.")
+    };
 
     // Default ChatML template used as fallback when GGUF has no chat_template
     private const string DefaultChatMlTemplate =

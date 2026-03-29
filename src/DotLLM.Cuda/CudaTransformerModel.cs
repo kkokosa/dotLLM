@@ -216,8 +216,18 @@ public sealed unsafe class CudaTransformerModel : IModel
                 _ropeDim, _ropeTheta, effectiveRopeType, s);
 
             // KV-cache update + Attention (FP16)
-            var cudaKvCache = kvCache as CudaKvCache;
-            if (cudaKvCache != null)
+            if (kvCache is CudaQuantizedKvCache cudaQKvCache)
+            {
+                cudaQKvCache.UpdateDevice(_state.K, _state.V, positions, seqLen, layer, s, _kernels);
+                int seqKv = cudaQKvCache.CurrentLength;
+
+                // Dequant quantized region + copy window → scratch, then regular attention
+                var (kPtr, vPtr) = cudaQKvCache.PrepareAttentionScratch(layer, s, _kernels);
+                _kernels.LaunchAttention(_state.Q, kPtr, vPtr, _state.AttnOutput,
+                    seqLen, seqKv, numHeads, numKvHeads, headDim,
+                    positions[0], slidingWindow, s);
+            }
+            else if (kvCache is CudaKvCache cudaKvCache)
             {
                 cudaKvCache.UpdateDevice(_state.K, _state.V, positions, seqLen, layer, s);
                 int seqKv = cudaKvCache.CurrentLength;
@@ -344,6 +354,18 @@ public sealed unsafe class CudaTransformerModel : IModel
     public CudaKvCache CreateKvCache(int maxSeqLen)
     {
         return new CudaKvCache(Config.NumLayers, Config.NumKvHeads, Config.HeadDim, maxSeqLen);
+    }
+
+    /// <summary>
+    /// Creates a KV-cache with optional quantization for this model.
+    /// Returns <see cref="CudaQuantizedKvCache"/> when quantization is configured,
+    /// otherwise a standard <see cref="CudaKvCache"/>.
+    /// </summary>
+    public Core.Attention.IKvCache CreateKvCache(int maxSeqLen, Core.Configuration.KvCacheConfig config)
+    {
+        if (!config.IsQuantized)
+            return CreateKvCache(maxSeqLen);
+        return new CudaQuantizedKvCache(Config.NumLayers, Config.NumKvHeads, Config.HeadDim, maxSeqLen, config);
     }
 
     /// <inheritdoc/>

@@ -20,6 +20,9 @@ public readonly record struct InferenceTimings
     /// <summary>Number of decode forward passes (generated tokens minus 1, since the first token comes from prefill).</summary>
     public int DecodeTokenCount { get; init; }
 
+    /// <summary>Actual bytes allocated for the KV-cache (reflects quantization compression).</summary>
+    public long KvCacheBytes { get; init; }
+
     /// <summary>Prefill throughput in tokens per second.</summary>
     public double PrefillTokensPerSec => PrefillTokenCount > 0 && PrefillTimeMs > 0
         ? PrefillTokenCount / (PrefillTimeMs / 1000.0) : 0;

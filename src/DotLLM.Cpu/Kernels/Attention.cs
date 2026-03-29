@@ -1,6 +1,8 @@
 using System.Buffers;
 using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
+using DotLLM.Core.Attention;
+using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Threading;
 
 namespace DotLLM.Cpu.Kernels;
@@ -594,6 +596,333 @@ public static class Attention
 
                 var vRow = v.Slice(j * kvStride + kvHeadIdx * headDim, headDim);
                 TensorPrimitives.MultiplyAdd(vRow, w, outSlice, outSlice);
+            }
+        }
+    }
+
+    // ──────────────────── Quantized KV-cache attention ────────────────────
+
+    /// <summary>
+    /// Attention with quantized KV-cache. Dequantizes tiles on-the-fly during attention
+    /// computation, then processes the full-precision window region directly.
+    /// </summary>
+    [SkipLocalsInit]
+    public static unsafe void Execute(float* q, IQuantizedKvCache kvCache, int layerIndex,
+                                       float* output,
+                                       int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
+                                       int positionOffset, ComputeThreadPool? pool,
+                                       int? slidingWindowSize = null)
+    {
+        if (headDim <= 0)
+            throw new ArgumentException($"headDim must be positive, got {headDim}", nameof(headDim));
+        if (numHeads % numKvHeads != 0)
+            throw new ArgumentException(
+                $"numHeads ({numHeads}) must be divisible by numKvHeads ({numKvHeads})", nameof(numKvHeads));
+
+        float scale = 1.0f / MathF.Sqrt(headDim);
+        int kvStride = numKvHeads * headDim;
+        int qStride = numHeads * headDim;
+        int tileSize = ComputeTileSize(headDim);
+
+        int quantLen = kvCache.QuantizedLength;
+        int windowLen = kvCache.WindowLength;
+        byte* kQuant = (byte*)kvCache.GetQuantizedKeysPtr(layerIndex);
+        byte* vQuant = (byte*)kvCache.GetQuantizedValuesPtr(layerIndex);
+        float* kWindow = (float*)kvCache.GetWindowKeysPtr(layerIndex);
+        float* vWindow = (float*)kvCache.GetWindowValuesPtr(layerIndex);
+        int kQuantRowBytes = kvCache.KeyQuantizedRowBytes;
+        int vQuantRowBytes = kvCache.ValueQuantizedRowBytes;
+
+        if (pool is null || numHeads < 2)
+        {
+            Span<float> tileScores = stackalloc float[MaxTileSize];
+            for (int h = 0; h < numHeads; h++)
+            {
+                ExecuteTiledQuantizedHead(
+                    q, kQuant, vQuant, kWindow, vWindow, output, tileScores,
+                    seqQ, quantLen, windowLen, headDim, scale,
+                    qStride, kvStride, kQuantRowBytes, vQuantRowBytes,
+                    positionOffset, tileSize, slidingWindowSize ?? 0,
+                    kvCache.KeyDType, kvCache.ValueDType,
+                    h, h / (numHeads / numKvHeads));
+            }
+        }
+        else
+        {
+            var ctx = new QuantizedTiledCtx
+            {
+                Q = q, KQuant = kQuant, VQuant = vQuant,
+                KWindow = kWindow, VWindow = vWindow, Output = output,
+                SeqQ = seqQ, QuantLen = quantLen, WindowLen = windowLen,
+                NumHeads = numHeads, NumKvHeads = numKvHeads,
+                HeadDim = headDim, Scale = scale,
+                PositionOffset = positionOffset,
+                GroupSize = numHeads / numKvHeads,
+                QStride = qStride, KvStride = kvStride,
+                KQuantRowBytes = kQuantRowBytes, VQuantRowBytes = vQuantRowBytes,
+                TileSize = tileSize,
+                SlidingWindowSize = slidingWindowSize ?? 0,
+                KeyDType = kvCache.KeyDType, ValueDType = kvCache.ValueDType
+            };
+            pool.Dispatch((nint)(&ctx), &QuantizedTiledAttentionWorker);
+        }
+    }
+
+    private unsafe struct QuantizedTiledCtx
+    {
+        public float* Q;
+        public byte* KQuant;
+        public byte* VQuant;
+        public float* KWindow;
+        public float* VWindow;
+        public float* Output;
+        public int SeqQ;
+        public int QuantLen;
+        public int WindowLen;
+        public int NumHeads;
+        public int NumKvHeads;
+        public int HeadDim;
+        public float Scale;
+        public int PositionOffset;
+        public int GroupSize;
+        public int QStride;
+        public int KvStride;
+        public int KQuantRowBytes;
+        public int VQuantRowBytes;
+        public int TileSize;
+        public int SlidingWindowSize;
+        public KvCacheDType KeyDType;
+        public KvCacheDType ValueDType;
+    }
+
+    [SkipLocalsInit]
+    private static unsafe void QuantizedTiledAttentionWorker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<QuantizedTiledCtx>((void*)ctxPtr);
+
+        int headsPerThread = (ctx.NumHeads + threadCount - 1) / threadCount;
+        int startHead = threadIdx * headsPerThread;
+        int endHead = Math.Min(startHead + headsPerThread, ctx.NumHeads);
+        if (startHead >= ctx.NumHeads) return;
+
+        Span<float> tileScores = stackalloc float[MaxTileSize];
+
+        for (int h = startHead; h < endHead; h++)
+        {
+            ExecuteTiledQuantizedHead(
+                ctx.Q, ctx.KQuant, ctx.VQuant, ctx.KWindow, ctx.VWindow, ctx.Output, tileScores,
+                ctx.SeqQ, ctx.QuantLen, ctx.WindowLen, ctx.HeadDim, ctx.Scale,
+                ctx.QStride, ctx.KvStride, ctx.KQuantRowBytes, ctx.VQuantRowBytes,
+                ctx.PositionOffset, ctx.TileSize, ctx.SlidingWindowSize,
+                ctx.KeyDType, ctx.ValueDType,
+                h, h / ctx.GroupSize);
+        }
+    }
+
+    /// <summary>
+    /// Processes a single head for quantized KV-cache attention.
+    /// Phase 1: iterate tiles over quantized region with per-tile dequant.
+    /// Phase 2: iterate tiles over full-precision window region.
+    /// Uses online softmax throughout both phases.
+    /// </summary>
+    [SkipLocalsInit]
+    private static unsafe void ExecuteTiledQuantizedHead(
+        float* q, byte* kQuant, byte* vQuant, float* kWindow, float* vWindow, float* output,
+        Span<float> tileScores,
+        int seqQ, int quantLen, int windowLen, int headDim, float scale,
+        int qStride, int kvStride, int kQuantRowBytes, int vQuantRowBytes,
+        int positionOffset, int tileSize, int slidingWindowSize,
+        KvCacheDType keyDType, KvCacheDType valueDType,
+        int headIdx, int kvHeadIdx)
+    {
+        int seqKv = quantLen + windowLen;
+        int window = slidingWindowSize;
+
+        // Per-tile scratch for dequantized K and V rows
+        // Budget: tileSize * headDim * sizeof(float) per buffer
+        int scratchElems = tileSize * headDim;
+        float* kScratch;
+        float* vScratch;
+        byte[]? kRented = null;
+        byte[]? vRented = null;
+
+        int scratchBytes = scratchElems * sizeof(float);
+        if (scratchBytes <= StackAllocThreshold)
+        {
+            float* kBuf = stackalloc float[scratchElems];
+            float* vBuf = stackalloc float[scratchElems];
+            kScratch = kBuf;
+            vScratch = vBuf;
+        }
+        else
+        {
+            kRented = ArrayPool<byte>.Shared.Rent(scratchBytes);
+            vRented = ArrayPool<byte>.Shared.Rent(scratchBytes);
+            fixed (byte* kp = kRented, vp = vRented)
+            {
+                kScratch = (float*)kp;
+                vScratch = (float*)vp;
+            }
+        }
+
+        try
+        {
+            for (int i = 0; i < seqQ; i++)
+            {
+                var qRow = new ReadOnlySpan<float>(q + i * qStride + headIdx * headDim, headDim);
+                var outRow = new Span<float>(output + i * qStride + headIdx * headDim, headDim);
+                outRow.Clear();
+
+                int visibleEnd = Math.Min(seqKv, positionOffset + i + 1);
+                int visibleStart = (window > 0)
+                    ? Math.Max(0, positionOffset + i - window + 1)
+                    : 0;
+                if (visibleStart >= visibleEnd) continue;
+
+                float maxSoFar = float.NegativeInfinity;
+                float sumExp = 0f;
+
+                // ── Phase 1: Quantized region [visibleStart..min(quantLen, visibleEnd)) ──
+                int quantEnd = Math.Min(quantLen, visibleEnd);
+                int quantStart = Math.Max(visibleStart, 0);
+
+                for (int tileBase = quantStart; tileBase < quantEnd; tileBase += tileSize)
+                {
+                    int tileLen = Math.Min(tileSize, quantEnd - tileBase);
+                    var scores = tileScores.Slice(0, tileLen);
+
+                    // Dequantize tile of K for this head
+                    DequantTile(kQuant, tileBase, tileLen, kvStride, kQuantRowBytes,
+                                kvHeadIdx, headDim, keyDType, kScratch);
+
+                    // Compute scores: dot(qRow, kScratch[j*headDim .. (j+1)*headDim]) * scale
+                    for (int j = 0; j < tileLen; j++)
+                    {
+                        var kRow = new ReadOnlySpan<float>(kScratch + j * headDim, headDim);
+                        scores[j] = TensorPrimitives.Dot(qRow, kRow) * scale;
+                    }
+
+                    // Online softmax update
+                    float tileMax = TensorPrimitives.Max(scores);
+                    float newMax = MathF.Max(maxSoFar, tileMax);
+                    float correction = FastMath.FastExp(maxSoFar - newMax);
+
+                    if (correction < 1f)
+                    {
+                        sumExp *= correction;
+                        TensorPrimitives.Multiply(outRow, correction, outRow);
+                    }
+
+                    sumExp += FastMath.ExpSumAndStore(scores, scores, -newMax);
+
+                    // Dequantize tile of V for this head and accumulate
+                    DequantTile(vQuant, tileBase, tileLen, kvStride, vQuantRowBytes,
+                                kvHeadIdx, headDim, valueDType, vScratch);
+
+                    for (int j = 0; j < tileLen; j++)
+                    {
+                        float w = scores[j];
+                        if (w == 0f) continue;
+                        var vRow = new ReadOnlySpan<float>(vScratch + j * headDim, headDim);
+                        TensorPrimitives.MultiplyAdd(vRow, w, outRow, outRow);
+                    }
+
+                    maxSoFar = newMax;
+                }
+
+                // ── Phase 2: Window region [max(quantLen, visibleStart)..visibleEnd) ──
+                int windowStart = Math.Max(quantLen, visibleStart);
+                for (int tileBase = windowStart; tileBase < visibleEnd; tileBase += tileSize)
+                {
+                    int tileLen = Math.Min(tileSize, visibleEnd - tileBase);
+                    var scores = tileScores.Slice(0, tileLen);
+
+                    for (int j = 0; j < tileLen; j++)
+                    {
+                        // Window index: position (tileBase + j) maps to ring index (tileBase + j - quantLen)
+                        int windowIdx = tileBase + j - quantLen;
+                        var kRow = new ReadOnlySpan<float>(
+                            kWindow + windowIdx * kvStride + kvHeadIdx * headDim, headDim);
+                        scores[j] = TensorPrimitives.Dot(qRow, kRow) * scale;
+                    }
+
+                    float tileMax = TensorPrimitives.Max(scores);
+                    float newMax = MathF.Max(maxSoFar, tileMax);
+                    float correction = FastMath.FastExp(maxSoFar - newMax);
+
+                    if (correction < 1f)
+                    {
+                        sumExp *= correction;
+                        TensorPrimitives.Multiply(outRow, correction, outRow);
+                    }
+
+                    sumExp += FastMath.ExpSumAndStore(scores, scores, -newMax);
+
+                    for (int j = 0; j < tileLen; j++)
+                    {
+                        float w = scores[j];
+                        if (w == 0f) continue;
+                        int windowIdx = tileBase + j - quantLen;
+                        var vRow = new ReadOnlySpan<float>(
+                            vWindow + windowIdx * kvStride + kvHeadIdx * headDim, headDim);
+                        TensorPrimitives.MultiplyAdd(vRow, w, outRow, outRow);
+                    }
+
+                    maxSoFar = newMax;
+                }
+
+                if (sumExp > 0f)
+                    TensorPrimitives.Multiply(outRow, 1f / sumExp, outRow);
+            }
+        }
+        finally
+        {
+            if (kRented != null) ArrayPool<byte>.Shared.Return(kRented);
+            if (vRented != null) ArrayPool<byte>.Shared.Return(vRented);
+        }
+    }
+
+    /// <summary>
+    /// Dequantizes a tile of KV data (Q8_0 or Q4_0) for a specific head into the scratch buffer.
+    /// Output layout: <c>[tileLen, headDim]</c> contiguous floats.
+    /// </summary>
+    [SkipLocalsInit]
+    private static unsafe void DequantTile(byte* quantData, int tileBase, int tileLen,
+                                            int kvStride, int quantRowBytes,
+                                            int kvHeadIdx, int headDim,
+                                            KvCacheDType dtype, float* scratch)
+    {
+        int headOffset = kvHeadIdx * headDim;
+
+        if (dtype == KvCacheDType.Q8_0)
+        {
+            int blockSize = 32;
+            int blockBytes = 34;
+            // Offset within a quantized row to reach the start of this head's data
+            int headBlockStart = headOffset / blockSize;
+            int headBlocks = headDim / blockSize;
+            int headQuantOffset = headBlockStart * blockBytes;
+
+            for (int j = 0; j < tileLen; j++)
+            {
+                byte* rowStart = quantData + (long)(tileBase + j) * quantRowBytes + headQuantOffset;
+                float* dst = scratch + j * headDim;
+                KvQuantize.Q8_0ToF32(rowStart, dst, headDim);
+            }
+        }
+        else // Q4_0
+        {
+            int blockSize = 32;
+            int blockBytes = 18;
+            int headBlockStart = headOffset / blockSize;
+            int headBlocks = headDim / blockSize;
+            int headQuantOffset = headBlockStart * blockBytes;
+
+            for (int j = 0; j < tileLen; j++)
+            {
+                byte* rowStart = quantData + (long)(tileBase + j) * quantRowBytes + headQuantOffset;
+                float* dst = scratch + j * headDim;
+                KvQuantize.Q4_0ToF32(rowStart, dst, headDim);
             }
         }
     }

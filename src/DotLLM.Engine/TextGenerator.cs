@@ -146,7 +146,7 @@ public sealed class TextGenerator
 
             finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
             return BuildResponse(promptLen, generatedIds, finishReason,
-                prefillTicks, decodeTicks, samplerTicks);
+                prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache));
         }
 
         onTokenGenerated?.Invoke(firstTokenId);
@@ -194,7 +194,7 @@ public sealed class TextGenerator
         }
 
         return BuildResponse(promptLen, generatedIds, finishReason,
-            prefillTicks, decodeTicks, samplerTicks);
+            prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache));
     }
 
     /// <summary>
@@ -259,6 +259,7 @@ public sealed class TextGenerator
                 _model.Config.NumKvHeads,
                 _model.Config.HeadDim,
                 cacheSize);
+        long kvBytes = GetKvCacheBytes(kvCache);
 
         var generatedIds = new List<int>(maxTokens);
         long prefillTicks = 0;
@@ -300,13 +301,13 @@ public sealed class TextGenerator
             {
                 // Token excluded — match sync path which removes it before computing timings
                 generatedIds.RemoveAt(generatedIds.Count - 1);
-                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
                 yield return new GenerationToken(firstTokenId, string.Empty, fr, timings);
             }
             else
             {
                 // Token included
-                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
                 string text = decodedText[previousDecodeLength..];
                 yield return new GenerationToken(firstTokenId, text, fr, timings);
             }
@@ -319,7 +320,7 @@ public sealed class TextGenerator
             string text = decodedText[previousDecodeLength..];
             if (firstIsLast)
             {
-                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
                 yield return new GenerationToken(firstTokenId, text, FinishReason.Length, timings);
                 yield break;
             }
@@ -364,12 +365,12 @@ public sealed class TextGenerator
                 if (stopResult == StopResult.Stop)
                 {
                     generatedIds.RemoveAt(generatedIds.Count - 1);
-                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
                     yield return new GenerationToken(nextTokenId, string.Empty, fr, timings);
                 }
                 else
                 {
-                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
                     string text = decodedText[previousDecodeLength..];
                     yield return new GenerationToken(nextTokenId, text, fr, timings);
                 }
@@ -382,7 +383,7 @@ public sealed class TextGenerator
                 string text = decodedText[previousDecodeLength..];
                 if (isLastStep)
                 {
-                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks);
+                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
                     yield return new GenerationToken(nextTokenId, text, FinishReason.Length, timings);
                     yield break;
                 }
@@ -423,7 +424,8 @@ public sealed class TextGenerator
     }
 
     private InferenceResponse BuildResponse(int promptLen, List<int> generatedIds,
-        FinishReason finishReason, long prefillTicks, long decodeTicks, long samplerTicks)
+        FinishReason finishReason, long prefillTicks, long decodeTicks, long samplerTicks,
+        long kvCacheBytes = 0)
     {
         string text = generatedIds.Count > 0
             ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false)
@@ -436,12 +438,12 @@ public sealed class TextGenerator
             FinishReason = finishReason,
             PromptTokenCount = promptLen,
             GeneratedTokenCount = generatedIds.Count,
-            Timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks)
+            Timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvCacheBytes)
         };
     }
 
     private static InferenceTimings BuildTimings(int promptLen, int generatedCount,
-        long prefillTicks, long decodeTicks, long samplerTicks)
+        long prefillTicks, long decodeTicks, long samplerTicks, long kvCacheBytes = 0)
     {
         double tickFreq = Stopwatch.Frequency;
         int decodeSteps = generatedCount > 1 ? generatedCount - 1 : 0;
@@ -452,7 +454,18 @@ public sealed class TextGenerator
             DecodeTimeMs = decodeTicks / tickFreq * 1000.0,
             SamplingTimeMs = samplerTicks / tickFreq * 1000.0,
             PrefillTokenCount = promptLen,
-            DecodeTokenCount = decodeSteps
+            DecodeTokenCount = decodeSteps,
+            KvCacheBytes = kvCacheBytes
         };
     }
+
+    /// <summary>
+    /// Extracts allocated bytes from a KV-cache, regardless of concrete type.
+    /// </summary>
+    internal static long GetKvCacheBytes(Core.Attention.IKvCache kvCache) => kvCache switch
+    {
+        KvCache.SimpleKvCache simple => simple.AllocatedBytes,
+        KvCache.QuantizedKvCache quantized => quantized.AllocatedBytes,
+        _ => 0 // GPU caches — AllocatedBytes is on the concrete type, accessed by CLI directly
+    };
 }

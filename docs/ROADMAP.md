@@ -82,7 +82,7 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 |------|---------|-------------|------------|
 | 31 | **CUDA backend** :white_check_mark: | PTX kernels loaded via CUDA Driver API P/Invoke — no native shared library. cuBLAS HGEMM for prefill, custom quantized GEMV for decode (Q8_0, Q4_K, Q6_K). Dequantization kernels (Q8_0, Q4_0, Q5_0, Q4_K, Q5_K, Q6_K). FP16 activation pipeline, on-the-fly weight dequantization into scratch buffer, GPU KV-cache. `CudaTransformerModel` implementing `IModel`. | Phase 1–2 |
 | 32 | **CPU/GPU hybrid** :white_check_mark: | Layer offloading: specify N layers on GPU, remainder on CPU. Automatic tensor transfer at layer boundaries. Useful when model doesn't fully fit in VRAM. | 31 |
-| 33 | **KV-cache quantization** | Q8_0 and Q4_0 KV-cache compression on both CPU and GPU. Separate key/value type configs (`--cache-type-k`, `--cache-type-v`). Mixed-precision window: recent W tokens in full precision, older tokens quantized. Quantize-on-write, dequant-in-attention-kernel. `KvCacheConfig { KeyDType, ValueDType, MixedPrecisionWindowSize }`. Extends effective context length 2–4×. | 31 |
+| 33 | **KV-cache quantization** :white_check_mark: | Q8_0 and Q4_0 KV-cache compression on both CPU and GPU. Separate key/value type configs (`--cache-type-k`, `--cache-type-v`). Mixed-precision window: recent W tokens in full precision, older tokens quantized. Quantize-on-write, dequant-in-attention-kernel. `KvCacheConfig { KeyDType, ValueDType, MixedPrecisionWindowSize }`. Extends effective context length 2–4×. | 31 |
 
 **Milestone**: Run Llama 3 8B at >50 tokens/sec decode on a single consumer GPU.
 

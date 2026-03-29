@@ -71,6 +71,9 @@ public sealed unsafe class CudaKernels : IDisposable
     private readonly nint _dequantQ4_KFunc;
     private readonly nint _dequantQ5_KFunc;
     private readonly nint _dequantQ6_KFunc;
+    private readonly CudaModule? _quantKvModule;
+    private readonly nint _quantKvQ8_0Func;
+    private readonly nint _quantKvQ4_0Func;
 
     /// <summary>
     /// Loads all PTX modules from the specified directory.
@@ -138,6 +141,15 @@ public sealed unsafe class CudaKernels : IDisposable
         _dequantQ4_KFunc = _dequantModule.GetFunction("dequant_q4_k_f16");
         _dequantQ5_KFunc = _dequantModule.GetFunction("dequant_q5_k_f16");
         _dequantQ6_KFunc = _dequantModule.GetFunction("dequant_q6_k_f16");
+
+        // KV-cache quantization (optional — PTX may not be compiled yet)
+        string quantKvPath = Path.Combine(ptxDir, "quant_kv.ptx");
+        if (File.Exists(quantKvPath))
+        {
+            _quantKvModule = CudaModule.LoadFromFile(quantKvPath);
+            _quantKvQ8_0Func = _quantKvModule.GetFunction("quant_f16_to_q8_0");
+            _quantKvQ4_0Func = _quantKvModule.GetFunction("quant_f16_to_q4_0");
+        }
     }
 
     /// <summary>RMS normalization. One block per row.</summary>
@@ -650,6 +662,40 @@ public sealed unsafe class CudaKernels : IDisposable
         }
     }
 
+    /// <summary>
+    /// Quantizes a single row of FP16 KV data to Q8_0 or Q4_0 on the GPU.
+    /// Used for KV-cache quantize-on-evict.
+    /// </summary>
+    /// <param name="src">Device pointer to FP16 input [elementCount].</param>
+    /// <param name="dst">Device pointer to quantized output buffer.</param>
+    /// <param name="elementCount">Number of elements to quantize (must be multiple of 32).</param>
+    /// <param name="dtype">Target quantization type.</param>
+    /// <param name="stream">CUDA stream.</param>
+    public unsafe void LaunchQuantKv(nint src, nint dst, int elementCount,
+                                      Core.Configuration.KvCacheDType dtype, nint stream)
+    {
+        if (_quantKvModule == null)
+            throw new InvalidOperationException(
+                "KV-cache quantization kernels not available. Compile native/kernels/quant_kv.cu to PTX.");
+
+        int totalBlocks = elementCount / 32;
+        nint srcArg = src, dstArg = dst;
+        int tbArg = totalBlocks;
+        void** args = stackalloc void*[] { &srcArg, &dstArg, &tbArg };
+        uint gridDim = (uint)((totalBlocks + BlockSize - 1) / BlockSize);
+
+        nint func = dtype switch
+        {
+            Core.Configuration.KvCacheDType.Q8_0 => _quantKvQ8_0Func,
+            Core.Configuration.KvCacheDType.Q4_0 => _quantKvQ4_0Func,
+            _ => throw new NotSupportedException($"KV quantization not supported for {dtype}")
+        };
+
+        CudaDriverApi.cuLaunchKernel(func,
+                gridDim, 1, 1, BlockSize, 1, 1,
+                0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <inheritdoc/>
     public void Dispose()
     {
@@ -676,5 +722,6 @@ public sealed unsafe class CudaKernels : IDisposable
         _perHeadRmsNormF32Module.Dispose();
         _rmsnormF32Module.Dispose();
         _quantizedGemvF32InModule.Dispose();
+        _quantKvModule?.Dispose();
     }
 }

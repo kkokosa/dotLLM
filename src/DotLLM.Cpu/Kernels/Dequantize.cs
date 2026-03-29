@@ -14,6 +14,9 @@ namespace DotLLM.Cpu.Kernels;
 /// </summary>
 public static unsafe partial class Dequantize
 {
+    /// <summary>Q4_0 block size in bytes: 2 (Half scale) + 16 (packed nibble bytes).</summary>
+    private const int Q4_0BlockBytes = 18;
+
     /// <summary>Q8_0 block size in bytes: 2 (Half scale) + 32 (sbyte quantized values).</summary>
     private const int Q8_0BlockBytes = 34;
 
@@ -34,6 +37,7 @@ public static unsafe partial class Dequantize
     {
         QuantizationType.F32 => elementCount * 4,
         QuantizationType.F16 => elementCount * 2,
+        QuantizationType.Q4_0 => elementCount / Q8_0GroupSize * Q4_0BlockBytes,
         QuantizationType.Q8_0 => elementCount / Q8_0GroupSize * Q8_0BlockBytes,
         QuantizationType.Q5_0 => elementCount / Q5_0GroupSize * Q5_0BlockBytes,
         QuantizationType.Q4_K => elementCount / KQuantGroupSize * Q4_K_BlockBytes,

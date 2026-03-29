@@ -269,12 +269,23 @@ public sealed unsafe class TransformerModel : IModel
                 kvCache.Update(kRef, vRef, positions, layer);
 
                 int seqKv = kvCache.CurrentLength;
-                var cachedK = kvCache.GetKeysRef(layer);
-                var cachedV = kvCache.GetValuesRef(layer);
 
-                Attention.Execute(q, (float*)cachedK.DataPointer, (float*)cachedV.DataPointer, attnOut,
-                    seqLen, seqKv, numHeads, numKvHeads, headDim, positions[0], _threadPool,
-                    _slidingWindowSize);
+                if (kvCache is IQuantizedKvCache qkvCache)
+                {
+                    // Quantized path: dequantize KV tiles on-the-fly during attention
+                    Attention.Execute(q, qkvCache, layer, attnOut,
+                        seqLen, seqKv, numHeads, numKvHeads, headDim, positions[0], _threadPool,
+                        _slidingWindowSize);
+                }
+                else
+                {
+                    var cachedK = kvCache.GetKeysRef(layer);
+                    var cachedV = kvCache.GetValuesRef(layer);
+
+                    Attention.Execute(q, (float*)cachedK.DataPointer, (float*)cachedV.DataPointer, attnOut,
+                        seqLen, seqKv, numHeads, numKvHeads, headDim, positions[0], _threadPool,
+                        _slidingWindowSize);
+                }
             }
             else
             {

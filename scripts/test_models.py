@@ -14,17 +14,24 @@ Usage:
     python scripts/test_models.py --download               # download missing models
     python scripts/test_models.py --device gpu             # GPU-only
     python scripts/test_models.py --device both            # run each test on CPU then GPU
+    python scripts/test_models.py --cache-type-k q8_0 --cache-type-v q4_0  # KV-cache quantization
+    python scripts/test_models.py --cache-type-k q8_0,q4_0 --cache-type-v q8_0,q4_0  # cartesian product
+    python scripts/test_models.py --save results.json      # save results to JSON
+    python scripts/test_models.py --show results.json      # display saved results
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
+import platform
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from itertools import product
 from pathlib import Path
 
 # Reuse model resolution and hybrid utilities from bench_compare
@@ -237,12 +244,18 @@ class TestResult:
 
 
 def _run_test(cli: Path, model_path: Path, tc: TestCase, device: str = "cpu",
-              gpu_layers: int | None = None) -> TestResult:
+              gpu_layers: int | None = None,
+              cache_type_k: str | None = None,
+              cache_type_v: str | None = None,
+              cache_window: int = 0) -> TestResult:
     """
     Run a single test case with --json output.
 
     Args:
         gpu_layers: If set, pass --gpu-layers N to the CLI (hybrid mode).
+        cache_type_k: KV-cache key quantization type (e.g. "q8_0").
+        cache_type_v: KV-cache value quantization type (e.g. "q4_0").
+        cache_window: Mixed-precision window size.
     """
     if cli.name == "dotnet":
         cmd = [
@@ -264,6 +277,12 @@ def _run_test(cli: Path, model_path: Path, tc: TestCase, device: str = "cpu",
         cmd += ["--gpu-layers", str(gpu_layers)]
     else:
         cmd += ["--device", device]
+    if cache_type_k:
+        cmd += ["--cache-type-k", cache_type_k]
+    if cache_type_v:
+        cmd += ["--cache-type-v", cache_type_v]
+    if cache_window > 0:
+        cmd += ["--cache-window", str(cache_window)]
 
     start = time.monotonic()
     try:
@@ -328,6 +347,39 @@ def _model_is_cached(tc: TestCase) -> bool:
     return len(cached) >= 1
 
 
+def _parse_cache_types(value: str | None) -> list[str]:
+    """Parse comma-separated cache type values, returning list (empty if None/f32-only)."""
+    if not value:
+        return []
+    types = [t.strip().lower() for t in value.split(",") if t.strip()]
+    return types
+
+
+def _cache_combos(k_types: list[str], v_types: list[str]) -> list[tuple[str, str]]:
+    """Generate cartesian product of K/V cache type combinations.
+
+    Returns list of (k_type, v_type) tuples. Empty list means no quantized cache runs.
+    """
+    if not k_types and not v_types:
+        return []
+    # Default to f32 if only one side is specified
+    if not k_types:
+        k_types = ["f32"]
+    if not v_types:
+        v_types = ["f32"]
+    combos = list(product(k_types, v_types))
+    # Filter out (f32, f32) — that's the baseline, not a cache quant run
+    combos = [(k, v) for k, v in combos if k != "f32" or v != "f32"]
+    return combos
+
+
+def _cache_label(k: str, v: str) -> str:
+    """Short label for a cache type combo."""
+    if k == v:
+        return f"KV:{k}"
+    return f"KV:{k}/{v}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Quick correctness smoke test across model architectures."
@@ -346,7 +398,22 @@ def main() -> int:
     parser.add_argument("--hybrid-modes", type=str, default=None,
                         help="Comma-separated fractions (0-1) of layers to offload to GPU. "
                              "E.g. '0.25,0.5' runs hybrid mode tests alongside regular device tests.")
+    parser.add_argument("--cache-type-k", type=str, default=None,
+                        help="KV-cache key quantization: q8_0, q4_0, or comma-separated for cartesian product "
+                             "(e.g. 'q8_0,q4_0'). Adds runs alongside baseline.")
+    parser.add_argument("--cache-type-v", type=str, default=None,
+                        help="KV-cache value quantization: q8_0, q4_0, or comma-separated for cartesian product.")
+    parser.add_argument("--cache-window", type=int, default=0,
+                        help="Mixed-precision window size for KV-cache quantization (default: 0 = all quantized).")
+    parser.add_argument("--save", type=str, default=None,
+                        help="Save results to a JSON file (e.g. --save results.json)")
+    parser.add_argument("--show", type=str, default=None,
+                        help="Load and display results from a JSON file (no tests run).")
     args = parser.parse_args()
+
+    # --show mode: load and display, then exit
+    if args.show:
+        return _show_results(args.show)
 
     # Default to --cached-only when no explicit mode is given
     if not args.download and not args.list:
@@ -395,27 +462,46 @@ def main() -> int:
     # Parse hybrid modes
     hybrid_modes = parse_hybrid_modes(args.hybrid_modes)
 
-    # Build run configs: list of (label, device, gpu_layers)
-    # Regular device runs + hybrid mode runs
+    # Parse cache type combos
+    k_types = _parse_cache_types(args.cache_type_k)
+    v_types = _parse_cache_types(args.cache_type_v)
+    cache_combos = _cache_combos(k_types, v_types)
+    cache_window = args.cache_window
+
+    # Build run configs
     has_hybrid = len(hybrid_modes) > 0
-    show_mode_col = len(devices) > 1 or has_hybrid
+    has_cache = len(cache_combos) > 0
+    multi_device = len(devices) > 1
+    show_extra = multi_device or has_hybrid or has_cache
 
     # Run tests
     print()
-    mode_col = "  Mode    " if show_mode_col else ""
-    print(f"{'Test':<35} {'Arch':<10}{mode_col} {'Result':<8} {'Time':>8}  Details")
-    print("=" * (115 if show_mode_col else 105))
+    if show_extra:
+        print(f"{'Test':<30} {'Device':<6} {'Mode':<16} {'Result':<8} {'Time':>8}  Details")
+    else:
+        print(f"{'Test':<30} {'Result':<8} {'Time':>8}  Details")
+    sep_width = 115 if show_extra else 70
+    print("=" * sep_width)
 
     passed = 0
     failed = 0
     skipped = 0
 
-    # Collect throughput data for summary table: { tc.name: { mode_key: (decode_tok_s, passed) } }
+    # Collect throughput data: { tc.name: { col_key: (decode_tok_s, passed) } }
     throughput_data: dict[str, dict[str, tuple[float, bool]]] = {}
-    # Ordered mode keys for column headers
-    mode_keys: list[str] = list(devices)
+    # Ordered column keys for summary table
+    mode_keys: list[str] = []
+    for device in devices:
+        mode_keys.append(device)
     for frac in hybrid_modes:
         mode_keys.append(f"h{int(frac * 100)}%")
+    for device in devices:
+        for k, v in cache_combos:
+            key = f"{device}+{_cache_label(k, v)}" if multi_device else _cache_label(k, v)
+            mode_keys.append(key)
+
+    # Collect all results for --save
+    all_results: list[dict] = []
 
     def _clean_detail(detail: str, prompt: str) -> str:
         if prompt in detail:
@@ -423,24 +509,53 @@ def main() -> int:
         for marker in ["Generation Complete", "Performance", "Prefill"]:
             if marker in detail:
                 detail = detail[:detail.index(marker)]
-        return detail.strip()[:60]
+        return detail.strip()[:55]
+
+    def _record_result(tc: TestCase, col_key: str, device: str, r: TestResult,
+                       cache_k: str = "f32", cache_v: str = "f32") -> None:
+        all_results.append({
+            "name": tc.name, "arch": tc.arch, "quant": tc.quant or "default",
+            "mode": col_key, "device": device,
+            "cache_type_k": cache_k, "cache_type_v": cache_v,
+            "passed": r.passed, "detail": r.detail,
+            "elapsed": round(r.elapsed, 3),
+            "decode_tok_s": round(r.decode_tok_s, 2),
+            "prefill_tok_s": round(r.prefill_tok_s, 2),
+        })
+
+    def _print_row(tc_name: str, device: str, mode: str, r: TestResult, prompt: str = "") -> None:
+        nonlocal passed, failed
+        time_str = f"{r.elapsed:.1f}s"
+        status = "PASS" if r.passed else "FAIL"
+        detail = _clean_detail(r.detail, prompt) if r.passed else r.detail[:55]
+        if r.passed:
+            passed += 1
+        else:
+            failed += 1
+        if show_extra:
+            print(f"{tc_name:<30} {device:<6} {mode:<16} {status:<8} {time_str:>8}  {detail}")
+        else:
+            print(f"{tc_name:<30} {status:<8} {time_str:>8}  {detail}")
 
     for tc in cases:
         # Check if model is available
         if not _model_is_cached(tc) and not args.download:
             skipped += 1
-            mode_label = "" if not show_mode_col else "          "
-            print(f"{tc.name:<35} {tc.arch:<10}{mode_label} {'SKIP':<8} {'':>8}  not cached (use --download)")
+            if show_extra:
+                print(f"{tc.name:<30} {'':6} {'':16} {'SKIP':<8} {'':>8}  not cached (use --download)")
+            else:
+                print(f"{tc.name:<30} {'SKIP':<8} {'':>8}  not cached (use --download)")
             continue
 
         # Resolve model (downloads if --download and not cached)
         try:
             model_path = resolve_model(tc.repo, tc.quant, quiet=True)
         except SystemExit:
-            num_runs = len(devices) + len(hybrid_modes)
-            failed += num_runs
-            mode_label = "" if not show_mode_col else "          "
-            print(f"{tc.name:<35} {tc.arch:<10}{mode_label} {'FAIL':<8} {'':>8}  model resolution failed")
+            failed += 1
+            if show_extra:
+                print(f"{tc.name:<30} {'':6} {'':16} {'FAIL':<8} {'':>8}  model resolution failed")
+            else:
+                print(f"{tc.name:<30} {'FAIL':<8} {'':>8}  model resolution failed")
             continue
 
         # Determine layer count for hybrid modes
@@ -452,47 +567,43 @@ def main() -> int:
 
         row: dict[str, tuple[float, bool]] = {}
 
-        # Regular device runs
+        # Baseline device runs (no cache quantization)
         for device in devices:
             r = _run_test(cli, model_path, tc, device=device)
-            time_str = f"{r.elapsed:.1f}s"
-            mode_label = f"  {device:<8}" if show_mode_col else ""
-
-            if r.passed:
-                passed += 1
-                detail = _clean_detail(r.detail, tc.prompt)
-                print(f"{tc.name:<35} {tc.arch:<10}{mode_label} {'PASS':<8} {time_str:>8}  {detail}")
-            else:
-                failed += 1
-                print(f"{tc.name:<35} {tc.arch:<10}{mode_label} {'FAIL':<8} {time_str:>8}  {r.detail}")
-
+            _print_row(tc.name, device, "", r, tc.prompt)
             row[device] = (r.decode_tok_s, r.passed)
+            _record_result(tc, device, device, r)
 
         # Hybrid mode runs
         if hybrid_modes and num_layers > 0:
             for frac in hybrid_modes:
                 gl = compute_gpu_layers(num_layers, frac)
                 pct = int(frac * 100)
-                hybrid_label = f"  h{pct}%({gl}L)" if show_mode_col else ""
+                col_key = f"h{pct}%"
+                mode_str = f"h{pct}%({gl}L)"
 
                 r = _run_test(cli, model_path, tc, gpu_layers=gl)
-                time_str = f"{r.elapsed:.1f}s"
+                _print_row(tc.name, "hybrid", mode_str, r, tc.prompt)
+                row[col_key] = (r.decode_tok_s, r.passed)
+                _record_result(tc, col_key, "hybrid", r)
 
-                if r.passed:
-                    passed += 1
-                    detail = _clean_detail(r.detail, tc.prompt)
-                    print(f"{tc.name:<35} {tc.arch:<10}{hybrid_label} {'PASS':<8} {time_str:>8}  {detail}")
-                else:
-                    failed += 1
-                    print(f"{tc.name:<35} {tc.arch:<10}{hybrid_label} {'FAIL':<8} {time_str:>8}  {r.detail}")
+        # Cache type combo runs — on ALL devices
+        for device in devices:
+            for cache_k, cache_v in cache_combos:
+                label = _cache_label(cache_k, cache_v)
+                col_key = f"{device}+{label}" if multi_device else label
 
-                row[f"h{pct}%"] = (r.decode_tok_s, r.passed)
+                r = _run_test(cli, model_path, tc, device=device,
+                              cache_type_k=cache_k, cache_type_v=cache_v,
+                              cache_window=cache_window)
+                _print_row(tc.name, device, label, r, tc.prompt)
+                row[col_key] = (r.decode_tok_s, r.passed)
+                _record_result(tc, col_key, device, r, cache_k, cache_v)
 
         if row:
             throughput_data[tc.name] = row
 
     # Summary
-    sep_width = 115 if show_mode_col else 105
     print("=" * sep_width)
     total = passed + failed + skipped
     print(f"\n{passed}/{total} passed, {failed} failed, {skipped} skipped")
@@ -500,6 +611,129 @@ def main() -> int:
     # Throughput summary table (only when multiple modes were tested)
     if len(mode_keys) > 1 and throughput_data:
         _print_throughput_summary(throughput_data, mode_keys, cases, hybrid_modes)
+
+    # Save results to JSON
+    if args.save:
+        _save_results(args.save, all_results, args)
+
+    return 1 if failed > 0 else 0
+
+
+def _save_results(path: str, results: list[dict], args: argparse.Namespace) -> None:
+    """Export test results to a structured JSON file."""
+    export = {
+        "label": "test_models",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "system": {
+            "cpu": platform.processor() or platform.machine(),
+            "cores": os.cpu_count() or 0,
+            "os": f"{platform.system()} {platform.release()}",
+        },
+        "config": {
+            "device": args.device,
+            "cache_type_k": args.cache_type_k,
+            "cache_type_v": args.cache_type_v,
+            "cache_window": args.cache_window,
+            "filter": args.filter,
+        },
+        "results": results,
+    }
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "w") as f:
+        json.dump(export, f, indent=2)
+    print(f"\n[save] Results written to {dest}")
+
+
+def _show_results(path: str) -> int:
+    """Load and display test results from a JSON file."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"Error loading {path}: {e}", file=sys.stderr)
+        return 1
+
+    results = data.get("results", [])
+    if not results:
+        print(f"No results found in {path}", file=sys.stderr)
+        return 1
+
+    # Print metadata
+    print(f"[show] {path}")
+    ts = data.get("timestamp", "")
+    if ts:
+        print(f"  Time:   {ts}")
+    system = data.get("system", {})
+    if system:
+        print(f"  System: {system.get('cpu', '?')} ({system.get('cores', '?')} cores)")
+    config = data.get("config", {})
+    if config.get("cache_type_k") or config.get("cache_type_v"):
+        print(f"  Cache:  K={config.get('cache_type_k', 'f32')} V={config.get('cache_type_v', 'f32')} "
+              f"window={config.get('cache_window', 0)}")
+
+    # Collect unique modes and build throughput data
+    mode_keys: list[str] = []
+    throughput_data: dict[str, dict[str, tuple[float, bool]]] = {}
+
+    for r in results:
+        mode = r.get("mode", "?")
+        if mode not in mode_keys:
+            mode_keys.append(mode)
+
+        name = r.get("name", "?")
+        if name not in throughput_data:
+            throughput_data[name] = {}
+        throughput_data[name][mode] = (r.get("decode_tok_s", 0), r.get("passed", False))
+
+    # Print results table
+    print()
+    show_extra = len(mode_keys) > 1
+    if show_extra:
+        print(f"{'Test':<30} {'Device':<6} {'Mode':<16} {'Result':<8} {'Time':>8}  Details")
+    else:
+        print(f"{'Test':<30} {'Result':<8} {'Time':>8}  Details")
+    sep_width = 115 if show_extra else 70
+    print("=" * sep_width)
+
+    passed = failed = 0
+    for r in results:
+        name = r.get("name", "?")
+        device = r.get("device", "")
+        mode = r.get("mode", "")
+        ok = r.get("passed", False)
+        elapsed = r.get("elapsed", 0)
+        detail = r.get("detail", "")[:55]
+        time_str = f"{elapsed:.1f}s"
+        status = "PASS" if ok else "FAIL"
+
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+
+        # Mode column: show cache/hybrid info, not bare device name
+        mode_display = mode if mode not in ("cpu", "gpu") else ""
+
+        if show_extra:
+            print(f"{name:<30} {device:<6} {mode_display:<16} {status:<8} {time_str:>8}  {detail}")
+        else:
+            print(f"{name:<30} {status:<8} {time_str:>8}  {detail}")
+
+    total = passed + failed
+    print("=" * sep_width)
+    print(f"\n{passed}/{total} passed, {failed} failed")
+
+    # Throughput summary
+    if len(mode_keys) > 1 and throughput_data:
+        # Build minimal TestCase list for the summary printer
+        seen: dict[str, TestCase] = {}
+        for r in results:
+            name = r.get("name", "?")
+            if name not in seen:
+                seen[name] = TestCase(name=name, repo="", quant=r.get("quant"), arch=r.get("arch", ""),
+                                      prompt="", expected="")
+        _print_throughput_summary(throughput_data, mode_keys, list(seen.values()), [])
 
     return 1 if failed > 0 else 0
 

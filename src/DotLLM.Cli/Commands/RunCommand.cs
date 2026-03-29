@@ -107,6 +107,24 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [Description("Output result as a single JSON object (suppresses all formatted output).")]
         [DefaultValue(false)]
         public bool Json { get; set; }
+
+        /// <summary>KV-cache key quantization type.</summary>
+        [CommandOption("--cache-type-k")]
+        [Description("KV-cache key quantization: f32 (default), q8_0, q4_0.")]
+        [DefaultValue("f32")]
+        public string CacheTypeK { get; set; } = "f32";
+
+        /// <summary>KV-cache value quantization type.</summary>
+        [CommandOption("--cache-type-v")]
+        [Description("KV-cache value quantization: f32 (default), q8_0, q4_0.")]
+        [DefaultValue("f32")]
+        public string CacheTypeV { get; set; } = "f32";
+
+        /// <summary>Mixed-precision window size for KV-cache quantization.</summary>
+        [CommandOption("--cache-window")]
+        [Description("Mixed-precision window: recent N tokens in full precision (0 = all quantized). Only used when --cache-type-k or --cache-type-v is set.")]
+        [DefaultValue(0)]
+        public int CacheWindow { get; set; }
     }
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
@@ -216,11 +234,26 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             if (!settings.Json)
                 Console.Write(settings.Prompt);
 
+            var kvConfig = new KvCacheConfig(
+                ParseKvCacheDType(settings.CacheTypeK),
+                ParseKvCacheDType(settings.CacheTypeV),
+                settings.CacheWindow);
+
             Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
             if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
-                kvFactory = (cfg, size) => cudaModel.CreateKvCache(size);
+            {
+                kvFactory = kvConfig.IsQuantized
+                    ? (cfg, size) => cudaModel.CreateKvCache(size, kvConfig)
+                    : (cfg, size) => cudaModel.CreateKvCache(size);
+            }
             else if (model is DotLLM.Cuda.HybridTransformerModel hybridModel)
                 kvFactory = (cfg, size) => hybridModel.CreateKvCache(size);
+            else if (kvConfig.IsQuantized)
+            {
+                kvFactory = (cfg, size) => new DotLLM.Engine.KvCache.QuantizedKvCache(
+                    cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, size,
+                    kvConfig.KeyDType, kvConfig.ValueDType, kvConfig.MixedPrecisionWindowSize);
+            }
 
             var generator = new TextGenerator(model, tokenizer, kvFactory);
             var totalSw = Stopwatch.StartNew();
@@ -267,8 +300,17 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             long modelWeightsBytes = fileSize - gguf.DataSectionOffset;
             long computeBytes = model.ComputeMemoryBytes;
             int cacheSize = Math.Min(promptLen + settings.MaxTokens, config.MaxSequenceLength);
-            long kvCacheBytes = (long)config.NumLayers * 2 * cacheSize
-                * config.NumKvHeads * config.HeadDim * sizeof(float);
+            // Use actual KV-cache bytes from engine timings (reflects quantization compression).
+            // Fall back to computed estimate for GPU caches (based on config).
+            long kvCacheBytes;
+            if (timings.KvCacheBytes > 0)
+                kvCacheBytes = timings.KvCacheBytes;
+            else if (kvConfig.IsQuantized)
+                kvCacheBytes = ComputeQuantizedKvBytes(config, cacheSize, kvConfig);
+            else
+                kvCacheBytes = (long)config.NumLayers * 2 * cacheSize
+                    * config.NumKvHeads * config.HeadDim
+                    * (model is DotLLM.Cuda.CudaTransformerModel ? sizeof(ushort) : sizeof(float));
             long totalMemory = modelWeightsBytes + computeBytes + kvCacheBytes;
 
             if (settings.Json)
@@ -335,7 +377,10 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 bodyLines.Add(new Markup("  [bold]Memory[/]"));
                 bodyLines.Add(new Markup(MemLine("Weights", modelWeightsBytes, "(memory-mapped)")));
                 bodyLines.Add(new Markup(MemLine("Compute", computeBytes, null)));
-                bodyLines.Add(new Markup(MemLine("KV Cache", kvCacheBytes, $"({cacheSize} slots)")));
+                string kvLabel = kvConfig.IsQuantized
+                    ? $"({cacheSize} slots, K:{settings.CacheTypeK} V:{settings.CacheTypeV})"
+                    : $"({cacheSize} slots)";
+                bodyLines.Add(new Markup(MemLine("KV Cache", kvCacheBytes, kvLabel)));
                 bodyLines.Add(new Markup("  [dim]──────────────────────────────────────────────────────[/]"));
                 bodyLines.Add(new Markup(MemLine("Total", totalMemory, null)));
                 bodyLines.Add(new Text(""));
@@ -423,4 +468,38 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         if (settings.Seed.HasValue) parts.Add($"seed={settings.Seed.Value}");
         return string.Join(", ", parts);
     }
+
+    private static long ComputeQuantizedKvBytes(ModelConfig config, int cacheSize, KvCacheConfig kvConfig)
+    {
+        int kvStride = config.NumKvHeads * config.HeadDim;
+        int window = Math.Min(kvConfig.MixedPrecisionWindowSize, cacheSize);
+        int quantSlots = Math.Max(0, cacheSize - window);
+        int fpBytesPerRow = kvStride * sizeof(float); // FP32 on CPU, FP16 on GPU (close enough for estimate)
+
+        int kQuantRowBytes = kvConfig.KeyDType switch
+        {
+            KvCacheDType.Q8_0 => kvStride / 32 * 34,
+            KvCacheDType.Q4_0 => kvStride / 32 * 18,
+            _ => fpBytesPerRow
+        };
+        int vQuantRowBytes = kvConfig.ValueDType switch
+        {
+            KvCacheDType.Q8_0 => kvStride / 32 * 34,
+            KvCacheDType.Q4_0 => kvStride / 32 * 18,
+            _ => fpBytesPerRow
+        };
+
+        // Quantized region + full-precision window
+        long quantBytes = (long)config.NumLayers * quantSlots * (kQuantRowBytes + vQuantRowBytes);
+        long windowBytes = (long)config.NumLayers * window * fpBytesPerRow * 2; // K + V
+        return quantBytes + windowBytes;
+    }
+
+    private static KvCacheDType ParseKvCacheDType(string value) => value.ToLowerInvariant() switch
+    {
+        "f32" or "fp32" => KvCacheDType.F32,
+        "q8_0" or "q8" => KvCacheDType.Q8_0,
+        "q4_0" or "q4" => KvCacheDType.Q4_0,
+        _ => throw new ArgumentException($"Unknown KV-cache type: '{value}'. Supported: f32, q8_0, q4_0.")
+    };
 }
