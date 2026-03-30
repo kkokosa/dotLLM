@@ -37,6 +37,7 @@ See [CUDA.md](CUDA.md) for the low-level architecture: PTX loading, P/Invoke dec
 | `CudaWeights` | `CudaWeights.cs` | Weight upload from GGUF mmap to GPU |
 | `CudaForwardState` | `CudaForwardState.cs` | GPU scratch buffer management |
 | `CudaKvCache` | `CudaKvCache.cs` | GPU-resident FP16 KV-cache |
+| `CudaQuantizedKvCache` | `CudaQuantizedKvCache.cs` | GPU quantized KV-cache (Q8_0/Q4_0 + FP16 window) |
 | `CudaKernels` | `CudaKernels.cs` | PTX module loading + typed kernel launch |
 | `CudaGemm` | `CudaGemm.cs` | cuBLAS FP16 GEMM/GEMV wrappers |
 | `CudaModule` | `CudaModule.cs` | PTX file loading via `cuModuleLoadData` |
@@ -185,7 +186,7 @@ FP16 device-resident, pre-allocated per layer.
 - **Update**: `cuMemcpyDtoD` — copy new K/V rows from scratch buffers to cache positions
 - **Memory**: `2 × numLayers × numKvHeads × headDim × maxSeqLen × 2` bytes
 
-See [KV_CACHE.md](KV_CACHE.md) for general KV-cache design (paged attention, quantization, prefix caching are future steps).
+See [KV_CACHE.md](KV_CACHE.md) for general KV-cache design (KV-cache quantization is implemented; paged attention and prefix caching are future steps).
 
 ## Quantization on GPU
 
@@ -409,13 +410,13 @@ GPU layers compute in FP16 (Half precision). At the boundary, the hidden state i
 
 - `HybridTransformerModel` — `IModel` implementation orchestrating split forward pass
 - `HybridKvCache` — Routes `IKvCache` operations to `CudaKvCache` or `SimpleKvCache` by layer
+- `CudaQuantizedKvCache` — Q8_0/Q4_0 GPU KV-cache with FP16 scratch-buffer attention (see [KV_CACHE.md](KV_CACHE.md))
 - `CudaWeights.LoadFromGguf(numGpuLayers)` — Partial weight upload to VRAM
 
 ## Future Work
 
 - **Flash Attention**: Replace naive attention with tiled flash attention for O(N) memory and better SM utilization
 - **Fused Quantized GEMM**: Custom PTX kernels for Q4_K × FP16 (Marlin-style or MMQ-style) to eliminate per-projection dequant overhead during prefill
-- **KV-cache quantization** (Step 33): FP8/INT8 KV-cache compression
 - **Multi-GPU** (Step 51): NCCL-based tensor parallelism
 - **Fatbin distribution**: Pre-compiled SASS for common architectures to eliminate JIT overhead
 

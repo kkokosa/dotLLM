@@ -52,20 +52,38 @@ Paged Flash Attention kernels handle this indirection natively.
 
 Compress cached K/V to extend context capacity:
 
-| Format | Compression | Quality Impact |
-|--------|-------------|----------------|
-| FP16 | 1× (baseline) | None |
-| FP8 (E4M3) | 2× | Minimal (native on Hopper+) |
-| INT8 | 2× | Small (per-head scales) |
-| INT4 | 4× | Moderate (for older tokens) |
+| Format | CPU (vs FP32) | GPU (vs FP16) | Quality Impact |
+|--------|---------------|---------------|----------------|
+| FP32 (CPU) / FP16 (GPU) | 1× (baseline) | 1× (baseline) | None |
+| Q8_0 | 3.76× | 1.88× | Minimal |
+| Q4_0 | 7.11× | 3.56× | Small (for older tokens) |
 
-### Mixed Precision Cache
-- Recent tokens (within window W): FP16 (high attention weight, quality-sensitive)
-- Older tokens: INT8 or INT4 (low attention weight, less quality-sensitive)
-- Configurable window size and quantization thresholds.
+### Implementation
 
-Configured via `KvCacheConfig { DType, MixedPrecisionWindowSize }`.
-Orthogonal to weight quantization — Q4_K_M model can use FP8 cache.
+**Dual-region storage** with quantize-on-evict:
+1. **Quantized buffer** (append-only): Q8_0/Q4_0 blocks for positions outside the window
+2. **Full-precision ring buffer**: FP32 (CPU) or FP16 (GPU) for the most recent W tokens
+
+On each new token write, the oldest window entry is quantized and appended to the quantized buffer. Separate key/value quantization types are supported (e.g., Q8_0 keys + Q4_0 values).
+
+### Key Classes
+- `QuantizedKvCache` — CPU implementation in `DotLLM.Engine`
+- `CudaQuantizedKvCache` — GPU implementation in `DotLLM.Cuda`
+- `IQuantizedKvCache` — Interface extending `IKvCache` for quantized access
+- `KvCacheConfig { KeyDType, ValueDType, MixedPrecisionWindowSize }` — Configuration
+
+### Attention Integration
+- **CPU**: Per-tile dequantization inside tiled attention kernel (`Attention.ExecuteTiledQuantizedHead`). Phase 1 processes quantized region with on-the-fly dequant, Phase 2 reads FP32 window directly.
+- **GPU**: Scratch-buffer approach — dequant quantized region + ring-ordered window copy into temporary FP16 buffer, then standard attention kernel.
+
+### CLI
+```
+--cache-type-k q8_0    # key quantization (f32, q8_0, q4_0)
+--cache-type-v q4_0    # value quantization (f32, q8_0, q4_0)
+--cache-window 64      # recent tokens in full precision (0 = all quantized)
+```
+
+Orthogonal to weight quantization — Q4_K_M model can use Q8_0 KV-cache.
 
 ## Prompt Caching / Automatic Prefix Sharing
 
