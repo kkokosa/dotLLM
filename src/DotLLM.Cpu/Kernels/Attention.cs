@@ -1,5 +1,5 @@
-using System.Buffers;
 using System.Numerics.Tensors;
+using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
@@ -644,7 +644,8 @@ public static class Attention
                     qStride, kvStride, kQuantRowBytes, vQuantRowBytes,
                     positionOffset, tileSize, slidingWindowSize ?? 0,
                     kvCache.KeyDType, kvCache.ValueDType,
-                    h, h / (numHeads / numKvHeads));
+                    h, h / (numHeads / numKvHeads),
+                    kvCache.WindowCapacity);
             }
         }
         else
@@ -662,7 +663,8 @@ public static class Attention
                 KQuantRowBytes = kQuantRowBytes, VQuantRowBytes = vQuantRowBytes,
                 TileSize = tileSize,
                 SlidingWindowSize = slidingWindowSize ?? 0,
-                KeyDType = kvCache.KeyDType, ValueDType = kvCache.ValueDType
+                KeyDType = kvCache.KeyDType, ValueDType = kvCache.ValueDType,
+                WindowCapacity = kvCache.WindowCapacity
             };
             pool.Dispatch((nint)(&ctx), &QuantizedTiledAttentionWorker);
         }
@@ -693,6 +695,7 @@ public static class Attention
         public int SlidingWindowSize;
         public KvCacheDType KeyDType;
         public KvCacheDType ValueDType;
+        public int WindowCapacity;
     }
 
     [SkipLocalsInit]
@@ -715,7 +718,8 @@ public static class Attention
                 ctx.QStride, ctx.KvStride, ctx.KQuantRowBytes, ctx.VQuantRowBytes,
                 ctx.PositionOffset, ctx.TileSize, ctx.SlidingWindowSize,
                 ctx.KeyDType, ctx.ValueDType,
-                h, h / ctx.GroupSize);
+                h, h / ctx.GroupSize,
+                ctx.WindowCapacity);
         }
     }
 
@@ -733,7 +737,8 @@ public static class Attention
         int qStride, int kvStride, int kQuantRowBytes, int vQuantRowBytes,
         int positionOffset, int tileSize, int slidingWindowSize,
         KvCacheDType keyDType, KvCacheDType valueDType,
-        int headIdx, int kvHeadIdx)
+        int headIdx, int kvHeadIdx,
+        int windowCapacity)
     {
         int seqKv = quantLen + windowLen;
         int window = slidingWindowSize;
@@ -743,8 +748,7 @@ public static class Attention
         int scratchElems = tileSize * headDim;
         float* kScratch;
         float* vScratch;
-        byte[]? kRented = null;
-        byte[]? vRented = null;
+        bool scratchAllocated = false;
 
         int scratchBytes = scratchElems * sizeof(float);
         if (scratchBytes <= StackAllocThreshold)
@@ -756,13 +760,9 @@ public static class Attention
         }
         else
         {
-            kRented = ArrayPool<byte>.Shared.Rent(scratchBytes);
-            vRented = ArrayPool<byte>.Shared.Rent(scratchBytes);
-            fixed (byte* kp = kRented, vp = vRented)
-            {
-                kScratch = (float*)kp;
-                vScratch = (float*)vp;
-            }
+            kScratch = (float*)NativeMemory.AlignedAlloc((nuint)scratchBytes, 64);
+            vScratch = (float*)NativeMemory.AlignedAlloc((nuint)scratchBytes, 64);
+            scratchAllocated = true;
         }
 
         try
@@ -839,10 +839,10 @@ public static class Attention
 
                     for (int j = 0; j < tileLen; j++)
                     {
-                        // Window index: position (tileBase + j) maps to ring index (tileBase + j - quantLen)
-                        int windowIdx = tileBase + j - quantLen;
+                        // Map logical position to ring buffer index
+                        int ringIdx = (tileBase + j) % windowCapacity;
                         var kRow = new ReadOnlySpan<float>(
-                            kWindow + windowIdx * kvStride + kvHeadIdx * headDim, headDim);
+                            kWindow + ringIdx * kvStride + kvHeadIdx * headDim, headDim);
                         scores[j] = TensorPrimitives.Dot(qRow, kRow) * scale;
                     }
 
@@ -862,9 +862,9 @@ public static class Attention
                     {
                         float w = scores[j];
                         if (w == 0f) continue;
-                        int windowIdx = tileBase + j - quantLen;
+                        int ringIdx = (tileBase + j) % windowCapacity;
                         var vRow = new ReadOnlySpan<float>(
-                            vWindow + windowIdx * kvStride + kvHeadIdx * headDim, headDim);
+                            vWindow + ringIdx * kvStride + kvHeadIdx * headDim, headDim);
                         TensorPrimitives.MultiplyAdd(vRow, w, outRow, outRow);
                     }
 
@@ -877,8 +877,11 @@ public static class Attention
         }
         finally
         {
-            if (kRented != null) ArrayPool<byte>.Shared.Return(kRented);
-            if (vRented != null) ArrayPool<byte>.Shared.Return(vRented);
+            if (scratchAllocated)
+            {
+                NativeMemory.AlignedFree(kScratch);
+                NativeMemory.AlignedFree(vScratch);
+            }
         }
     }
 

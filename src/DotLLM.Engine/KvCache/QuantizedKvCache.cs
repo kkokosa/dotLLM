@@ -33,6 +33,7 @@ public sealed unsafe class QuantizedKvCache : IQuantizedKvCache
     private readonly int _windowSize;
     private readonly int _keyQuantRowBytes;
     private readonly int _valueQuantRowBytes;
+    private readonly int[] _layerQuantizedLength; // per-layer eviction tracking
     private int _currentLength;
     private int _quantizedLength;
     private bool _disposed;
@@ -50,6 +51,9 @@ public sealed unsafe class QuantizedKvCache : IQuantizedKvCache
     public int WindowLength => _windowSize > 0
         ? Math.Min(_currentLength, _windowSize)
         : 0;
+
+    /// <inheritdoc/>
+    public int WindowCapacity => _windowSize;
 
     /// <inheritdoc/>
     public KvCacheDType KeyDType { get; }
@@ -90,9 +94,12 @@ public sealed unsafe class QuantizedKvCache : IQuantizedKvCache
             throw new ArgumentException(
                 $"kvStride ({_kvStride}) must be a multiple of {BlockSize} for quantization.",
                 nameof(headDim));
+        System.Diagnostics.Debug.Assert(_kvStride % BlockSize == 0,
+            $"kvStride ({_kvStride}) must be a multiple of {BlockSize}");
 
         _keyQuantRowBytes = ComputeQuantRowBytes(_kvStride, keyDType);
         _valueQuantRowBytes = ComputeQuantRowBytes(_kvStride, valueDType);
+        _layerQuantizedLength = new int[numLayers];
 
         _keysQuant = new nint[numLayers];
         _valuesQuant = new nint[numLayers];
@@ -146,9 +153,8 @@ public sealed unsafe class QuantizedKvCache : IQuantizedKvCache
 
         if (_windowSize > 0)
         {
-            // Evict positions that fall outside the window for THIS layer.
-            // prevQuantLen/newQuantLen are the same for all layers → idempotent counter update.
-            int prevQuantLen = Math.Max(0, _currentLength - _windowSize);
+            // Per-layer eviction: each layer independently tracks how far it has evicted.
+            int prevQuantLen = _layerQuantizedLength[layerIndex];
             int newQuantLen = Math.Max(0, newLength - _windowSize);
 
             for (int evictPos = prevQuantLen; evictPos < newQuantLen; evictPos++)
@@ -161,6 +167,8 @@ public sealed unsafe class QuantizedKvCache : IQuantizedKvCache
                             (byte*)_valuesQuant[layerIndex] + (long)evictPos * _valueQuantRowBytes,
                             _kvStride, ValueDType);
             }
+
+            _layerQuantizedLength[layerIndex] = newQuantLen;
 
             // Write new FP32 data into window ring buffer (position-addressed, idempotent).
             for (int i = 0; i < seqLen; i++)

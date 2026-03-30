@@ -15,6 +15,9 @@ public interface IQuantizedKvCache : IKvCache
     /// <summary>Number of positions in the full-precision window.</summary>
     int WindowLength { get; }
 
+    /// <summary>Configured window capacity (the maximum window size, not current occupancy).</summary>
+    int WindowCapacity { get; }
+
     /// <summary>Quantization type for cached keys.</summary>
     KvCacheDType KeyDType { get; }
 

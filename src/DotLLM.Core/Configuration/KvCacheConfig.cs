@@ -21,4 +21,13 @@ public readonly record struct KvCacheConfig(
 
     /// <summary>Returns true if any quantization is configured (key or value).</summary>
     public bool IsQuantized => KeyDType != KvCacheDType.F32 || ValueDType != KvCacheDType.F32;
+
+    /// <summary>Parses a CLI string to <see cref="KvCacheDType"/>.</summary>
+    public static KvCacheDType ParseDType(string value) => value.ToLowerInvariant() switch
+    {
+        "f32" or "fp32" => KvCacheDType.F32,
+        "q8_0" or "q8" => KvCacheDType.Q8_0,
+        "q4_0" or "q4" => KvCacheDType.Q4_0,
+        _ => throw new ArgumentException($"Unknown KV-cache type: '{value}'. Supported: f32, q8_0, q4_0.")
+    };
 }

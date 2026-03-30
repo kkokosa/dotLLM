@@ -235,8 +235,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 Console.Write(settings.Prompt);
 
             var kvConfig = new KvCacheConfig(
-                ParseKvCacheDType(settings.CacheTypeK),
-                ParseKvCacheDType(settings.CacheTypeV),
+                KvCacheConfig.ParseDType(settings.CacheTypeK),
+                KvCacheConfig.ParseDType(settings.CacheTypeV),
                 settings.CacheWindow);
 
             Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
@@ -495,11 +495,4 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         return quantBytes + windowBytes;
     }
 
-    private static KvCacheDType ParseKvCacheDType(string value) => value.ToLowerInvariant() switch
-    {
-        "f32" or "fp32" => KvCacheDType.F32,
-        "q8_0" or "q8" => KvCacheDType.Q8_0,
-        "q4_0" or "q4" => KvCacheDType.Q4_0,
-        _ => throw new ArgumentException($"Unknown KV-cache type: '{value}'. Supported: f32, q8_0, q4_0.")
-    };
 }

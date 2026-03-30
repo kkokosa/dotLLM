@@ -247,8 +247,8 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             history.Add(new ChatMessage { Role = "system", Content = settings.SystemPrompt });
 
         var kvConfig = new KvCacheConfig(
-            ParseKvCacheDType(settings.CacheTypeK),
-            ParseKvCacheDType(settings.CacheTypeV),
+            KvCacheConfig.ParseDType(settings.CacheTypeK),
+            KvCacheConfig.ParseDType(settings.CacheTypeV),
             settings.CacheWindow);
 
         Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
@@ -419,14 +419,6 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         if (settings.Seed.HasValue) parts.Add($"seed={settings.Seed.Value}");
         return string.Join(", ", parts);
     }
-
-    private static KvCacheDType ParseKvCacheDType(string value) => value.ToLowerInvariant() switch
-    {
-        "f32" or "fp32" => KvCacheDType.F32,
-        "q8_0" or "q8" => KvCacheDType.Q8_0,
-        "q4_0" or "q4" => KvCacheDType.Q4_0,
-        _ => throw new ArgumentException($"Unknown KV-cache type: '{value}'. Supported: f32, q8_0, q4_0.")
-    };
 
     // Default ChatML template used as fallback when GGUF has no chat_template
     private const string DefaultChatMlTemplate =
