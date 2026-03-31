@@ -25,10 +25,10 @@ Roadmap steps: !`grep -E '^\| [0-9]+ \|' docs/ROADMAP.md | head -40`
    - If an issue number was provided in `$ARGUMENTS`, use that.
    - Otherwise, search: `gh issue list --search "Step {N}" --json number,title,state,labels --limit 10`
    - Match by step number in the title (e.g., "Step 27:" or "Step 27 —").
-   - If no issue is found, abort with: "No GitHub issue found for Step {N}. Create one first (per CLAUDE.md workflow)."
+   - If no issue is found, note that the issue needs to be created — the plan will include creating it as the first step (per CLAUDE.md: "every task starts with a GitHub issue").
    - If multiple matches, pick the open one. If ambiguous, ask the user.
-6. Fetch the issue details: `gh issue view <number> --json title,body,labels,comments`
-7. Use `AskUserQuestion` to confirm: "Plan implementation for Step {N}: {title} (Issue #{issue})?"
+6. If an existing issue was found, fetch its details: `gh issue view <number> --json title,body,labels,comments`
+7. Use `AskUserQuestion` to confirm: "Plan implementation for Step {N}: {title} (Issue #{issue} / issue will be created)?"
 
 ### Step 2 — Gather context
 
@@ -67,15 +67,18 @@ Use `EnterPlanMode` to enter planning mode. Then build a comprehensive implement
 
 ## Implementation plan
 
-### 1. Create branch
+### 1. Create GitHub issue (if none exists)
+Draft the issue title, body (with acceptance criteria derived from the roadmap description and docs), and create it via `gh issue create`. Use the returned issue number for the branch name.
+
+### 2. Create branch
 `git checkout -b issue/{issue_number}-{short-kebab-description} main`
 
-### 2. {First logical unit of work}
+### 3. {First logical unit of work}
 - Files to create/modify: ...
 - What to implement: ...
 - Key design decisions: ...
 
-### 3. {Next unit}
+### 4. {Next unit}
 ...
 
 ### N. Tests

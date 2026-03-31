@@ -53,6 +53,13 @@ public record InferenceOptions
     /// </summary>
     public IReadOnlyList<IStopCondition>? StopConditions { get; init; }
 
+    /// <summary>
+    /// Response format constraint. When set to <see cref="ResponseFormat.JsonObject"/>,
+    /// output is guaranteed to be syntactically valid JSON via FSM-based constrained decoding.
+    /// Null or <see cref="ResponseFormat.Text"/> means no constraint (default).
+    /// </summary>
+    public ResponseFormat? ResponseFormat { get; init; }
+
     /// <summary>CPU threading configuration for parallel inference. Default: auto (all cores).</summary>
     public ThreadingConfig Threading { get; init; } = ThreadingConfig.Auto;
 }

@@ -121,6 +121,12 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         [Description("Quantization filter when multiple GGUF files exist (e.g., Q4_K_M, Q8_0).")]
         public string? Quant { get; set; }
 
+        /// <summary>Constrain model output format.</summary>
+        [CommandOption("--response-format")]
+        [Description("Constrain model output format: 'text' (default) or 'json_object' (valid JSON).")]
+        [DefaultValue("text")]
+        public string ResponseFormat { get; set; } = "text";
+
         /// <summary>KV-cache key quantization type.</summary>
         [CommandOption("--cache-type-k")]
         [Description("KV-cache key quantization: f32 (default), q8_0, q4_0.")]
@@ -214,6 +220,9 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                 stopSequences.Add(marker);
         }
 
+        var responseFormat = settings.ResponseFormat.ToLowerInvariant() == "json_object"
+            ? (Core.Configuration.ResponseFormat)new Core.Configuration.ResponseFormat.JsonObject()
+            : null;
         var inferenceOptions = new InferenceOptions
         {
             Temperature = settings.Temperature,
@@ -225,6 +234,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             MaxTokens = settings.MaxTokens,
             Seed = settings.Seed,
             StopSequences = stopSequences,
+            ResponseFormat = responseFormat,
             Threading = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly)
         };
 

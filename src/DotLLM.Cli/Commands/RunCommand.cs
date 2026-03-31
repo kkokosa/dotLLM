@@ -108,6 +108,11 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [DefaultValue(false)]
         public bool Json { get; set; }
 
+        [CommandOption("--response-format")]
+        [Description("Constrain model output format: 'text' (default) or 'json_object' (valid JSON).")]
+        [DefaultValue("text")]
+        public string ResponseFormat { get; set; } = "text";
+
         /// <summary>KV-cache key quantization type.</summary>
         [CommandOption("--cache-type-k")]
         [Description("KV-cache key quantization: f32 (default), q8_0, q4_0.")]
@@ -200,6 +205,9 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
 
         // Build inference options from CLI flags
+        var responseFormat = settings.ResponseFormat.ToLowerInvariant() == "json_object"
+            ? (Core.Configuration.ResponseFormat)new Core.Configuration.ResponseFormat.JsonObject()
+            : null;
         var inferenceOptions = new InferenceOptions
         {
             Temperature = settings.Temperature,
@@ -210,6 +218,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             RepetitionPenaltyWindow = settings.RepeatLastN,
             MaxTokens = settings.MaxTokens,
             Seed = settings.Seed,
+            ResponseFormat = responseFormat,
             Threading = threadingInfo
         };
 

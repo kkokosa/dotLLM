@@ -1,6 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
+    <InternalsVisibleTo Include="DotLLM.Tests.Integration" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
     <ProjectReference Include="..\DotLLM.Models\DotLLM.Models.csproj" />
     <ProjectReference Include="..\DotLLM.Tokenizers\DotLLM.Tokenizers.csproj" />

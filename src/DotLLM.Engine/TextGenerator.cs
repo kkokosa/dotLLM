@@ -2,9 +2,11 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
+using DotLLM.Core.Constraints;
 using DotLLM.Core.Models;
 using DotLLM.Core.Sampling;
 using DotLLM.Core.Tensors;
+using DotLLM.Engine.Constraints;
 using DotLLM.Engine.KvCache;
 using DotLLM.Engine.Samplers;
 using DotLLM.Engine.Samplers.StopConditions;
@@ -77,6 +79,10 @@ public sealed class TextGenerator
         // Build sampling pipeline
         var pipeline = new SamplerPipeline(options);
 
+        // Build decoding constraint for structured output
+        IDecodingConstraint? constraint = options.ResponseFormat is ResponseFormat.JsonObject
+            ? new JsonConstraint(_tokenizer) : null;
+
         // Build stop conditions — use explicit list if provided, otherwise default set
         List<IStopCondition> stopConditions;
         if (options.StopConditions is not null)
@@ -127,10 +133,14 @@ public sealed class TextGenerator
             {
                 long samplerStart = Stopwatch.GetTimestamp();
                 var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
+                if (constraint != null)
+                    TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
                 firstTokenId = pipeline.Sample(logitSpan, generatedIds);
                 samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
             }
         }
+
+        constraint?.Advance(firstTokenId);
 
         // Check stop conditions for first token
         generatedIds.Add(firstTokenId);
@@ -170,10 +180,14 @@ public sealed class TextGenerator
                 {
                     long samplerStart = Stopwatch.GetTimestamp();
                     var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
+                    if (constraint != null)
+                        TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
                     nextTokenId = pipeline.Sample(logitSpan, generatedIds);
                     samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                 }
             }
+
+            constraint?.Advance(nextTokenId);
 
             generatedIds.Add(nextTokenId);
             decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
@@ -233,6 +247,10 @@ public sealed class TextGenerator
         // Build sampling pipeline
         var pipeline = new SamplerPipeline(options);
 
+        // Build decoding constraint for structured output
+        IDecodingConstraint? constraint = options.ResponseFormat is ResponseFormat.JsonObject
+            ? new JsonConstraint(_tokenizer) : null;
+
         // Build stop conditions
         List<IStopCondition> stopConditions;
         if (options.StopConditions is not null)
@@ -283,10 +301,14 @@ public sealed class TextGenerator
             {
                 long samplerStart = Stopwatch.GetTimestamp();
                 var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
+                if (constraint != null)
+                    TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
                 firstTokenId = pipeline.Sample(logitSpan, generatedIds);
                 samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
             }
         }
+
+        constraint?.Advance(firstTokenId);
 
         // Check stop conditions for first token
         generatedIds.Add(firstTokenId);
@@ -349,10 +371,14 @@ public sealed class TextGenerator
                 {
                     long samplerStart = Stopwatch.GetTimestamp();
                     var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
+                    if (constraint != null)
+                        TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
                     nextTokenId = pipeline.Sample(logitSpan, generatedIds);
                     samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                 }
             }
+
+            constraint?.Advance(nextTokenId);
 
             generatedIds.Add(nextTokenId);
             decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
