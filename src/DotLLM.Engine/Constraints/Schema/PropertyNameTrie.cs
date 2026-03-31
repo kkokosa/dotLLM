@@ -7,13 +7,17 @@ namespace DotLLM.Engine.Constraints.Schema;
 /// Used during key/value string generation to restrict valid characters at each position.
 /// Immutable after construction. Shared across all constraint clones.
 /// </summary>
+/// <remarks>
+/// Children stored as sorted <c>(char, int)[]</c> for L1 cache locality —
+/// typical nodes have 1–5 children, where linear search beats dictionary lookup.
+/// </remarks>
 internal sealed class PropertyNameTrie
 {
     /// <summary>
-    /// A trie node with children indexed by character.
+    /// A trie node with children as a sorted flat array for cache-friendly lookup.
     /// </summary>
     internal readonly record struct TrieNode(
-        Dictionary<char, int> Children,
+        (char Key, int Child)[] Children,
         bool IsTerminal,
         string? CompleteName);
 
@@ -28,57 +32,77 @@ internal sealed class PropertyNameTrie
     /// <param name="values">The strings to insert (property names or enum values).</param>
     public PropertyNameTrie(IEnumerable<string> values)
     {
-        var nodes = new List<TrieNode> { new(new Dictionary<char, int>(), false, null) }; // root
+        // Build phase uses Dictionary for convenience, then freezes to sorted arrays.
+        var builders = new List<(Dictionary<char, int> Children, bool IsTerminal, string? CompleteName)>
+        {
+            (new Dictionary<char, int>(), false, null) // root
+        };
 
         foreach (string value in values)
         {
             int current = 0;
             foreach (char c in value)
             {
-                if (!nodes[current].Children.TryGetValue(c, out int child))
+                if (!builders[current].Children.TryGetValue(c, out int child))
                 {
-                    child = nodes.Count;
-                    nodes[current].Children[c] = child;
-                    nodes.Add(new TrieNode(new Dictionary<char, int>(), false, null));
+                    child = builders.Count;
+                    builders[current].Children[c] = child;
+                    builders.Add((new Dictionary<char, int>(), false, null));
                 }
                 current = child;
             }
-            // Mark terminal — replace node to set IsTerminal + CompleteName
-            var existing = nodes[current];
-            nodes[current] = new TrieNode(existing.Children, true, value);
+            builders[current] = (builders[current].Children, true, value);
         }
 
-        _nodes = nodes.ToArray();
+        // Freeze: convert dictionaries to sorted flat arrays
+        _nodes = new TrieNode[builders.Count];
+        for (int i = 0; i < builders.Count; i++)
+        {
+            var b = builders[i];
+            var children = new (char Key, int Child)[b.Children.Count];
+            int j = 0;
+            foreach (var kvp in b.Children)
+                children[j++] = (kvp.Key, kvp.Value);
+            Array.Sort(children, (a, b) => a.Key.CompareTo(b.Key));
+            _nodes[i] = new TrieNode(children, b.IsTerminal, b.CompleteName);
+        }
     }
 
     /// <summary>
     /// Attempts to advance from <paramref name="nodeIndex"/> by character <paramref name="c"/>.
     /// </summary>
-    /// <param name="nodeIndex">Current trie node index.</param>
-    /// <param name="c">The character to advance by.</param>
-    /// <param name="childIndex">The child node index if found.</param>
-    /// <returns>True if a valid child exists for this character.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryGetChild(int nodeIndex, char c, out int childIndex)
     {
-        return _nodes[nodeIndex].Children.TryGetValue(c, out childIndex);
+        var children = _nodes[nodeIndex].Children;
+        // Linear search — typically 1–5 entries, faster than binary for small N.
+        for (int i = 0; i < children.Length; i++)
+        {
+            if (children[i].Key == c)
+            {
+                childIndex = children[i].Child;
+                return true;
+            }
+            if (children[i].Key > c)
+                break; // sorted — no need to continue
+        }
+        childIndex = 0;
+        return false;
     }
 
     /// <summary>
     /// Returns all valid next characters at the given trie position.
     /// </summary>
-    /// <param name="nodeIndex">Current trie node index.</param>
-    /// <returns>Enumerable of valid characters.</returns>
     public IEnumerable<char> GetValidChars(int nodeIndex)
     {
-        return _nodes[nodeIndex].Children.Keys;
+        var children = _nodes[nodeIndex].Children;
+        for (int i = 0; i < children.Length; i++)
+            yield return children[i].Key;
     }
 
     /// <summary>
     /// Whether the given node represents a complete string (terminal).
     /// </summary>
-    /// <param name="nodeIndex">Trie node index to check.</param>
-    /// <returns>True if this is a terminal node.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool IsTerminal(int nodeIndex)
     {
@@ -88,8 +112,6 @@ internal sealed class PropertyNameTrie
     /// <summary>
     /// Gets the complete string at a terminal node.
     /// </summary>
-    /// <param name="nodeIndex">Trie node index (must be terminal).</param>
-    /// <returns>The complete string, or null if not terminal.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public string? GetCompleteName(int nodeIndex)
     {
@@ -102,6 +124,6 @@ internal sealed class PropertyNameTrie
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool HasChildren(int nodeIndex)
     {
-        return _nodes[nodeIndex].Children.Count > 0;
+        return _nodes[nodeIndex].Children.Length > 0;
     }
 }

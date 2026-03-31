@@ -212,19 +212,15 @@ internal struct SchemaTracker
 
     /// <summary>
     /// Returns a composite state key for mask caching incorporating schema position.
+    /// Uses a struct key to avoid hash collisions (all fields compared exactly).
     /// </summary>
-    public readonly long GetSchemaStateKey(in JsonCharParser parser)
+    public readonly SchemaStateKey GetSchemaStateKey(in JsonCharParser parser)
     {
         int parserKey = parser.GetEffectiveStateKey();
-        int nodeIdx = _currentNodeIndex;
-
-        // Include emitted properties for the current object (top of stack)
         ulong emitted = _stackDepth > 0 ? _emittedProps[_stackDepth - 1] : 0;
-
-        // Include trie position if in key/enum string
         int triePos = _inKeyString ? _trieNodeIndex : (_inEnumString ? _enumTrieNodeIndex : 0);
 
-        return ((long)parserKey << 32) | (uint)HashCode.Combine(nodeIdx, emitted.GetHashCode(), triePos);
+        return new SchemaStateKey(parserKey, _currentNodeIndex, emitted, triePos);
     }
 
     /// <summary>Resets to initial state.</summary>
@@ -249,7 +245,10 @@ internal struct SchemaTracker
         ref readonly var node = ref GetNode(nodeIndex);
         var types = node.AllowedTypes;
 
-        // If anyOf, merge types from all alternatives
+        // If anyOf, merge types from all alternatives.
+        // TODO: This is an overapproximation — after the first character disambiguates the
+        // branch, nested constraints (required keys, enums, object shapes) from each branch
+        // are not enforced. Full branch narrowing requires parallel tracker states.
         if (node.AnyOfNodeIndices != null)
         {
             types = JsonSchemaType.None;
@@ -536,6 +535,9 @@ internal struct SchemaTracker
 
     // ── Value string (enum/const) tracking ──────────────────────────
 
+    // TODO: Non-string enum/const values (e.g. {"const":1}, {"enum":[true,false]}) are not
+    // character-level constrained — only type restriction applies. Full enforcement requires
+    // character-sequence matching for literals/numbers, a fundamentally different mechanism.
     private void StartValueString()
     {
         ref readonly var node = ref GetNode(_currentNodeIndex);
@@ -669,3 +671,13 @@ internal struct ArrayIndexStack
 {
     private int _element;
 }
+
+/// <summary>
+/// Collision-free cache key for schema constraint mask lookup.
+/// All fields are compared exactly — no hash compression.
+/// </summary>
+internal readonly record struct SchemaStateKey(
+    int ParserKey,
+    int NodeIdx,
+    ulong EmittedProps,
+    int TriePos);

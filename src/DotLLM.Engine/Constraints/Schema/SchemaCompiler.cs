@@ -134,15 +134,53 @@ internal static class SchemaCompiler
             ctx.Tries.Add(new PropertyNameTrie(names));
         }
 
-        // Parse required
-        if (element.TryGetProperty("required", out var reqProp) && propertyNames != null)
+        // Parse required — add unconstrained nodes for required keys absent from properties
+        if (element.TryGetProperty("required", out var reqProp))
         {
+            // Ensure we have a mutable property tracking even if no "properties" block
+            var propDict = properties != null
+                ? new Dictionary<string, int>(properties)
+                : new Dictionary<string, int>();
+            var names = propertyNames != null
+                ? new List<string>(propertyNames)
+                : new List<string>();
+            bool modified = false;
+
             foreach (var req in reqProp.EnumerateArray())
             {
                 string reqName = req.GetString()!;
-                int bitPos = Array.IndexOf(propertyNames, reqName);
-                if (bitPos >= 0 && bitPos < 64)
+                int bitPos = names.IndexOf(reqName);
+
+                // Required key not in properties — add unconstrained node so the
+                // bitmask covers it and the trie allows the key during generation.
+                if (bitPos < 0)
+                {
+                    bitPos = names.Count;
+                    names.Add(reqName);
+                    int unconstrainedIdx = ctx.Nodes.Count;
+                    ctx.Nodes.Add(SchemaNode.Unconstrained);
+                    propDict[reqName] = unconstrainedIdx;
+                    modified = true;
+                }
+
+                if (bitPos < 64)
                     requiredBitmask |= 1UL << bitPos;
+            }
+
+            if (modified)
+            {
+                properties = propDict.ToFrozenDictionary();
+                propertyNames = names.ToArray();
+                // Rebuild property name trie with the added keys
+                if (propertyTrieIndex >= 0)
+                    ctx.Tries[propertyTrieIndex] = new PropertyNameTrie(names);
+                else
+                {
+                    propertyTrieIndex = ctx.Tries.Count;
+                    ctx.Tries.Add(new PropertyNameTrie(names));
+                }
+                if (allowedTypes == JsonSchemaType.None)
+                    allowedTypes = JsonSchemaType.Object;
             }
         }
 

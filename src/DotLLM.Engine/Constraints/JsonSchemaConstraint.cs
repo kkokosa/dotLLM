@@ -20,7 +20,7 @@ public sealed class JsonSchemaConstraint : IDecodingConstraint
     private readonly CompiledSchema _schema;
 
     // Shared across clones. Not thread-safe — single-sequence use only.
-    private readonly Dictionary<long, TokenMask> _maskCache;
+    private readonly Dictionary<SchemaStateKey, TokenMask> _maskCache;
     private readonly int _maxCacheEntries;
 
     /// <summary>
@@ -48,7 +48,7 @@ public sealed class JsonSchemaConstraint : IDecodingConstraint
         _tokenizer = tokenizer;
         _vocabSize = tokenizer.VocabSize;
         _eosTokenId = tokenizer.EosTokenId;
-        _maskCache = new Dictionary<long, TokenMask>();
+        _maskCache = new Dictionary<SchemaStateKey, TokenMask>();
         _maxCacheEntries = maxCacheEntries;
     }
 
@@ -83,7 +83,7 @@ public sealed class JsonSchemaConstraint : IDecodingConstraint
     /// <inheritdoc/>
     public TokenMask GetAllowedTokens()
     {
-        long stateKey = _tracker.GetSchemaStateKey(in _parser);
+        var stateKey = _tracker.GetSchemaStateKey(in _parser);
         if (_maskCache.TryGetValue(stateKey, out var cached))
             return cached;
         return BuildAndCacheMask(stateKey);
@@ -103,7 +103,7 @@ public sealed class JsonSchemaConstraint : IDecodingConstraint
         // Don't clear cache — still valid for same schema + vocabulary
     }
 
-    private TokenMask BuildAndCacheMask(long stateKey)
+    private TokenMask BuildAndCacheMask(SchemaStateKey stateKey)
     {
         // Evict if cache is full (simple clear strategy)
         if (_maskCache.Count >= _maxCacheEntries)
@@ -128,6 +128,9 @@ public sealed class JsonSchemaConstraint : IDecodingConstraint
         return mask;
     }
 
+    // TODO: Perf — SchemaTracker is ~1.3KB due to InlineArray stacks. Copying it for each of
+    // the 128K vocab tokens (~160MB per cache miss) is measurable. Optimize by grouping tokens
+    // by first character or walking a tokenizer vocab trie so clones only happen at branch points.
     private bool IsTokenValid(int tokenId)
     {
         string tokenText = _tokenizer.DecodeToken(tokenId);
