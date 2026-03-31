@@ -93,7 +93,7 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
 | 39 | **JSON mode** :white_check_mark: | `JsonConstraint` — FSM-based constrained decoding guaranteeing syntactically valid JSON. `response_format: {"type": "json_object"}`. | 8 |
-| 40 | **JSON Schema** | `JsonSchemaConstraint` — Schema-compiled automaton. `response_format: {"type": "json_schema", ...}`. Token mask precomputation. | 39 |
+| 40 | **JSON Schema** :white_check_mark: | `JsonSchemaConstraint` — Schema-compiled automaton. `response_format: {"type": "json_schema", ...}`. Token mask precomputation. | 39 |
 | 41 | **Regex + CFG** | `RegexConstraint` (DFA-based) and `GrammarConstraint` (PDA, GBNF-style). | 39 |
 | 42 | **Tool calling** | `IToolCallParser`, chat template tool integration, structured output for function arguments. `finish_reason: "tool_calls"`. Parallel tool calls. | 16, 40 |
 | 34 | **ASP.NET server** | Minimal API endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`, `/v1/tokenize`, `/v1/detokenize`. Health + readiness probes. | 16, 17 |

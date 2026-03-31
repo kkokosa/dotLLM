@@ -80,8 +80,12 @@ public sealed class TextGenerator
         var pipeline = new SamplerPipeline(options);
 
         // Build decoding constraint for structured output
-        IDecodingConstraint? constraint = options.ResponseFormat is ResponseFormat.JsonObject
-            ? new JsonConstraint(_tokenizer) : null;
+        IDecodingConstraint? constraint = options.ResponseFormat switch
+        {
+            ResponseFormat.JsonObject => new JsonConstraint(_tokenizer),
+            ResponseFormat.JsonSchema js => new JsonSchemaConstraint(_tokenizer, js.Schema),
+            _ => null
+        };
 
         // Build stop conditions — use explicit list if provided, otherwise default set
         List<IStopCondition> stopConditions;
@@ -248,8 +252,12 @@ public sealed class TextGenerator
         var pipeline = new SamplerPipeline(options);
 
         // Build decoding constraint for structured output
-        IDecodingConstraint? constraint = options.ResponseFormat is ResponseFormat.JsonObject
-            ? new JsonConstraint(_tokenizer) : null;
+        IDecodingConstraint? constraint = options.ResponseFormat switch
+        {
+            ResponseFormat.JsonObject => new JsonConstraint(_tokenizer),
+            ResponseFormat.JsonSchema js => new JsonSchemaConstraint(_tokenizer, js.Schema),
+            _ => null
+        };
 
         // Build stop conditions
         List<IStopCondition> stopConditions;

@@ -407,6 +407,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 
 ## News
 
+- **2026-03** — JSON Schema constrained decoding — `JsonSchemaConstraint` layers schema tracking on `JsonCharParser` to enforce type constraints, required properties, enum values, nested structures. Schema compiled into flat node array with property-name tries. Zero-alloc `Clone()` via struct-copy. `--response-format json_schema --schema <json|@file>` CLI support ([#78](https://github.com/kkokosa/dotLLM/issues/78))
 - **2026-03** — **Phase 5 begins**: JSON mode constrained decoding — `JsonConstraint` FSM guarantees syntactically valid JSON output via per-token vocabulary masking. Stack-based PDA (RFC 8259), AVX2-vectorized logit masking, state-keyed mask cache. `--response-format json_object` CLI flag ([#76](https://github.com/kkokosa/dotLLM/issues/76))
 - **2026-03** — KV-cache quantization: Q8_0 and Q4_0 KV-cache compression on CPU and GPU (3.7–7.1× memory reduction). Separate `--cache-type-k`/`--cache-type-v` options, mixed-precision window `--cache-window N` keeps recent tokens in full precision. Dual-region storage with quantize-on-evict, per-tile dequantization in tiled attention ([#74](https://github.com/kkokosa/dotLLM/issues/74))
 - **2026-03** — CPU/GPU hybrid layer offloading: `--gpu-layers N` to run first N layers on GPU, remainder on CPU. Automatic FP16→FP32 hidden state transfer at boundary. Split KV-cache (GPU FP16 + CPU FP32). Partial VRAM usage proportional to offloaded layers ([#72](https://github.com/kkokosa/dotLLM/issues/72))
@@ -440,7 +441,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 | **2 — Practical Local Inference** | Engine metrics, benchmarks, Q4_K_M, chat templates, streaming, multi-threading, more architectures | Done (10/10) |
 | **3 — CPU Performance** | Decode dispatch, Q8_1 input, weight repacking, outer-product GEMM, tiled attention, fast exp, fusion, NUMA | In Progress (7/8) |
 | **4 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Done (3/3) |
-| **5 — Constrained Decoding & API** | JSON mode, JSON Schema, regex/CFG, tool calling, logit bias, OpenAI API server | In Progress (1/6) |
+| **5 — Constrained Decoding & API** | JSON mode, JSON Schema, regex/CFG, tool calling, logit bias, OpenAI API server | In Progress (2/6) |
 | **6 — Production Serving** | Continuous batching, paged KV-cache, prompt caching, speculative decoding, metrics | Planned |
 | **7 — Expand** | Hooks, logit lens, LoRA, MLA, SAE, multi-GPU, ROCm | Planned |
 

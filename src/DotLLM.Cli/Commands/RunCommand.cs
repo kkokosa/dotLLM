@@ -109,9 +109,13 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         public bool Json { get; set; }
 
         [CommandOption("--response-format")]
-        [Description("Constrain model output format: 'text' (default) or 'json_object' (valid JSON).")]
+        [Description("Constrain model output format: 'text' (default), 'json_object' (valid JSON), or 'json_schema' (schema-constrained JSON).")]
         [DefaultValue("text")]
         public string ResponseFormat { get; set; } = "text";
+
+        [CommandOption("--schema")]
+        [Description("JSON Schema string or file path (prefixed with @) for json_schema response format.")]
+        public string? Schema { get; set; }
 
         /// <summary>KV-cache key quantization type.</summary>
         [CommandOption("--cache-type-k")]
@@ -205,9 +209,12 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
 
         // Build inference options from CLI flags
-        var responseFormat = settings.ResponseFormat.ToLowerInvariant() == "json_object"
-            ? (Core.Configuration.ResponseFormat)new Core.Configuration.ResponseFormat.JsonObject()
-            : null;
+        var responseFormat = settings.ResponseFormat.ToLowerInvariant() switch
+        {
+            "json_object" => (Core.Configuration.ResponseFormat)new Core.Configuration.ResponseFormat.JsonObject(),
+            "json_schema" => BuildJsonSchemaFormat(settings.Schema),
+            _ => null
+        };
         var inferenceOptions = new InferenceOptions
         {
             Temperature = settings.Temperature,
@@ -436,6 +443,18 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         var sizePart = $"{FormatHelpers.FormatMiB(bytes),12}";
         var annPart = annotation != null ? $"   [dim]{Markup.Escape(annotation)}[/]" : "";
         return $"  {labelPart} {sizePart}{annPart}";
+    }
+
+    private static Core.Configuration.ResponseFormat BuildJsonSchemaFormat(string? schema)
+    {
+        if (string.IsNullOrEmpty(schema))
+            throw new InvalidOperationException("--schema is required when --response-format is json_schema");
+
+        string schemaJson = schema.StartsWith('@')
+            ? File.ReadAllText(schema[1..])
+            : schema;
+
+        return new Core.Configuration.ResponseFormat.JsonSchema { Schema = schemaJson };
     }
 
     private static string InferQuantLabel(string resolvedPath, string? quantFlag)

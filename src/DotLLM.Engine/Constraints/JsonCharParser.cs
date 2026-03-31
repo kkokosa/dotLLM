@@ -39,6 +39,21 @@ internal struct JsonCharParser
     /// </summary>
     public readonly bool IsComplete => _state == JsonParserState.Done;
 
+    /// <summary>Current parser state, for schema tracker observation.</summary>
+    internal readonly JsonParserState State => _state;
+
+    /// <summary>Current nesting depth.</summary>
+    internal readonly int Depth => _depth;
+
+    /// <summary>Whether the current string is an object key (KeyStringFlag set).</summary>
+    internal readonly bool IsKeyString => (_literalIndex & KeyStringFlag) != 0;
+
+    /// <summary>Current literal kind being parsed.</summary>
+    internal readonly LiteralKind CurrentLiteralKind => _literalKind;
+
+    /// <summary>Current literal character index (low byte only).</summary>
+    internal readonly int LiteralProgress => _literalIndex & 0xFF;
+
     /// <summary>
     /// Whether the parser is in a state where the consumed input so far
     /// could be extended to form valid JSON. Used for number termination

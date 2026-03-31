@@ -123,9 +123,14 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
 
         /// <summary>Constrain model output format.</summary>
         [CommandOption("--response-format")]
-        [Description("Constrain model output format: 'text' (default) or 'json_object' (valid JSON).")]
+        [Description("Constrain model output format: 'text' (default), 'json_object' (valid JSON), or 'json_schema' (schema-constrained JSON).")]
         [DefaultValue("text")]
         public string ResponseFormat { get; set; } = "text";
+
+        /// <summary>JSON Schema for json_schema response format.</summary>
+        [CommandOption("--schema")]
+        [Description("JSON Schema string or file path (prefixed with @) for json_schema response format.")]
+        public string? Schema { get; set; }
 
         /// <summary>KV-cache key quantization type.</summary>
         [CommandOption("--cache-type-k")]
@@ -220,9 +225,12 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                 stopSequences.Add(marker);
         }
 
-        var responseFormat = settings.ResponseFormat.ToLowerInvariant() == "json_object"
-            ? (Core.Configuration.ResponseFormat)new Core.Configuration.ResponseFormat.JsonObject()
-            : null;
+        var responseFormat = settings.ResponseFormat.ToLowerInvariant() switch
+        {
+            "json_object" => (Core.Configuration.ResponseFormat)new Core.Configuration.ResponseFormat.JsonObject(),
+            "json_schema" => BuildJsonSchemaFormat(settings.Schema),
+            _ => null
+        };
         var inferenceOptions = new InferenceOptions
         {
             Temperature = settings.Temperature,
@@ -414,6 +422,18 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
 
         var match = Regex.Match(Path.GetFileName(resolvedPath), @"\.(Q[\w]+)\.gguf$", RegexOptions.IgnoreCase);
         return match.Success ? match.Groups[1].Value : "unknown";
+    }
+
+    private static Core.Configuration.ResponseFormat BuildJsonSchemaFormat(string? schema)
+    {
+        if (string.IsNullOrEmpty(schema))
+            throw new InvalidOperationException("--schema is required when --response-format is json_schema");
+
+        string schemaJson = schema.StartsWith('@')
+            ? File.ReadAllText(schema[1..])
+            : schema;
+
+        return new Core.Configuration.ResponseFormat.JsonSchema { Schema = schemaJson };
     }
 
     private static string BuildSamplingLabel(Settings settings)
