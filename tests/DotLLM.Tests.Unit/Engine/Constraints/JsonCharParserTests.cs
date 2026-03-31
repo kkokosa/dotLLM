@@ -245,13 +245,13 @@ public class JsonCharParserTests
     // ── Clone and Reset ─────────────────────────────────────────────
 
     [Fact]
-    public void Clone_ProducesIndependentCopy()
+    public void StructCopy_ProducesIndependentCopy()
     {
         var parser = new JsonCharParser();
         foreach (char c in "{\"a\":")
             parser.TryAdvance(c);
 
-        var clone = parser.Clone();
+        var clone = parser; // struct copy — zero allocations
 
         // Advance original further
         parser.TryAdvance('1');
@@ -348,5 +348,52 @@ public class JsonCharParserTests
             Assert.True(parser.TryAdvance(c));
         // After comma in object, must have a key string, not }
         Assert.False(parser.TryAdvance('}'));
+    }
+
+    // ── Unicode escape in key (regression: KeyStringFlag preservation) ──
+
+    [Fact]
+    public void ParseComplete_UnicodeEscapeInKey()
+    {
+        // \u0061 = 'a' — key with unicode escape must still route to ObjectColon
+        Assert.True(ParseComplete("{\"\\u0061\":1}"));
+    }
+
+    [Fact]
+    public void ParseComplete_UnicodeEscapeInValue()
+    {
+        Assert.True(ParseComplete("{\"key\":\"\\u0041\"}"));
+    }
+
+    [Fact]
+    public void ParseComplete_MultipleUnicodeEscapesInKey()
+    {
+        Assert.True(ParseComplete("{\"\\u0061\\u0062\":true}"));
+    }
+
+    // ── Max depth rejection ─────────────────────────────────────────
+
+    [Fact]
+    public void Parse_ExceedMaxDepth_Rejected()
+    {
+        var parser = new JsonCharParser();
+        // 64 nested arrays = MaxDepth
+        for (int i = 0; i < 64; i++)
+            Assert.True(parser.TryAdvance('['));
+        // 65th should be rejected
+        Assert.False(parser.TryAdvance('['));
+    }
+
+    [Fact]
+    public void ParseComplete_ExactlyMaxDepth()
+    {
+        // 64 nested arrays with innermost value, then 64 closes
+        var parser = new JsonCharParser();
+        for (int i = 0; i < 64; i++)
+            Assert.True(parser.TryAdvance('['));
+        Assert.True(parser.TryAdvance('1'));
+        for (int i = 0; i < 64; i++)
+            Assert.True(parser.TryAdvance(']'));
+        Assert.True(parser.IsComplete);
     }
 }

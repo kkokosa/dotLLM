@@ -11,31 +11,31 @@ namespace DotLLM.Engine.Constraints;
 /// This is the core FSM for JSON constrained decoding. It processes one character
 /// at a time via <see cref="TryAdvance"/> and reports validity/completion.
 /// The nesting stack tracks object vs array contexts for proper brace/bracket matching.
+/// Fully unmanaged struct — zero heap allocations. Copies by value for cloning.
 /// </remarks>
 internal struct JsonCharParser
 {
     private const int MaxDepth = 64;
 
     private JsonParserState _state;
-    private NestingContext[] _stack;
+    private NestingStack _stack;
     private int _depth;
-    // For literal tracking (true/false/null): expected remaining chars
-    private string? _literalExpected;
-    private int _literalIndex;
+    private LiteralKind _literalKind;
+    private int _literalIndex; // low bits: counter/hex progress. Bit 8: KeyStringFlag
 
     /// <summary>Creates a new parser in the initial state.</summary>
     public JsonCharParser()
     {
         _state = JsonParserState.Start;
-        _stack = new NestingContext[MaxDepth];
+        _stack = default;
         _depth = 0;
-        _literalExpected = null;
+        _literalKind = LiteralKind.None;
         _literalIndex = 0;
     }
 
     /// <summary>
     /// Whether the parser has consumed a complete, valid JSON value
-    /// and is at nesting depth 0 (only trailing whitespace allowed).
+    /// and is at nesting depth 0 (only EOS allowed after this).
     /// </summary>
     public readonly bool IsComplete => _state == JsonParserState.Done;
 
@@ -53,14 +53,15 @@ internal struct JsonCharParser
     /// <summary>
     /// Returns a hash key representing the effective parser state for mask caching.
     /// Two parser states with the same key will allow the same set of next characters.
+    /// Includes literal kind/index and string substate (key vs value, unicode progress)
+    /// to avoid cache collisions between states that allow different token sets.
     /// </summary>
     public readonly int GetEffectiveStateKey()
     {
         int stateVal = (int)_state;
         int depthBucket = Math.Min(_depth, 2); // 0, 1, 2+ all behave the same for masking
         int topContext = _depth > 0 ? (int)_stack[_depth - 1] + 1 : 0;
-        int literalPart = _literalExpected != null ? (_literalIndex * 31 + _literalExpected.GetHashCode()) : 0;
-        return HashCode.Combine(stateVal, depthBucket, topContext, literalPart);
+        return HashCode.Combine(stateVal, depthBucket, topContext, (int)_literalKind, _literalIndex);
     }
 
     /// <summary>
@@ -99,26 +100,12 @@ internal struct JsonCharParser
         };
     }
 
-    /// <summary>Creates a deep copy of this parser.</summary>
-    public readonly JsonCharParser Clone()
-    {
-        var clone = new JsonCharParser
-        {
-            _state = _state,
-            _stack = (NestingContext[])_stack.Clone(),
-            _depth = _depth,
-            _literalExpected = _literalExpected,
-            _literalIndex = _literalIndex
-        };
-        return clone;
-    }
-
     /// <summary>Resets to initial state.</summary>
     public void Reset()
     {
         _state = JsonParserState.Start;
         _depth = 0;
-        _literalExpected = null;
+        _literalKind = LiteralKind.None;
         _literalIndex = 0;
     }
 
@@ -135,8 +122,8 @@ internal struct JsonCharParser
     private bool TryBeginRootValue(char c)
     {
         // JSON mode: root must be object or array
-        if (c == '{') { PushContext(NestingContext.Object); _state = JsonParserState.ObjectOpen; return true; }
-        if (c == '[') { PushContext(NestingContext.Array); _state = JsonParserState.ArrayOpen; return true; }
+        if (c == '{') return PushAndTransition(NestingContext.Object, JsonParserState.ObjectOpen);
+        if (c == '[') return PushAndTransition(NestingContext.Array, JsonParserState.ArrayOpen);
         return false;
     }
 
@@ -149,14 +136,14 @@ internal struct JsonCharParser
     private bool TryBeginValue(char c)
     {
         if (c == '"') { _state = JsonParserState.InString; return true; }
-        if (c == '{') { PushContext(NestingContext.Object); _state = JsonParserState.ObjectOpen; return true; }
-        if (c == '[') { PushContext(NestingContext.Array); _state = JsonParserState.ArrayOpen; return true; }
+        if (c == '{') return PushAndTransition(NestingContext.Object, JsonParserState.ObjectOpen);
+        if (c == '[') return PushAndTransition(NestingContext.Array, JsonParserState.ArrayOpen);
         if (c == '-') { _state = JsonParserState.InNumberSign; return true; }
         if (c == '0') { _state = JsonParserState.InNumberZero; return true; }
         if (c is >= '1' and <= '9') { _state = JsonParserState.InNumberIntDigits; return true; }
-        if (c == 't') { _literalExpected = "true"; _literalIndex = 1; _state = JsonParserState.InLiteral; return true; }
-        if (c == 'f') { _literalExpected = "false"; _literalIndex = 1; _state = JsonParserState.InLiteral; return true; }
-        if (c == 'n') { _literalExpected = "null"; _literalIndex = 1; _state = JsonParserState.InLiteral; return true; }
+        if (c == 't') { _literalKind = LiteralKind.True; _literalIndex = 1; _state = JsonParserState.InLiteral; return true; }
+        if (c == 'f') { _literalKind = LiteralKind.False; _literalIndex = 1; _state = JsonParserState.InLiteral; return true; }
+        if (c == 'n') { _literalKind = LiteralKind.Null; _literalIndex = 1; _state = JsonParserState.InLiteral; return true; }
         return false;
     }
 
@@ -222,7 +209,6 @@ internal struct JsonCharParser
         if (c == '\\') { _state = JsonParserState.InStringEscape; return true; }
         if (c == '"')
         {
-            // String closed — transition depends on context
             TransitionAfterStringClose();
             return true;
         }
@@ -239,7 +225,8 @@ internal struct JsonCharParser
         }
         if (c == 'u')
         {
-            _literalIndex = 0; // reuse as unicode hex digit counter
+            // Preserve KeyStringFlag, reset hex counter to 0
+            _literalIndex = _literalIndex & KeyStringFlag;
             _state = JsonParserState.InStringUnicode;
             return true;
         }
@@ -251,7 +238,7 @@ internal struct JsonCharParser
         if (IsHexDigit(c))
         {
             _literalIndex++;
-            if (_literalIndex >= 4)
+            if ((_literalIndex & 0xFF) >= 4)
                 _state = JsonParserState.InString;
             return true;
         }
@@ -271,13 +258,12 @@ internal struct JsonCharParser
     {
         if (c == '.') { _state = JsonParserState.InNumberDot; return true; }
         if (c is 'e' or 'E') { _state = JsonParserState.InNumberExp; return true; }
-        // Number terminates — try to process c as the next structural character
         return TryTerminateNumber(c);
     }
 
     private bool TryInNumberIntDigits(char c)
     {
-        if (c is >= '0' and <= '9') return true; // stay in same state
+        if (c is >= '0' and <= '9') return true;
         if (c == '.') { _state = JsonParserState.InNumberDot; return true; }
         if (c is 'e' or 'E') { _state = JsonParserState.InNumberExp; return true; }
         return TryTerminateNumber(c);
@@ -286,7 +272,7 @@ internal struct JsonCharParser
     private bool TryInNumberDot(char c)
     {
         if (c is >= '0' and <= '9') { _state = JsonParserState.InNumberFracDigits; return true; }
-        return false; // Must have at least one digit after dot
+        return false;
     }
 
     private bool TryInNumberFracDigits(char c)
@@ -300,13 +286,13 @@ internal struct JsonCharParser
     {
         if (c is '+' or '-') { _state = JsonParserState.InNumberExpSign; return true; }
         if (c is >= '0' and <= '9') { _state = JsonParserState.InNumberExpDigits; return true; }
-        return false; // Must have sign or digit after e/E
+        return false;
     }
 
     private bool TryInNumberExpSign(char c)
     {
         if (c is >= '0' and <= '9') { _state = JsonParserState.InNumberExpDigits; return true; }
-        return false; // Must have digit after exp sign
+        return false;
     }
 
     private bool TryInNumberExpDigits(char c)
@@ -322,7 +308,6 @@ internal struct JsonCharParser
     private bool TryTerminateNumber(char c)
     {
         TransitionAfterValue();
-        // Now re-process c in the new state
         return TryAdvance(c);
     }
 
@@ -330,13 +315,13 @@ internal struct JsonCharParser
 
     private bool TryInLiteral(char c)
     {
-        if (_literalExpected != null && _literalIndex < _literalExpected.Length &&
-            c == _literalExpected[_literalIndex])
+        char expected = ExpectedLiteralChar(_literalKind, _literalIndex);
+        if (expected != '\0' && c == expected)
         {
             _literalIndex++;
-            if (_literalIndex >= _literalExpected.Length)
+            if (_literalIndex >= LiteralLength(_literalKind))
             {
-                _literalExpected = null;
+                _literalKind = LiteralKind.None;
                 _literalIndex = 0;
                 TransitionAfterValue();
             }
@@ -403,10 +388,12 @@ internal struct JsonCharParser
         return true;
     }
 
-    private void PushContext(NestingContext context)
+    private bool PushAndTransition(NestingContext context, JsonParserState nextState)
     {
-        if (_depth < MaxDepth)
-            _stack[_depth++] = context;
+        if (_depth >= MaxDepth) return false;
+        _stack[_depth++] = context;
+        _state = nextState;
+        return true;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -418,6 +405,23 @@ internal struct JsonCharParser
     // Flag bit used in _literalIndex to mark that the current string is an object key
     private const int KeyStringFlag = 0x100;
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static char ExpectedLiteralChar(LiteralKind kind, int index) => kind switch
+    {
+        LiteralKind.True => "true"[index],
+        LiteralKind.False => "false"[index],
+        LiteralKind.Null => "null"[index],
+        _ => '\0'
+    };
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int LiteralLength(LiteralKind kind) => kind switch
+    {
+        LiteralKind.True => 4,
+        LiteralKind.False => 5,
+        LiteralKind.Null => 4,
+        _ => 0
+    };
 }
 
 /// <summary>Parser states for the JSON character-level FSM.</summary>
@@ -452,4 +456,23 @@ internal enum NestingContext : byte
 {
     Object,
     Array
+}
+
+/// <summary>Which JSON literal keyword is being parsed.</summary>
+internal enum LiteralKind : byte
+{
+    None,
+    True,
+    False,
+    Null
+}
+
+/// <summary>
+/// Inline fixed-size stack for nesting contexts. Zero heap allocations —
+/// copies by value when the containing struct is copied.
+/// </summary>
+[InlineArray(64)]
+internal struct NestingStack
+{
+    private NestingContext _element;
 }

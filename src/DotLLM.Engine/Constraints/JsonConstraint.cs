@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using DotLLM.Core.Constraints;
 using DotLLM.Tokenizers;
 
@@ -15,6 +16,9 @@ public sealed class JsonConstraint : IDecodingConstraint
     private readonly ITokenizer _tokenizer;
     private readonly int _vocabSize;
     private readonly int _eosTokenId;
+
+    // Shared across clones. Not thread-safe — single-sequence use only.
+    // See Step 35 (continuous batching) for concurrent access requirements.
     private readonly Dictionary<int, TokenMask> _maskCache;
 
     /// <summary>
@@ -33,7 +37,7 @@ public sealed class JsonConstraint : IDecodingConstraint
     /// <summary>Copy constructor for <see cref="Clone"/>.</summary>
     private JsonConstraint(JsonConstraint source)
     {
-        _parser = source._parser.Clone();
+        _parser = source._parser; // struct — copies by value, zero allocations
         _tokenizer = source._tokenizer;
         _vocabSize = source._vocabSize;
         _eosTokenId = source._eosTokenId;
@@ -48,7 +52,10 @@ public sealed class JsonConstraint : IDecodingConstraint
 
         string text = _tokenizer.DecodeToken(tokenId);
         foreach (char c in text)
-            _parser.TryAdvance(c); // Already validated by mask — always succeeds
+        {
+            bool ok = _parser.TryAdvance(c);
+            Debug.Assert(ok, $"Constraint allowed token that advances to invalid state at char '{c}'");
+        }
     }
 
     /// <inheritdoc/>
@@ -101,7 +108,8 @@ public sealed class JsonConstraint : IDecodingConstraint
         if (tokenText.Length == 0)
             return false;
 
-        var clone = _parser.Clone();
+        // Struct copy — zero allocations (JsonCharParser is fully unmanaged via InlineArray)
+        var clone = _parser;
         foreach (char c in tokenText)
         {
             if (!clone.TryAdvance(c))
