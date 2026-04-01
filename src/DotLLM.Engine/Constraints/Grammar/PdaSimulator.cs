@@ -45,9 +45,15 @@ internal struct PdaSimulator
     /// </summary>
     public readonly GrammarStateKey GetEffectiveStateKey()
     {
-        int topOfStack = _stackDepth > 0 ? _returnStack[_stackDepth - 1] : -1;
-        int depthBucket = Math.Min(_stackDepth, 3); // bucket deep nesting
-        return new GrammarStateKey(_position, depthBucket, topOfStack, _accepted ? 1 : 0);
+        // Hash the full stack to avoid aliasing distinct call contexts.
+        // Different stack contents at the same position can allow different tokens.
+        var hash = new HashCode();
+        hash.Add(_position);
+        hash.Add(_stackDepth);
+        hash.Add(_accepted ? 1 : 0);
+        for (int i = 0; i < _stackDepth; i++)
+            hash.Add(_returnStack[i]);
+        return new GrammarStateKey(hash.ToHashCode());
     }
 
     /// <summary>
@@ -112,13 +118,26 @@ internal struct PdaSimulator
         ref int position, ref int stackDepth,
         ref ReturnStack returnStack, ref bool accepted)
     {
-        // Explore epsilon transitions to find a terminal that matches 'c'
-        var exploreCandidates = new ExploreStack();
+        // Explore epsilon transitions to find a terminal that matches 'c'.
+        // Uses InlineArray for the first 64 entries, spills to List on overflow.
+        var inlineCandidates = new ExploreStack();
+        List<ExploreState>? overflow = null;
         int exploreCount = 0;
 
+        void AddCandidate(ExploreState s)
+        {
+            if (exploreCount < 64)
+                inlineCandidates[exploreCount] = s;
+            else
+                (overflow ??= new List<ExploreState>()).Add(s);
+            exploreCount++;
+        }
+
+        ExploreState GetCandidate(int i) =>
+            i < 64 ? inlineCandidates[i] : overflow![i - 64];
+
         // Seed with current state
-        exploreCandidates[0] = new ExploreState(position, stackDepth, returnStack);
-        exploreCount = 1;
+        AddCandidate(new ExploreState(position, stackDepth, returnStack));
 
         int steps = 0;
         int idx = 0;
@@ -126,7 +145,7 @@ internal struct PdaSimulator
         while (idx < exploreCount && steps < MaxEpsilonSteps)
         {
             steps++;
-            var state = exploreCandidates[idx++];
+            var state = GetCandidate(idx++);
 
             if (state.Position < 0 || state.Position >= _grammar.Positions.Length)
                 continue;
@@ -151,12 +170,8 @@ internal struct PdaSimulator
                     if (state.StackDepth < MaxDepth)
                     {
                         var newStack = state.ReturnStack;
-                        newStack[state.StackDepth] = pos.NextPosition; // return point
-                        if (exploreCount < 64)
-                        {
-                            exploreCandidates[exploreCount++] =
-                                new ExploreState(pos.CallTarget, state.StackDepth + 1, newStack);
-                        }
+                        newStack[state.StackDepth] = pos.NextPosition;
+                        AddCandidate(new ExploreState(pos.CallTarget, state.StackDepth + 1, newStack));
                     }
                     break;
 
@@ -164,16 +179,7 @@ internal struct PdaSimulator
                     if (state.StackDepth > 0)
                     {
                         int returnPos = state.ReturnStack[state.StackDepth - 1];
-                        if (exploreCount < 64)
-                        {
-                            exploreCandidates[exploreCount++] =
-                                new ExploreState(returnPos, state.StackDepth - 1, state.ReturnStack);
-                        }
-                    }
-                    else
-                    {
-                        // Stack empty + RuleReturn = grammar accepted (root rule completed)
-                        // Check if char is valid after acceptance — it's not, grammar is done
+                        AddCandidate(new ExploreState(returnPos, state.StackDepth - 1, state.ReturnStack));
                     }
                     break;
 
@@ -181,26 +187,16 @@ internal struct PdaSimulator
                     if (pos.Alternatives is not null)
                     {
                         foreach (int altEntry in pos.Alternatives)
-                        {
-                            if (exploreCount < 64)
-                            {
-                                exploreCandidates[exploreCount++] =
-                                    new ExploreState(altEntry, state.StackDepth, state.ReturnStack);
-                            }
-                        }
+                            AddCandidate(new ExploreState(altEntry, state.StackDepth, state.ReturnStack));
                     }
                     break;
 
                 case GrammarPositionKind.Join:
-                    if (pos.NextPosition >= 0 && exploreCount < 64)
-                    {
-                        exploreCandidates[exploreCount++] =
-                            new ExploreState(pos.NextPosition, state.StackDepth, state.ReturnStack);
-                    }
+                    if (pos.NextPosition >= 0)
+                        AddCandidate(new ExploreState(pos.NextPosition, state.StackDepth, state.ReturnStack));
                     break;
 
                 case GrammarPositionKind.Accept:
-                    // Grammar fully matched — no more chars allowed
                     break;
             }
         }
@@ -271,12 +267,25 @@ internal struct PdaSimulator
         if (_accepted)
             return true;
 
-        // Explore epsilon transitions from current state to see if we can reach acceptance
-        var exploreCandidates = new ExploreStack();
+        // Explore epsilon transitions to find if any path leads to acceptance.
+        // Uses InlineArray for the first 64 entries, spills to List on overflow.
+        var inlineCandidates = new ExploreStack();
+        List<ExploreState>? overflow = null;
         int exploreCount = 0;
 
-        exploreCandidates[0] = new ExploreState(_position, _stackDepth, _returnStack);
-        exploreCount = 1;
+        void AddCandidate(ExploreState s)
+        {
+            if (exploreCount < 64)
+                inlineCandidates[exploreCount] = s;
+            else
+                (overflow ??= new List<ExploreState>()).Add(s);
+            exploreCount++;
+        }
+
+        ExploreState GetCandidate(int i) =>
+            i < 64 ? inlineCandidates[i] : overflow![i - 64];
+
+        AddCandidate(new ExploreState(_position, _stackDepth, _returnStack));
 
         int steps = 0;
         int idx = 0;
@@ -284,7 +293,7 @@ internal struct PdaSimulator
         while (idx < exploreCount && steps < MaxEpsilonSteps)
         {
             steps++;
-            var state = exploreCandidates[idx++];
+            var state = GetCandidate(idx++);
 
             if (state.Position < 0 || state.Position >= _grammar.Positions.Length)
                 return true; // fell off end = accepted
@@ -293,16 +302,13 @@ internal struct PdaSimulator
             switch (pos.Kind)
             {
                 case GrammarPositionKind.Terminal:
-                    // Can't reach acceptance without consuming more chars
                     break;
 
                 case GrammarPositionKind.RuleReturn:
                     if (state.StackDepth > 0)
                     {
                         int returnPos = state.ReturnStack[state.StackDepth - 1];
-                        if (exploreCount < 64)
-                            exploreCandidates[exploreCount++] =
-                                new ExploreState(returnPos, state.StackDepth - 1, state.ReturnStack);
+                        AddCandidate(new ExploreState(returnPos, state.StackDepth - 1, state.ReturnStack));
                     }
                     else
                     {
@@ -311,13 +317,11 @@ internal struct PdaSimulator
                     break;
 
                 case GrammarPositionKind.RuleCall:
-                    // Need to enter rule — that rule might produce epsilon
-                    if (state.StackDepth < MaxDepth && exploreCount < 64)
+                    if (state.StackDepth < MaxDepth)
                     {
                         var newStack = state.ReturnStack;
                         newStack[state.StackDepth] = pos.NextPosition;
-                        exploreCandidates[exploreCount++] =
-                            new ExploreState(pos.CallTarget, state.StackDepth + 1, newStack);
+                        AddCandidate(new ExploreState(pos.CallTarget, state.StackDepth + 1, newStack));
                     }
                     break;
 
@@ -325,18 +329,13 @@ internal struct PdaSimulator
                     if (pos.Alternatives is not null)
                     {
                         foreach (int altEntry in pos.Alternatives)
-                        {
-                            if (exploreCount < 64)
-                                exploreCandidates[exploreCount++] =
-                                    new ExploreState(altEntry, state.StackDepth, state.ReturnStack);
-                        }
+                            AddCandidate(new ExploreState(altEntry, state.StackDepth, state.ReturnStack));
                     }
                     break;
 
                 case GrammarPositionKind.Join:
-                    if (pos.NextPosition >= 0 && exploreCount < 64)
-                        exploreCandidates[exploreCount++] =
-                            new ExploreState(pos.NextPosition, state.StackDepth, state.ReturnStack);
+                    if (pos.NextPosition >= 0)
+                        AddCandidate(new ExploreState(pos.NextPosition, state.StackDepth, state.ReturnStack));
                     break;
 
                 case GrammarPositionKind.Accept:
@@ -368,8 +367,9 @@ internal struct PdaSimulator
 
 /// <summary>
 /// Cache key for grammar constraint mask lookup.
+/// Single hash of (position, stack depth, full stack contents, accepted flag).
 /// </summary>
-internal readonly record struct GrammarStateKey(int Position, int DepthBucket, int TopOfStack, int AcceptedFlag);
+internal readonly record struct GrammarStateKey(int Hash);
 
 /// <summary>InlineArray for PDA return-point stack.</summary>
 [InlineArray(64)]

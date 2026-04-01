@@ -59,36 +59,18 @@ internal static class DfaBuilder
             }
         }
 
-        // Build charToClass mapping: chars between consecutive boundaries share a class
+        // Assign class IDs sequentially from sorted boundaries
         var charToClass = new byte[65536];
-        int classCount = 0;
-        int prev = 0;
-        foreach (int boundary in boundaries)
-        {
-            if (boundary > prev && classCount > 0)
-            {
-                // Fill previous range
-            }
-            if (boundary > prev || classCount == 0)
-            {
-                if (boundary > prev)
-                    classCount++; // new class starts at this boundary
-                prev = boundary;
-            }
-        }
-
-        // Rebuild properly: assign class IDs sequentially
         var sortedBoundaries = new List<int>(boundaries);
-        classCount = sortedBoundaries.Count;
+        int classCount = sortedBoundaries.Count;
+
         if (classCount > 255)
-        {
-            // Fallback: too many classes for byte storage — merge into fewer classes
-            // This is rare; typical regex patterns produce <50 classes
-            classCount = Math.Min(classCount, 255);
-        }
+            throw new ArgumentException(
+                $"Regex pattern produces {classCount} character equivalence classes (max 255). " +
+                "The pattern has too many distinct character-range boundaries for byte-indexed DFA compression.");
 
         var classReps = new char[classCount];
-        for (int i = 0; i < sortedBoundaries.Count && i < 255; i++)
+        for (int i = 0; i < sortedBoundaries.Count; i++)
         {
             int lo = sortedBoundaries[i];
             int hi = (i + 1 < sortedBoundaries.Count) ? sortedBoundaries[i + 1] - 1 : 65535;

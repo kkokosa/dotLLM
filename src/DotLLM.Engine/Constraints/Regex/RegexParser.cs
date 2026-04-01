@@ -308,7 +308,7 @@ internal static class RegexParser
             'D' => ('\0', [new CharRange('\0', '/'), new CharRange(':', '\uffff')]),
             'w' => ('\0', [new CharRange('0', '9'), new CharRange('A', 'Z'), new CharRange('a', 'z'), new CharRange('_', '_')]),
             'W' => ('\0', [new CharRange('\0', '/'), new CharRange(':', '@'), new CharRange('[', '^'), new CharRange('`', '`'), new CharRange('{', '\uffff')]),
-            's' => ('\0', [new CharRange(' ', ' '), new CharRange('\t', '\t'), new CharRange('\n', '\n'), new CharRange('\r', '\r'), new CharRange('\f', '\f')]),
+            's' => ('\0', [new CharRange('\t', '\r'), new CharRange(' ', ' ')]),  // \t \n \v \f \r and space
             'S' => ('\0', [new CharRange('\0', '\b'), new CharRange('\u000e', '\u001f'), new CharRange('!', '\uffff')]),
             'n' => ('\n', null),
             'r' => ('\r', null),
