@@ -84,6 +84,8 @@ public sealed class TextGenerator
         {
             ResponseFormat.JsonObject => new JsonConstraint(_tokenizer),
             ResponseFormat.JsonSchema js => new JsonSchemaConstraint(_tokenizer, js.Schema),
+            ResponseFormat.Regex rx => new RegexConstraint(_tokenizer, rx.Pattern),
+            ResponseFormat.Grammar gr => new GrammarConstraint(_tokenizer, gr.GbnfGrammar),
             _ => null
         };
 
@@ -256,6 +258,8 @@ public sealed class TextGenerator
         {
             ResponseFormat.JsonObject => new JsonConstraint(_tokenizer),
             ResponseFormat.JsonSchema js => new JsonSchemaConstraint(_tokenizer, js.Schema),
+            ResponseFormat.Regex rx => new RegexConstraint(_tokenizer, rx.Pattern),
+            ResponseFormat.Grammar gr => new GrammarConstraint(_tokenizer, gr.GbnfGrammar),
             _ => null
         };
 

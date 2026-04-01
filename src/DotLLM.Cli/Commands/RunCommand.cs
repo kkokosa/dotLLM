@@ -109,13 +109,21 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         public bool Json { get; set; }
 
         [CommandOption("--response-format")]
-        [Description("Constrain model output format: 'text' (default), 'json_object' (valid JSON), or 'json_schema' (schema-constrained JSON).")]
+        [Description("Constrain model output format: 'text' (default), 'json_object', 'json_schema', 'regex', or 'grammar'.")]
         [DefaultValue("text")]
         public string ResponseFormat { get; set; } = "text";
 
         [CommandOption("--schema")]
         [Description("JSON Schema string or file path (prefixed with @) for json_schema response format.")]
         public string? Schema { get; set; }
+
+        [CommandOption("--pattern")]
+        [Description("Regex pattern for regex response format. Entire output must match.")]
+        public string? Pattern { get; set; }
+
+        [CommandOption("--grammar")]
+        [Description("GBNF grammar string or file path (prefixed with @) for grammar response format.")]
+        public string? Grammar { get; set; }
 
         /// <summary>KV-cache key quantization type.</summary>
         [CommandOption("--cache-type-k")]
@@ -213,6 +221,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         {
             "json_object" => (Core.Configuration.ResponseFormat)new Core.Configuration.ResponseFormat.JsonObject(),
             "json_schema" => BuildJsonSchemaFormat(settings.Schema),
+            "regex" => BuildRegexFormat(settings.Pattern),
+            "grammar" => BuildGrammarFormat(settings.Grammar),
             _ => null
         };
         var inferenceOptions = new InferenceOptions
@@ -455,6 +465,26 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             : schema;
 
         return new Core.Configuration.ResponseFormat.JsonSchema { Schema = schemaJson };
+    }
+
+    private static Core.Configuration.ResponseFormat BuildRegexFormat(string? pattern)
+    {
+        if (string.IsNullOrEmpty(pattern))
+            throw new InvalidOperationException("--pattern is required when --response-format is regex");
+
+        return new Core.Configuration.ResponseFormat.Regex { Pattern = pattern };
+    }
+
+    private static Core.Configuration.ResponseFormat BuildGrammarFormat(string? grammar)
+    {
+        if (string.IsNullOrEmpty(grammar))
+            throw new InvalidOperationException("--grammar is required when --response-format is grammar");
+
+        string grammarText = grammar.StartsWith('@')
+            ? File.ReadAllText(grammar[1..])
+            : grammar;
+
+        return new Core.Configuration.ResponseFormat.Grammar { GbnfGrammar = grammarText };
     }
 
     private static string InferQuantLabel(string resolvedPath, string? quantFlag)

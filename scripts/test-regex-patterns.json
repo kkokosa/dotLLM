@@ -1,0 +1,20 @@
+[
+  {
+    "name": "date",
+    "pattern": "\\d{4}-\\d{2}-\\d{2}",
+    "prompt": "What is today's date? Output only the date in YYYY-MM-DD format:",
+    "max_tokens": 16
+  },
+  {
+    "name": "yes-no",
+    "pattern": "(yes|no|maybe)",
+    "prompt": "Is the sky blue? Answer with exactly one word: yes, no, or maybe:",
+    "max_tokens": 8
+  },
+  {
+    "name": "hex-color",
+    "pattern": "#[0-9a-f]{6}",
+    "prompt": "Output a hex color code for the color red:",
+    "max_tokens": 12
+  }
+]

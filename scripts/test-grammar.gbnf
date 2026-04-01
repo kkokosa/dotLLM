@@ -1,0 +1,17 @@
+# Test grammar: structured person description
+# Output: "Name Surname (age) - occupation"
+# e.g. "John Smith (34) - software engineer"
+
+root ::= name " (" age ") - " occupation
+
+name ::= first-name " " last-name
+first-name ::= upper lower+
+last-name ::= upper lower+
+
+upper ::= [A-Z]
+lower ::= [a-z]
+
+age ::= [1-9] [0-9]?
+
+occupation ::= word (" " word (" " word)?)?
+word ::= [a-z]+

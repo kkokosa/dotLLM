@@ -30,4 +30,24 @@ public abstract record ResponseFormat
         /// <summary>Whether to enforce strict schema adherence (default true).</summary>
         public bool Strict { get; init; } = true;
     }
+
+    /// <summary>
+    /// Constrain output to match a regex pattern (compiled to minimized DFA).
+    /// Entire output must match — implicit anchoring. Use cases: dates, phone numbers, enums.
+    /// </summary>
+    public sealed record Regex : ResponseFormat
+    {
+        /// <summary>The regex pattern. Entire output must match (implicit anchoring).</summary>
+        public required string Pattern { get; init; }
+    }
+
+    /// <summary>
+    /// Constrain output to conform to a GBNF grammar (compiled to pushdown automaton).
+    /// GBNF is the grammar format used by llama.cpp.
+    /// </summary>
+    public sealed record Grammar : ResponseFormat
+    {
+        /// <summary>The GBNF grammar definition.</summary>
+        public required string GbnfGrammar { get; init; }
+    }
 }
