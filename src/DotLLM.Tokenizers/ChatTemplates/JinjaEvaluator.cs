@@ -38,6 +38,7 @@ internal sealed class JinjaEvaluator
         ["replace"] = (input, args) => ReplaceFilter(input, args),
         ["selectattr"] = (input, args) => SelectAttrFilter(input, args),
         ["map"] = (input, args) => MapFilter(input, args),
+        ["safe"] = (input, _) => input, // no-op: marks string as HTML-safe (irrelevant for LLM templates)
     };
 
     public JinjaEvaluator(Dictionary<string, object?> context)

@@ -120,4 +120,31 @@ public class HermesToolCallParserTests
     {
         Assert.False(_parser.IsToolCallStart("Regular text without tags"));
     }
+
+    [Fact]
+    public void TryParse_UnquotedKeys_StillParsed()
+    {
+        // Qwen2.5 outputs JavaScript-style JSON with unquoted keys
+        const string text = """<tool_call>{name: "get_weather", arguments: {"location": "Paris"}}</tool_call>""";
+
+        var calls = _parser.TryParse(text);
+
+        Assert.NotNull(calls);
+        Assert.Single(calls);
+        Assert.Equal("get_weather", calls![0].FunctionName);
+        Assert.Contains("Paris", calls[0].Arguments);
+    }
+
+    [Fact]
+    public void TryParse_DoubleBraces_StillParsed()
+    {
+        // Some models emit doubled braces (Jinja2 escaping artifact)
+        const string text = """<tool_call>{{name: "search", arguments: {"q": "test"}}}</tool_call>""";
+
+        var calls = _parser.TryParse(text);
+
+        Assert.NotNull(calls);
+        Assert.Single(calls);
+        Assert.Equal("search", calls![0].FunctionName);
+    }
 }

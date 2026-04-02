@@ -27,9 +27,10 @@ public sealed class HermesToolCallParser : IToolCallParser
             int closeIndex = generatedText.IndexOf(CloseTag, jsonStart, StringComparison.Ordinal);
             if (closeIndex < 0)
             {
-                // No closing tag — try to parse what's there (partial output)
-                string partialJson = generatedText[jsonStart..].Trim();
-                var partialCalls = ToolCallJsonHelper.ParseToolCallJson(partialJson, "call");
+                // No closing tag (consumed as stop sequence, or partial output).
+                // Use ExtractAndParse to find balanced JSON despite extra braces.
+                string partialText = generatedText[jsonStart..].Trim();
+                var partialCalls = ToolCallJsonHelper.ExtractAndParse(partialText, "call");
                 if (partialCalls is { Length: > 0 })
                 {
                     foreach (var tc in partialCalls)
@@ -39,7 +40,7 @@ public sealed class HermesToolCallParser : IToolCallParser
             }
 
             string json = generatedText[jsonStart..closeIndex].Trim();
-            var parsed = ToolCallJsonHelper.ParseToolCallJson(json, "call");
+            var parsed = ToolCallJsonHelper.ExtractAndParse(json, "call");
             if (parsed is { Length: > 0 })
             {
                 foreach (var tc in parsed)

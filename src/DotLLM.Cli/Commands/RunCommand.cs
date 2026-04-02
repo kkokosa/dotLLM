@@ -8,6 +8,9 @@ using DotLLM.Core.Models;
 using DotLLM.Engine;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
+using DotLLM.Tokenizers;
+using DotLLM.Tokenizers.ChatTemplates;
+using DotLLM.Tokenizers.ToolCallParsers;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using Spectre.Console.Rendering;
@@ -142,6 +145,12 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [Description("Mixed-precision window: recent N tokens in full precision (0 = all quantized). Only used when --cache-type-k or --cache-type-v is set.")]
         [DefaultValue(0)]
         public int CacheWindow { get; set; }
+
+        /// <summary>Tool definitions.</summary>
+        [CommandOption("--tools")]
+        [Description("Tool definitions: JSON array string or file path (prefixed with @). " +
+                     "When provided, the prompt is formatted via the model's chat template with tool definitions.")]
+        public string? Tools { get; set; }
     }
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
@@ -216,6 +225,29 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
         var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
 
+        // Parse tool definitions and format prompt via chat template when tools are provided
+        ToolDefinition[]? tools = ChatCommand.ParseToolDefinitions(settings.Tools);
+        IToolCallParser? toolCallParser = null;
+        string effectivePrompt = settings.Prompt;
+        if (tools is { Length: > 0 })
+        {
+            string bosToken = tokenizer.DecodeToken(tokenizer.BosTokenId);
+            string eosToken = tokenizer.DecodeToken(tokenizer.EosTokenId);
+            var chatTemplate = GgufChatTemplateFactory.TryCreate(gguf.Metadata, tokenizer)
+                ?? new JinjaChatTemplate(ChatCommand.DefaultChatMlTemplateText, bosToken, eosToken);
+
+            var messages = new List<ChatMessage>
+            {
+                new() { Role = "user", Content = settings.Prompt }
+            };
+            effectivePrompt = chatTemplate.Apply(messages, new ChatTemplateOptions
+            {
+                AddGenerationPrompt = true,
+                Tools = tools
+            });
+            toolCallParser = GgufChatTemplateFactory.CreateToolCallParser(gguf.Metadata, config.Architecture);
+        }
+
         // Build inference options from CLI flags
         var responseFormat = settings.ResponseFormat.ToLowerInvariant() switch
         {
@@ -257,8 +289,21 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
         try
         {
+            // Add stop sequences for tool calling end-of-turn tokens
+            if (tools is { Length: > 0 })
+            {
+                string eosTokenStr = tokenizer.DecodeToken(tokenizer.EosTokenId);
+                var toolStopSeqs = new List<string>();
+                foreach (var marker in new[] { "<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|end|>", "</s>", "</tool_call>" })
+                {
+                    if (marker != eosTokenStr)
+                        toolStopSeqs.Add(marker);
+                }
+                inferenceOptions = inferenceOptions with { StopSequences = toolStopSeqs };
+            }
+
             if (!settings.Json)
-                Console.Write(settings.Prompt);
+                Console.Write(tools is { Length: > 0 } ? "" : settings.Prompt);
 
             var kvConfig = new KvCacheConfig(
                 KvCacheConfig.ParseDType(settings.CacheTypeK),
@@ -288,7 +333,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             FinishReason finishReason = FinishReason.Length;
             var generatedText = new System.Text.StringBuilder();
 
-            await foreach (var token in generator.GenerateStreamingTokensAsync(settings.Prompt, inferenceOptions))
+            await foreach (var token in generator.GenerateStreamingTokensAsync(effectivePrompt, inferenceOptions))
             {
                 if (settings.Json)
                     generatedText.Append(token.Text);
@@ -339,15 +384,40 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                     * (model is DotLLM.Cuda.CudaTransformerModel ? sizeof(ushort) : sizeof(float));
             long totalMemory = modelWeightsBytes + computeBytes + kvCacheBytes;
 
+            // Detect tool calls in generated output
+            string outputText = generatedText.ToString();
+            ToolCall[]? detectedToolCalls = null;
+            if (toolCallParser is not null && outputText.Length > 0)
+            {
+                // Strip stop sequence suffixes before parsing
+                foreach (var seq in inferenceOptions.StopSequences)
+                {
+                    if (outputText.EndsWith(seq, StringComparison.Ordinal))
+                    {
+                        outputText = outputText[..^seq.Length];
+                        break;
+                    }
+                }
+                detectedToolCalls = toolCallParser.TryParse(outputText);
+                if (detectedToolCalls is { Length: > 0 })
+                    finishReason = FinishReason.ToolCalls;
+            }
+
             if (settings.Json)
             {
                 var result = new
                 {
-                    text = generatedText.ToString(),
+                    text = outputText,
                     prompt = settings.Prompt,
                     model = Path.GetFileName(resolvedPath),
                     architecture = config.Architecture.ToString(),
                     finish_reason = finishReason.ToString().ToLowerInvariant(),
+                    tool_calls = detectedToolCalls?.Select(tc => new
+                    {
+                        id = tc.Id,
+                        function_name = tc.FunctionName,
+                        arguments = tc.Arguments,
+                    }).ToArray(),
                     usage = new
                     {
                         prompt_tokens = promptLen,

@@ -61,7 +61,9 @@ public sealed class JinjaChatTemplate : IChatTemplate
                         ["function"] = new Dictionary<string, object?>
                         {
                             ["name"] = tc.FunctionName,
-                            ["arguments"] = tc.Arguments,
+                            // Parse arguments JSON into dict so tojson in templates
+                            // produces correct output (not double-serialized).
+                            ["arguments"] = ParseJsonToDict(tc.Arguments) ?? tc.Arguments,
                         }
                     };
                     toolCalls.Add(tcDict);

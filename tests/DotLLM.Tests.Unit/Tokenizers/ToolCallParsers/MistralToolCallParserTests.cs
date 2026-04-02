@@ -91,4 +91,31 @@ public class MistralToolCallParserTests
     {
         Assert.False(_parser.IsToolCallStart("Regular text"));
     }
+
+    [Fact]
+    public void TryParse_V3Format_FuncNameAndArgs()
+    {
+        // Mistral v3 format: [TOOL_CALLS]funcname[ARGS]{json}
+        const string text = """[TOOL_CALLS]get_weather[ARGS]{"location": "Paris", "unit": "celsius"}""";
+
+        var calls = _parser.TryParse(text);
+
+        Assert.NotNull(calls);
+        Assert.Single(calls);
+        Assert.Equal("get_weather", calls![0].FunctionName);
+        Assert.Contains("Paris", calls[0].Arguments);
+    }
+
+    [Fact]
+    public void TryParse_V3Format_WithLeadingText()
+    {
+        const string text = """Sure, let me check. [TOOL_CALLS]get_time[ARGS]{"timezone": "CET"}""";
+
+        var calls = _parser.TryParse(text);
+
+        Assert.NotNull(calls);
+        Assert.Single(calls);
+        Assert.Equal("get_time", calls![0].FunctionName);
+        Assert.Contains("CET", calls[0].Arguments);
+    }
 }

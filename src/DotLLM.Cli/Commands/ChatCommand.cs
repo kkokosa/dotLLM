@@ -244,10 +244,10 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         string eosTokenStr = tokenizer.DecodeToken(tokenizer.EosTokenId);
         IChatTemplate chatTemplate;
         var jinjaTemplate = GgufChatTemplateFactory.TryCreate(gguf!.Metadata, tokenizer);
-        chatTemplate = jinjaTemplate ?? new JinjaChatTemplate(DefaultChatMlTemplate, bosTokenStr, eosTokenStr);
+        chatTemplate = jinjaTemplate ?? new JinjaChatTemplate(DefaultChatMlTemplateText, bosTokenStr, eosTokenStr);
 
         // Parse tool definitions
-        ToolDefinition[]? tools = ParseTools(settings.Tools);
+        ToolDefinition[]? tools = ParseToolDefinitions(settings.Tools);
         IToolCallParser? toolCallParser = tools is { Length: > 0 }
             ? GgufChatTemplateFactory.CreateToolCallParser(gguf.Metadata, config!.Architecture)
             : null;
@@ -257,7 +257,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         // The EOS stop condition handles eos_token_id, but the end-of-turn marker
         // may be a different token (e.g., <|im_end|> in ChatML, <|eot_id|> in Llama 3).
         var stopSequences = new List<string>();
-        foreach (var marker in new[] { "<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|end|>", "</s>" })
+        foreach (var marker in new[] { "<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|end|>", "</s>", "</tool_call>" })
         {
             if (marker != eosTokenStr) // avoid duplicate with EOS stop condition
                 stopSequences.Add(marker);
@@ -470,7 +470,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         string prompt = chatTemplate.Apply(history, templateOptions);
 
         if (verbose)
-            AnsiConsole.MarkupLine($"[dim grey][[verbose]] prompt ({prompt.Length} chars): {Markup.Escape(prompt.Length > 500 ? prompt[..500] + "..." : prompt)}[/]");
+            AnsiConsole.MarkupLine($"[dim grey][[verbose]] prompt ({prompt.Length} chars):\n{Markup.Escape(prompt)}[/]");
 
         // Generate response via streaming
         var sw = Stopwatch.StartNew();
@@ -686,7 +686,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         return string.Join(", ", parts);
     }
 
-    private static ToolDefinition[]? ParseTools(string? toolsInput)
+    internal static ToolDefinition[]? ParseToolDefinitions(string? toolsInput)
     {
         if (string.IsNullOrEmpty(toolsInput))
             return null;
@@ -747,7 +747,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
     }
 
     // Default ChatML template used as fallback when GGUF has no chat_template
-    private const string DefaultChatMlTemplate =
+    internal const string DefaultChatMlTemplateText =
         "{% for message in messages %}" +
         "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}" +
         "{% endfor %}" +

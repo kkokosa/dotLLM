@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace DotLLM.Tokenizers.ToolCallParsers;
 
@@ -22,6 +23,21 @@ internal static class ToolCallJsonHelper
         if (json.Length == 0)
             return null;
 
+        // Try strict JSON first
+        var result = TryParseStrict(json, idPrefix);
+        if (result is not null)
+            return result;
+
+        // Fallback: fix common model quirks (unquoted keys, extra braces)
+        string normalized = FixJavascriptStyleJson(json);
+        if (normalized != json)
+            return TryParseStrict(normalized, idPrefix);
+
+        return null;
+    }
+
+    private static ToolCall[]? TryParseStrict(string json, string idPrefix)
+    {
         try
         {
             using var doc = JsonDocument.Parse(json);
@@ -38,6 +54,22 @@ internal static class ToolCallJsonHelper
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Fixes common non-standard JSON patterns emitted by models:
+    /// unquoted keys (<c>{name:</c> → <c>{"name":</c>), extra trailing braces.
+    /// </summary>
+    private static string FixJavascriptStyleJson(string json)
+    {
+        // Quote unquoted keys: {name: or ,name: → {"name": or ,"name":
+        string result = Regex.Replace(json, @"(?<=[\{,])\s*(\w+)\s*:", " \"$1\":");
+
+        // Strip doubled outer braces: {{...}} → {...}
+        while (result.StartsWith("{{") && result.EndsWith("}}"))
+            result = result[1..^1];
+
+        return result;
     }
 
     /// <summary>

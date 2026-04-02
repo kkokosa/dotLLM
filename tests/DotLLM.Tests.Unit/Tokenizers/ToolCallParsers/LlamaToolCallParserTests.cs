@@ -63,8 +63,9 @@ public class LlamaToolCallParserTests
     }
 
     [Fact]
-    public void TryParse_WithoutMarker_FallsBackToJsonDetection()
+    public void TryParse_WithoutMarker_EntireResponseIsJson_DetectedAsToolCall()
     {
+        // Llama 3.2 lightweight models omit <|python_tag|> but output bare JSON
         const string text = """{"name": "get_weather", "parameters": {"location": "Tokyo"}}""";
 
         var calls = _parser.TryParse(text);
@@ -72,6 +73,21 @@ public class LlamaToolCallParserTests
         Assert.NotNull(calls);
         Assert.Single(calls);
         Assert.Equal("get_weather", calls![0].FunctionName);
+    }
+
+    [Fact]
+    public void TryParse_WithoutMarker_JsonEmbeddedInText_NotDetected()
+    {
+        // Model quoting a function call in prose — NOT a tool call
+        const string text = """
+            The function call with its proper arguments is:
+
+            {"name": "get_weather", "parameters": {"location": "Tokyo"}}
+            """;
+
+        var calls = _parser.TryParse(text);
+
+        Assert.Null(calls);
     }
 
     [Fact]
