@@ -42,8 +42,14 @@ public static class ToolCallSchemaBuilder
 
     /// <summary>
     /// Builds a JSON Schema for required tool calling with any of the provided tools.
-    /// Uses <c>anyOf</c> for multiple tools.
+    /// Uses <c>enum</c> for the name field to constrain to valid tool names.
     /// </summary>
+    /// <remarks>
+    /// For a single tool, delegates to <see cref="BuildForFunction"/> which uses <c>const</c>
+    /// and the tool's full parameter schema. For multiple tools, uses a flat object schema
+    /// with <c>enum</c> for names and a permissive object type for arguments — this avoids
+    /// <c>anyOf</c> whose nested constraints are not enforced by the current SchemaTracker.
+    /// </remarks>
     /// <param name="tools">Available tool definitions.</param>
     /// <param name="argumentsKey">Key name for arguments ("arguments" or "parameters").</param>
     /// <returns>JSON Schema as a string.</returns>
@@ -52,14 +58,21 @@ public static class ToolCallSchemaBuilder
         if (tools.Length == 1)
             return BuildForFunction(tools[0], argumentsKey);
 
+        // Multi-tool: use enum for name instead of anyOf with per-tool const.
+        // SchemaTracker's anyOf is an overapproximation that doesn't enforce
+        // nested property constraints (const, required, additionalProperties).
         var sb = new StringBuilder(1024);
-        sb.Append("{\"anyOf\":[");
+        sb.Append("{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"enum\":[");
         for (int i = 0; i < tools.Length; i++)
         {
             if (i > 0) sb.Append(',');
-            sb.Append(BuildForFunction(tools[i], argumentsKey));
+            sb.Append(JsonSerializer.Serialize(tools[i].Name));
         }
-        sb.Append("]}");
+        sb.Append("]},\"");
+        sb.Append(argumentsKey);
+        sb.Append("\":{\"type\":\"object\"}},\"required\":[\"name\",");
+        sb.Append(JsonSerializer.Serialize(argumentsKey));
+        sb.Append("],\"additionalProperties\":false}");
         return sb.ToString();
     }
 
@@ -71,10 +84,7 @@ public static class ToolCallSchemaBuilder
     /// <returns>JSON Schema as a string.</returns>
     public static string BuildForParallelCalls(ToolDefinition[] tools, string argumentsKey = "arguments")
     {
-        var itemSchema = tools.Length == 1
-            ? BuildForFunction(tools[0], argumentsKey)
-            : BuildForRequired(tools, argumentsKey);
-
+        var itemSchema = BuildForRequired(tools, argumentsKey);
         return $"{{\"type\":\"array\",\"items\":{itemSchema}}}";
     }
 

@@ -171,18 +171,23 @@ When `tool_choice` is `Required` or `Function(name)`, the model output is constr
 **Multiple functions** (`BuildForRequired`):
 ```json
 {
-  "anyOf": [
-    {<schema for tool 1>},
-    {<schema for tool 2>}
-  ]
+  "type": "object",
+  "properties": {
+    "name": {"type": "string", "enum": ["get_weather", "get_time"]},
+    "arguments": {"type": "object"}
+  },
+  "required": ["name", "arguments"],
+  "additionalProperties": false
 }
 ```
+
+Uses `enum` for the name field instead of `anyOf` with per-tool `const` — the `SchemaTracker`'s `anyOf` is an overapproximation that doesn't enforce nested property constraints. The tradeoff: per-tool argument schema validation is not enforced for multi-tool scenarios (arguments are constrained to valid JSON objects only). Single-tool schemas use `const` with full parameter schema enforcement.
 
 **Parallel calls** (`BuildForParallelCalls`):
 ```json
 {
   "type": "array",
-  "items": {"anyOf": [<per-tool schemas>]}
+  "items": {<same flat object schema as BuildForRequired>}
 }
 ```
 

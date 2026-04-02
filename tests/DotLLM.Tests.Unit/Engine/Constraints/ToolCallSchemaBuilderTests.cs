@@ -75,31 +75,31 @@ public class ToolCallSchemaBuilderTests
     }
 
     [Fact]
-    public void BuildForRequired_MultipleTools_ProducesAnyOf()
+    public void BuildForRequired_MultipleTools_UsesEnumForName()
     {
         string schema = ToolCallSchemaBuilder.BuildForRequired([WeatherTool, TimeTool]);
 
         using var doc = JsonDocument.Parse(schema);
         var root = doc.RootElement;
 
-        Assert.True(root.TryGetProperty("anyOf", out var anyOf));
-        Assert.Equal(2, anyOf.GetArrayLength());
+        // Should be a flat object schema with enum, not anyOf
+        Assert.Equal("object", root.GetProperty("type").GetString());
+        var nameSchema = root.GetProperty("properties").GetProperty("name");
+        Assert.True(nameSchema.TryGetProperty("enum", out var enumProp));
+        Assert.Equal(2, enumProp.GetArrayLength());
     }
 
     [Fact]
-    public void BuildForRequired_AnyOf_ContainsBothTools()
+    public void BuildForRequired_MultipleTools_EnumContainsBothNames()
     {
         string schema = ToolCallSchemaBuilder.BuildForRequired([WeatherTool, TimeTool]);
 
         using var doc = JsonDocument.Parse(schema);
-        var anyOf = doc.RootElement.GetProperty("anyOf");
+        var enumValues = doc.RootElement.GetProperty("properties").GetProperty("name").GetProperty("enum");
 
         var names = new List<string>();
-        foreach (var alt in anyOf.EnumerateArray())
-        {
-            var name = alt.GetProperty("properties").GetProperty("name").GetProperty("const").GetString();
-            names.Add(name!);
-        }
+        foreach (var val in enumValues.EnumerateArray())
+            names.Add(val.GetString()!);
 
         Assert.Contains("get_weather", names);
         Assert.Contains("get_time", names);
@@ -118,15 +118,17 @@ public class ToolCallSchemaBuilderTests
     }
 
     [Fact]
-    public void BuildForParallelCalls_ItemsHaveAnyOf()
+    public void BuildForParallelCalls_ItemsHaveEnumName()
     {
         string schema = ToolCallSchemaBuilder.BuildForParallelCalls([WeatherTool, TimeTool]);
 
         using var doc = JsonDocument.Parse(schema);
         var items = doc.RootElement.GetProperty("items");
 
-        Assert.True(items.TryGetProperty("anyOf", out var anyOf));
-        Assert.Equal(2, anyOf.GetArrayLength());
+        // Items should be a flat object schema with enum for name
+        Assert.Equal("object", items.GetProperty("type").GetString());
+        Assert.True(items.GetProperty("properties").GetProperty("name").TryGetProperty("enum", out var enumProp));
+        Assert.Equal(2, enumProp.GetArrayLength());
     }
 
     [Fact]
