@@ -2,6 +2,8 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <!-- DTOs are self-documenting via [JsonPropertyName] attributes -->
+    <NoWarn>CS1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -9,6 +11,9 @@
     <ProjectReference Include="..\DotLLM.Engine\DotLLM.Engine.csproj" />
     <ProjectReference Include="..\DotLLM.Models\DotLLM.Models.csproj" />
     <ProjectReference Include="..\DotLLM.Tokenizers\DotLLM.Tokenizers.csproj" />
+    <ProjectReference Include="..\DotLLM.Cpu\DotLLM.Cpu.csproj" />
+    <ProjectReference Include="..\DotLLM.Cuda\DotLLM.Cuda.csproj" />
+    <ProjectReference Include="..\DotLLM.HuggingFace\DotLLM.HuggingFace.csproj" />
     <ProjectReference Include="..\DotLLM.Telemetry\DotLLM.Telemetry.csproj" />
   </ItemGroup>
 

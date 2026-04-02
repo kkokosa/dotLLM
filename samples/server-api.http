@@ -1,0 +1,308 @@
+### dotLLM Server API — OpenAI-compatible endpoints
+### Usage: Start server first:
+###   dotnet run --project src/DotLLM.Server -- --model bartowski/Llama-3.2-1B-Instruct-GGUF --quant Q8_0
+### Then use VS Code REST Client extension (Ctrl+Shift+P → "Rest Client: Send Request")
+
+@baseUrl = http://localhost:8080
+
+### ──────────────────────────────────────────────────
+### Health & Readiness
+### ──────────────────────────────────────────────────
+
+### Health check
+GET {{baseUrl}}/health
+
+###
+
+### Readiness check (200 = model loaded, 503 = still loading)
+GET {{baseUrl}}/ready
+
+### ──────────────────────────────────────────────────
+### Models
+### ──────────────────────────────────────────────────
+
+### List loaded models
+GET {{baseUrl}}/v1/models
+
+### ──────────────────────────────────────────────────
+### Tokenize / Detokenize
+### ──────────────────────────────────────────────────
+
+### Tokenize text → token IDs
+POST {{baseUrl}}/v1/tokenize
+Content-Type: application/json
+
+{
+    "text": "The quick brown fox jumps over the lazy dog"
+}
+
+###
+
+### Detokenize token IDs → text
+POST {{baseUrl}}/v1/detokenize
+Content-Type: application/json
+
+{
+    "tokens": [791, 4062, 14198, 39935, 35308, 927, 279, 16053, 5765]
+}
+
+### ──────────────────────────────────────────────────
+### Chat Completions — Basic
+### ──────────────────────────────────────────────────
+
+### Simple chat (non-streaming)
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "What is 2+2? Answer with just the number."}
+    ],
+    "max_tokens": 10,
+    "temperature": 0
+}
+
+###
+
+### Chat with system prompt
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "system", "content": "You are a helpful assistant. Be concise."},
+        {"role": "user", "content": "What is the capital of France?"}
+    ],
+    "max_tokens": 20,
+    "temperature": 0
+}
+
+###
+
+### Multi-turn conversation
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "My name is Alice."},
+        {"role": "assistant", "content": "Nice to meet you, Alice!"},
+        {"role": "user", "content": "What is my name?"}
+    ],
+    "max_tokens": 20,
+    "temperature": 0
+}
+
+### ──────────────────────────────────────────────────
+### Chat Completions — Streaming (SSE)
+### ──────────────────────────────────────────────────
+
+### Streaming chat (Server-Sent Events)
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "Count from 1 to 5."}
+    ],
+    "max_tokens": 30,
+    "temperature": 0,
+    "stream": true
+}
+
+### ──────────────────────────────────────────────────
+### Chat Completions — Sampling Parameters
+### ──────────────────────────────────────────────────
+
+### Creative sampling (high temperature + top-p)
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "Write a haiku about programming."}
+    ],
+    "max_tokens": 50,
+    "temperature": 0.9,
+    "top_p": 0.95,
+    "seed": 42
+}
+
+###
+
+### With stop sequences
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "List three colors:"}
+    ],
+    "max_tokens": 50,
+    "temperature": 0,
+    "stop": ["\n\n", "3."]
+}
+
+### ──────────────────────────────────────────────────
+### Chat Completions — Constrained Decoding
+### ──────────────────────────────────────────────────
+
+### JSON mode — guaranteed valid JSON output
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "Return a JSON object with keys 'name' and 'age' for a person named Alice who is 30."}
+    ],
+    "max_tokens": 40,
+    "temperature": 0,
+    "response_format": {"type": "json_object"}
+}
+
+###
+
+### JSON Schema — output conforms to specific schema
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "Give me info about Paris."}
+    ],
+    "max_tokens": 60,
+    "temperature": 0,
+    "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "city_info",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "country": {"type": "string"},
+                    "population": {"type": "integer"}
+                },
+                "required": ["city", "country"]
+            }
+        }
+    }
+}
+
+### ──────────────────────────────────────────────────
+### Chat Completions — Tool Calling
+### ──────────────────────────────────────────────────
+
+### Tool calling (auto — model decides)
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "What's the weather in Paris?"}
+    ],
+    "max_tokens": 60,
+    "temperature": 0,
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get current weather for a location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "City name"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                    },
+                    "required": ["location"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_time",
+                "description": "Get current time in a timezone",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "timezone": {"type": "string"}
+                    },
+                    "required": ["timezone"]
+                }
+            }
+        }
+    ]
+}
+
+###
+
+### Multi-turn with tool results
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "What's the weather in London?"},
+        {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call_0",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": "{\"location\":\"London\"}"}
+            }]
+        },
+        {
+            "role": "tool",
+            "content": "{\"temperature\": 15, \"condition\": \"cloudy\"}",
+            "tool_call_id": "call_0"
+        }
+    ],
+    "max_tokens": 50,
+    "temperature": 0,
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get current weather for a location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"}
+                    },
+                    "required": ["location"]
+                }
+            }
+        }
+    ]
+}
+
+### ──────────────────────────────────────────────────
+### Raw Completions (no chat template)
+### ──────────────────────────────────────────────────
+
+### Raw text completion
+POST {{baseUrl}}/v1/completions
+Content-Type: application/json
+
+{
+    "prompt": "The capital of France is",
+    "max_tokens": 10,
+    "temperature": 0
+}
+
+###
+
+### Raw completion — streaming
+POST {{baseUrl}}/v1/completions
+Content-Type: application/json
+
+{
+    "prompt": "Once upon a time",
+    "max_tokens": 30,
+    "temperature": 0.7,
+    "stream": true
+}
