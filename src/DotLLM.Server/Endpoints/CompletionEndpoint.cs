@@ -10,10 +10,6 @@ namespace DotLLM.Server.Endpoints;
 /// </summary>
 public static class CompletionEndpoint
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
-    };
 
     public static void Map(WebApplication app) =>
         app.MapPost("/v1/completions", HandleAsync);
@@ -70,7 +66,7 @@ public static class CompletionEndpoint
         };
 
         httpContext.Response.ContentType = "application/json";
-        await httpContext.Response.WriteAsJsonAsync(response, JsonOptions, ct);
+        await JsonSerializer.SerializeAsync(httpContext.Response.Body, response, ServerJsonContext.Default.CompletionResponse, ct);
     }
 
     private static async Task HandleStreamingAsync(
@@ -98,8 +94,9 @@ public static class CompletionEndpoint
                             : null,
                     }],
                 };
-                string json = JsonSerializer.Serialize(chunk, JsonOptions);
-                await httpContext.Response.WriteAsync($"data: {json}\n\n", ct);
+                await httpContext.Response.WriteAsync("data: ", ct);
+                await JsonSerializer.SerializeAsync(httpContext.Response.Body, chunk, ServerJsonContext.Default.CompletionChunk, ct);
+                await httpContext.Response.WriteAsync("\n\n", ct);
                 await httpContext.Response.Body.FlushAsync(ct);
             }
         }, ct);

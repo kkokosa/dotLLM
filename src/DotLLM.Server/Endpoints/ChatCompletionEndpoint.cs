@@ -12,10 +12,8 @@ namespace DotLLM.Server.Endpoints;
 /// </summary>
 public static class ChatCompletionEndpoint
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
-    };
+    private static readonly string[] CommonStopSequences =
+        ["<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|end|>", "</s>", "</tool_call>"];
 
     public static void Map(WebApplication app) =>
         app.MapPost("/v1/chat/completions", HandleAsync);
@@ -45,7 +43,7 @@ public static class ChatCompletionEndpoint
         string prompt = chatTemplate.Apply(messages, templateOptions);
 
         // Build inference options
-        var stopSequences = BuildStopSequences(state);
+        var stopSequences = CommonStopSequences;
         var options = RequestConverter.ToInferenceOptions(request, stopSequences,
             new DotLLM.Core.Configuration.ThreadingConfig(
                 state.Options.Threads, state.Options.DecodeThreads));
@@ -127,7 +125,7 @@ public static class ChatCompletionEndpoint
         };
 
         httpContext.Response.ContentType = "application/json";
-        await httpContext.Response.WriteAsJsonAsync(response, JsonOptions, ct);
+        await JsonSerializer.SerializeAsync(httpContext.Response.Body, response, ServerJsonContext.Default.ChatCompletionResponse, ct);
     }
 
     private static async Task HandleStreamingAsync(
@@ -216,19 +214,11 @@ public static class ChatCompletionEndpoint
         await httpContext.Response.Body.FlushAsync(ct);
     }
 
-    private static List<string> BuildStopSequences(ServerState state)
+    private static async Task WriteSseChunk(HttpContext ctx, ChatCompletionChunk chunk, CancellationToken ct)
     {
-        var stops = new List<string>();
-        // Common end-of-turn markers
-        foreach (var marker in new[] { "<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|end|>", "</s>", "</tool_call>" })
-            stops.Add(marker);
-        return stops;
-    }
-
-    private static async Task WriteSseChunk<T>(HttpContext ctx, T chunk, CancellationToken ct)
-    {
-        string json = JsonSerializer.Serialize(chunk, JsonOptions);
-        await ctx.Response.WriteAsync($"data: {json}\n\n", ct);
+        await ctx.Response.WriteAsync("data: ", ct);
+        await JsonSerializer.SerializeAsync(ctx.Response.Body, chunk, ServerJsonContext.Default.ChatCompletionChunk, ct);
+        await ctx.Response.WriteAsync("\n\n", ct);
         await ctx.Response.Body.FlushAsync(ct);
     }
 }
