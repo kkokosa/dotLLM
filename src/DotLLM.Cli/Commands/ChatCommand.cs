@@ -431,7 +431,9 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         }
     }
 
-    private static async Task GenerateAndHandleToolCalls(
+    private const int MaxToolCallRounds = 5;
+
+    private static Task GenerateAndHandleToolCalls(
         TextGenerator generator,
         IChatTemplate chatTemplate,
         InferenceOptions options,
@@ -439,6 +441,17 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         ToolDefinition[]? tools,
         IToolCallParser? toolCallParser,
         ToolChoice toolChoice)
+        => GenerateAndHandleToolCallsInner(generator, chatTemplate, options, history, tools, toolCallParser, toolChoice, 0);
+
+    private static async Task GenerateAndHandleToolCallsInner(
+        TextGenerator generator,
+        IChatTemplate chatTemplate,
+        InferenceOptions options,
+        List<ChatMessage> history,
+        ToolDefinition[]? tools,
+        IToolCallParser? toolCallParser,
+        ToolChoice toolChoice,
+        int round)
     {
         var templateOptions = new ChatTemplateOptions
         {
@@ -515,37 +528,51 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                     $"  [blue][[{Markup.Escape(tc.Id)}]][/] [green]{Markup.Escape(tc.FunctionName)}[/]({Markup.Escape(tc.Arguments)})");
             }
 
+            // Print timing info for tool call generation
+            PrintTimingInfo(firstTokenTicks, promptTokenCount, tokenCount, timings);
+
             // Prompt user for tool results
+            bool anyResultProvided = false;
             foreach (var tc in detectedCalls)
             {
-                AnsiConsole.MarkupLine($"[dim]Result for {Markup.Escape(tc.FunctionName)} (Enter to skip):[/]");
                 string result;
                 try
                 {
-                    result = AnsiConsole.Prompt(new TextPrompt<string>("[tool]>>>").AllowEmpty());
+                    result = AnsiConsole.Prompt(
+                        new TextPrompt<string>($"  [dim]result for[/] [green]{Markup.Escape(tc.FunctionName)}[/] [dim]>>>[/]")
+                            .AllowEmpty());
                 }
                 catch (InvalidOperationException)
                 {
                     result = "";
                 }
 
-                if (string.IsNullOrWhiteSpace(result))
-                    result = "{}";
+                if (!string.IsNullOrWhiteSpace(result))
+                    anyResultProvided = true;
 
                 history.Add(new ChatMessage
                 {
                     Role = "tool",
-                    Content = result,
+                    Content = string.IsNullOrWhiteSpace(result) ? "{}" : result,
                     ToolCallId = tc.Id
                 });
             }
 
-            // Print timing info for tool call generation
-            PrintTimingInfo(firstTokenTicks, promptTokenCount, tokenCount, timings);
-
-            // Re-generate with tool results in history
-            AnsiConsole.MarkupLine("[dim]Generating response with tool results...[/]");
-            await GenerateAndHandleToolCalls(generator, chatTemplate, options, history, tools, toolCallParser, toolChoice);
+            // Re-generate with tool results — but guard against infinite loops
+            if (round >= MaxToolCallRounds)
+            {
+                AnsiConsole.MarkupLine($"[yellow]Max tool call rounds ({MaxToolCallRounds}) reached.[/]");
+            }
+            else if (!anyResultProvided)
+            {
+                // User skipped all tool results — don't re-generate, just add placeholder
+                AnsiConsole.MarkupLine("[dim]No tool results provided, skipping re-generation.[/]");
+            }
+            else
+            {
+                AnsiConsole.MarkupLine("[dim]Generating response with tool results...[/]");
+                await GenerateAndHandleToolCallsInner(generator, chatTemplate, options, history, tools, toolCallParser, toolChoice, round + 1);
+            }
         }
         else
         {
