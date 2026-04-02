@@ -346,7 +346,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
 
         try
         {
-            await RunRepl(generator, chatTemplate, inferenceOptions, history, settings, tools, toolCallParser);
+            await RunRepl(generator, chatTemplate, inferenceOptions, history, settings, tools, toolCallParser, toolChoice);
         }
         finally
         {
@@ -364,7 +364,8 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         List<ChatMessage> history,
         Settings settings,
         ToolDefinition[]? tools,
-        IToolCallParser? toolCallParser)
+        IToolCallParser? toolCallParser,
+        ToolChoice toolChoice)
     {
         while (true)
         {
@@ -426,7 +427,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             history.Add(new ChatMessage { Role = "user", Content = input });
 
             // Generate (with tool call detection loop)
-            await GenerateAndHandleToolCalls(generator, chatTemplate, options, history, tools, toolCallParser);
+            await GenerateAndHandleToolCalls(generator, chatTemplate, options, history, tools, toolCallParser, toolChoice);
         }
     }
 
@@ -436,7 +437,8 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         InferenceOptions options,
         List<ChatMessage> history,
         ToolDefinition[]? tools,
-        IToolCallParser? toolCallParser)
+        IToolCallParser? toolCallParser,
+        ToolChoice toolChoice)
     {
         var templateOptions = new ChatTemplateOptions
         {
@@ -450,7 +452,11 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         int tokenCount = 0;
         long firstTokenTicks = 0;
         var sb = new StringBuilder();
-        var accumulator = toolCallParser is not null ? new StreamingToolCallAccumulator(toolCallParser) : null;
+        // Only suppress streaming output for required/function — model MUST produce a tool call.
+        // For auto, let text flow to the user and detect tool calls post-hoc.
+        bool suppressToolCallText = toolChoice is ToolChoice.Required or ToolChoice.Function;
+        var accumulator = toolCallParser is not null && suppressToolCallText
+            ? new StreamingToolCallAccumulator(toolCallParser) : null;
         FinishReason finishReason = FinishReason.Length;
         InferenceTimings timings = default;
         int promptTokenCount = 0;
@@ -539,7 +545,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
 
             // Re-generate with tool results in history
             AnsiConsole.MarkupLine("[dim]Generating response with tool results...[/]");
-            await GenerateAndHandleToolCalls(generator, chatTemplate, options, history, tools, toolCallParser);
+            await GenerateAndHandleToolCalls(generator, chatTemplate, options, history, tools, toolCallParser, toolChoice);
         }
         else
         {
