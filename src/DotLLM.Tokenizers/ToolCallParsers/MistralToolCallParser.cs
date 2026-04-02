@@ -15,8 +15,9 @@ public sealed class MistralToolCallParser : IToolCallParser
         if (markerIndex < 0)
             return null;
 
-        string json = generatedText[(markerIndex + Marker.Length)..].Trim();
-        return ToolCallJsonHelper.ParseToolCallJson(json, "call");
+        // Extract balanced JSON after the marker — ignore trailing tokens
+        string afterMarker = generatedText[(markerIndex + Marker.Length)..];
+        return ToolCallJsonHelper.ExtractAndParse(afterMarker, "call");
     }
 
     /// <inheritdoc/>

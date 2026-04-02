@@ -20,8 +20,10 @@ public sealed class LlamaToolCallParser : IToolCallParser
             return ToolCallJsonHelper.ExtractAndParse(generatedText, "call");
         }
 
-        string json = generatedText[(markerIndex + Marker.Length)..].Trim();
-        return ToolCallJsonHelper.ParseToolCallJson(json, "call");
+        // Extract balanced JSON after the marker — ignore trailing tokens
+        // like <|eom_id|>, <|eot_id|>, etc.
+        string afterMarker = generatedText[(markerIndex + Marker.Length)..];
+        return ToolCallJsonHelper.ExtractAndParse(afterMarker, "call");
     }
 
     /// <inheritdoc/>

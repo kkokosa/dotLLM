@@ -251,7 +251,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         // The EOS stop condition handles eos_token_id, but the end-of-turn marker
         // may be a different token (e.g., <|im_end|> in ChatML, <|eot_id|> in Llama 3).
         var stopSequences = new List<string>();
-        foreach (var marker in new[] { "<|im_end|>", "<|eot_id|>", "<|end|>", "</s>" })
+        foreach (var marker in new[] { "<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|end|>", "</s>" })
         {
             if (marker != eosTokenStr) // avoid duplicate with EOS stop condition
                 stopSequences.Add(marker);
