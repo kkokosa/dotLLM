@@ -1,3 +1,5 @@
+using DotLLM.Tokenizers;
+
 namespace DotLLM.Engine;
 
 /// <summary>
@@ -22,4 +24,7 @@ public record InferenceResponse
 
     /// <summary>Timing measurements from the inference run.</summary>
     public InferenceTimings Timings { get; init; }
+
+    /// <summary>Parsed tool calls from the generated text. Null if no tool calls were detected.</summary>
+    public ToolCall[]? ToolCalls { get; init; }
 }

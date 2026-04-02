@@ -369,4 +369,106 @@ public class JinjaChatTemplateTests
         var result = eval.Evaluate(ast);
         Assert.Equal("missing", result);
     }
+
+    // ── Tool call round-trip ──
+
+    [Fact]
+    public void ToolCalls_InAssistantMessage_RenderedInContext()
+    {
+        // Template that renders tool_calls from assistant messages
+        const string template =
+            "{%- for msg in messages -%}" +
+            "[{{ msg.role }}]" +
+            "{% if msg.tool_calls %}CALLS:{% for tc in msg.tool_calls %}{{ tc.function.name }}{% endfor %}" +
+            "{% else %}{{ msg.content }}" +
+            "{% endif %}" +
+            "{%- endfor -%}";
+
+        var tmpl = new JinjaChatTemplate(template, "", "");
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "What's the weather?" },
+            new()
+            {
+                Role = "assistant", Content = "",
+                ToolCalls = [new ToolCall("call_0", "get_weather", """{"location":"Paris"}""")]
+            },
+        };
+
+        var result = tmpl.Apply(messages, new ChatTemplateOptions { AddGenerationPrompt = false });
+
+        Assert.Contains("[assistant]CALLS:get_weather", result);
+    }
+
+    [Fact]
+    public void ToolResult_Message_RenderedInContext()
+    {
+        // Template that renders tool result messages
+        const string template =
+            "{%- for msg in messages -%}" +
+            "[{{ msg.role }}{% if msg.tool_call_id %}:{{ msg.tool_call_id }}{% endif %}]{{ msg.content }}" +
+            "{%- endfor -%}";
+
+        var tmpl = new JinjaChatTemplate(template, "", "");
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "tool", Content = """{"temp":22}""", ToolCallId = "call_0" },
+        };
+
+        var result = tmpl.Apply(messages, new ChatTemplateOptions { AddGenerationPrompt = false });
+
+        Assert.Contains("[tool:call_0]", result);
+        Assert.Contains("""{"temp":22}""", result);
+    }
+
+    [Fact]
+    public void Tools_Tojson_RendersToolDefinitions()
+    {
+        const string template = "{{ tools | tojson }}";
+        var tmpl = new JinjaChatTemplate(template, "", "");
+
+        var result = tmpl.Apply(
+            new List<ChatMessage>(),
+            new ChatTemplateOptions
+            {
+                Tools = [new ToolDefinition("search", "Search the web", """{"type":"object","properties":{"q":{"type":"string"}}}""")]
+            });
+
+        // Should contain the tool definition as JSON
+        Assert.Contains("\"search\"", result);
+        Assert.Contains("\"function\"", result);
+    }
+
+    [Fact]
+    public void MultiTurn_ToolCallConversation()
+    {
+        // Simplified ChatML-like template
+        const string template =
+            "{%- for msg in messages -%}" +
+            "<|{{ msg.role }}|>{{ msg.content }}" +
+            "{% if msg.tool_calls %}{% for tc in msg.tool_calls %}[TC:{{ tc.function.name }}]{% endfor %}{% endif %}" +
+            "<|end|>" +
+            "{%- endfor -%}" +
+            "{% if add_generation_prompt %}<|assistant|>{% endif %}";
+
+        var tmpl = new JinjaChatTemplate(template, "", "");
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "Weather in Paris?" },
+            new()
+            {
+                Role = "assistant", Content = "",
+                ToolCalls = [new ToolCall("c0", "get_weather", """{"location":"Paris"}""")]
+            },
+            new() { Role = "tool", Content = """{"temp":22}""", ToolCallId = "c0" },
+            new() { Role = "assistant", Content = "It's 22 degrees in Paris." },
+        };
+
+        var result = tmpl.Apply(messages, new ChatTemplateOptions { AddGenerationPrompt = false });
+
+        Assert.Contains("<|user|>Weather in Paris?", result);
+        Assert.Contains("[TC:get_weather]", result);
+        Assert.Contains("<|tool|>", result);
+        Assert.Contains("It's 22 degrees", result);
+    }
 }

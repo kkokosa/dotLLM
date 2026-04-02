@@ -1,6 +1,8 @@
+using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Tokenizers;
 using DotLLM.Tokenizers.ChatTemplates;
+using DotLLM.Tokenizers.ToolCallParsers;
 
 namespace DotLLM.Models.Gguf;
 
@@ -42,4 +44,26 @@ public static class GgufChatTemplateFactory
 
         return new JinjaChatTemplate(config.ChatTemplate, bosToken, eosToken);
     }
+
+    /// <summary>
+    /// Creates a tool call parser appropriate for the model based on architecture
+    /// and chat template content.
+    /// </summary>
+    /// <param name="metadata">GGUF metadata for template heuristics.</param>
+    /// <param name="architecture">Model architecture.</param>
+    /// <returns>A tool call parser for this model.</returns>
+    public static IToolCallParser CreateToolCallParser(GgufMetadata metadata, Architecture architecture)
+    {
+        string? template = metadata.GetStringOrDefault("tokenizer.chat_template", null!);
+        return ToolCallParserFactory.Create(architecture, template);
+    }
+
+    /// <summary>
+    /// Creates a tool call parser appropriate for the model based on architecture
+    /// and chat template content.
+    /// </summary>
+    /// <param name="config">Model configuration.</param>
+    /// <returns>A tool call parser for this model.</returns>
+    public static IToolCallParser CreateToolCallParser(ModelConfig config)
+        => ToolCallParserFactory.Create(config.Architecture, config.ChatTemplate);
 }

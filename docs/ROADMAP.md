@@ -95,7 +95,7 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 | 39 | **JSON mode** :white_check_mark: | `JsonConstraint` — FSM-based constrained decoding guaranteeing syntactically valid JSON. `response_format: {"type": "json_object"}`. | 8 |
 | 40 | **JSON Schema** :white_check_mark: | `JsonSchemaConstraint` — Schema-compiled automaton. `response_format: {"type": "json_schema", ...}`. Token mask precomputation. | 39 |
 | 41 | **Regex + CFG** :white_check_mark: | `RegexConstraint` (DFA-based) and `GrammarConstraint` (PDA, GBNF-style). | 39 |
-| 42 | **Tool calling** | `IToolCallParser`, chat template tool integration, structured output for function arguments. `finish_reason: "tool_calls"`. Parallel tool calls. | 16, 40 |
+| 42 | **Tool calling** :white_check_mark: | `IToolCallParser`, chat template tool integration, structured output for function arguments. `finish_reason: "tool_calls"`. Parallel tool calls. | 16, 40 |
 | 34 | **ASP.NET server** | Minimal API endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`, `/v1/tokenize`, `/v1/detokenize`. Health + readiness probes. | 16, 17 |
 | 53 | **Chat UI (`serve` command)** | Built-in web chat interface served by the ASP.NET host. `dotllm serve model.gguf` starts the API server and opens a browser to a bundled single-page chat UI. Streaming responses via SSE, model/parameter selection, conversation history. Similar to `ollama serve` + Open WebUI or `llama.cpp --server` built-in UI. | 34 |
 
