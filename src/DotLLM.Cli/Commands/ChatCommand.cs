@@ -174,6 +174,12 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         [Description("Mixed-precision window: recent N tokens in full precision (0 = all quantized). Only used when --cache-type-k or --cache-type-v is set.")]
         [DefaultValue(0)]
         public int CacheWindow { get; set; }
+
+        /// <summary>Verbose debug output.</summary>
+        [CommandOption("--verbose|-v")]
+        [Description("Show debug info: finish reason, raw text before stop-sequence stripping, tool call detection details.")]
+        [DefaultValue(false)]
+        public bool Verbose { get; set; }
     }
 
     /// <inheritdoc/>
@@ -346,7 +352,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
 
         try
         {
-            await RunRepl(generator, chatTemplate, inferenceOptions, history, settings, tools, toolCallParser, toolChoice);
+            await RunRepl(generator, chatTemplate, inferenceOptions, history, settings, tools, toolCallParser, toolChoice, settings.Verbose);
         }
         finally
         {
@@ -365,7 +371,8 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         Settings settings,
         ToolDefinition[]? tools,
         IToolCallParser? toolCallParser,
-        ToolChoice toolChoice)
+        ToolChoice toolChoice,
+        bool verbose)
     {
         while (true)
         {
@@ -427,7 +434,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             history.Add(new ChatMessage { Role = "user", Content = input });
 
             // Generate (with tool call detection loop)
-            await GenerateAndHandleToolCalls(generator, chatTemplate, options, history, tools, toolCallParser, toolChoice);
+            await GenerateAndHandleToolCalls(generator, chatTemplate, options, history, tools, toolCallParser, toolChoice, verbose);
         }
     }
 
@@ -440,8 +447,9 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         List<ChatMessage> history,
         ToolDefinition[]? tools,
         IToolCallParser? toolCallParser,
-        ToolChoice toolChoice)
-        => GenerateAndHandleToolCallsInner(generator, chatTemplate, options, history, tools, toolCallParser, toolChoice, 0);
+        ToolChoice toolChoice,
+        bool verbose)
+        => GenerateAndHandleToolCallsInner(generator, chatTemplate, options, history, tools, toolCallParser, toolChoice, verbose, 0);
 
     private static async Task GenerateAndHandleToolCallsInner(
         TextGenerator generator,
@@ -451,6 +459,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         ToolDefinition[]? tools,
         IToolCallParser? toolCallParser,
         ToolChoice toolChoice,
+        bool verbose,
         int round)
     {
         var templateOptions = new ChatTemplateOptions
@@ -459,6 +468,9 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             Tools = tools
         };
         string prompt = chatTemplate.Apply(history, templateOptions);
+
+        if (verbose)
+            AnsiConsole.MarkupLine($"[dim grey][[verbose]] prompt ({prompt.Length} chars): {Markup.Escape(prompt.Length > 500 ? prompt[..500] + "..." : prompt)}[/]");
 
         // Generate response via streaming
         var sw = Stopwatch.StartNew();
@@ -498,11 +510,26 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         Console.WriteLine();
 
         // Strip any remaining stop sequence suffixes from the response text
-        string assistantText = sb.ToString();
+        string rawText = sb.ToString();
+        string assistantText = rawText;
+        string? matchedStopSequence = null;
         foreach (var seq in options.StopSequences)
         {
             if (assistantText.EndsWith(seq, StringComparison.Ordinal))
+            {
+                matchedStopSequence = seq;
                 assistantText = assistantText[..^seq.Length];
+                break;
+            }
+        }
+
+        if (verbose)
+        {
+            AnsiConsole.MarkupLine($"[dim grey][[verbose]] finish_reason={finishReason}, tokens={tokenCount}[/]");
+            if (matchedStopSequence is not null)
+                AnsiConsole.MarkupLine($"[dim grey][[verbose]] stopped by: {Markup.Escape(matchedStopSequence)}[/]");
+            if (rawText != assistantText)
+                AnsiConsole.MarkupLine($"[dim grey][[verbose]] raw text: {Markup.Escape(rawText)}[/]");
         }
 
         // Check for tool calls
@@ -571,11 +598,14 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             else
             {
                 AnsiConsole.MarkupLine("[dim]Generating response with tool results...[/]");
-                await GenerateAndHandleToolCallsInner(generator, chatTemplate, options, history, tools, toolCallParser, toolChoice, round + 1);
+                await GenerateAndHandleToolCallsInner(generator, chatTemplate, options, history, tools, toolCallParser, toolChoice, verbose, round + 1);
             }
         }
         else
         {
+            if (verbose && toolCallParser is not null)
+                AnsiConsole.MarkupLine("[dim grey][[verbose]] no tool calls detected by parser[/]");
+
             // Normal text response — add to history
             history.Add(new ChatMessage { Role = "assistant", Content = assistantText.TrimEnd() });
             PrintTimingInfo(firstTokenTicks, promptTokenCount, tokenCount, timings);
