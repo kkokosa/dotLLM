@@ -506,7 +506,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             foreach (var tc in detectedCalls)
             {
                 AnsiConsole.MarkupLine(
-                    $"  [blue][[{Markup.Escape(tc.Id)}][/] [green]{Markup.Escape(tc.FunctionName)}[/]({Markup.Escape(tc.Arguments)})");
+                    $"  [blue][[{Markup.Escape(tc.Id)}]][/] [green]{Markup.Escape(tc.FunctionName)}[/]({Markup.Escape(tc.Arguments)})");
             }
 
             // Prompt user for tool results
