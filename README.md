@@ -459,6 +459,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed steps, dependencies, and mil
 - [Tokenizers & chat templates](docs/TOKENIZERS.md)
 - [Sampling pipeline](docs/SAMPLING.md)
 - [Constrained decoding](docs/CONSTRAINED_DECODING.md)
+- [Tool calling](docs/TOOL_CALLING.md)
 - [KV-cache management](docs/KV_CACHE.md)
 - [GPU inference](docs/GPU.md)
 - [CUDA backend architecture](docs/CUDA.md)

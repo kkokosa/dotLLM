@@ -137,6 +137,7 @@ dotLLM/
 | Tokenizers & chat templates | [docs/TOKENIZERS.md](docs/TOKENIZERS.md) | BPE, SentencePiece, templates, tool calling |
 | Sampling pipeline | [docs/SAMPLING.md](docs/SAMPLING.md) | Sampler steps, beam search, stop conditions |
 | Constrained decoding | [docs/CONSTRAINED_DECODING.md](docs/CONSTRAINED_DECODING.md) | JSON, schema, regex, grammar |
+| Tool calling | [docs/TOOL_CALLING.md](docs/TOOL_CALLING.md) | Parsers, schema constraints, tool choice, CLI |
 | KV-cache management | [docs/KV_CACHE.md](docs/KV_CACHE.md) | Paged attention, KV quant, prefix sharing |
 | Batch scheduling | [docs/SCHEDULING.md](docs/SCHEDULING.md) | Continuous batching, preemption, priority |
 | Speculative decoding | [docs/SPECULATIVE.md](docs/SPECULATIVE.md) | Draft-verify-accept, rollback |
