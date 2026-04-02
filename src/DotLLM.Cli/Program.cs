@@ -42,8 +42,8 @@ app.Configure(config =>
         .WithExample("chat", "QuantFactory/SmolLM-135M-GGUF", "--system", "You are a helpful assistant.");
 
     config.AddCommand<ServeCommand>("serve")
-        .WithDescription("Launch OpenAI-compatible API server (stub).")
-        .WithExample("serve", "--port", "8080");
+        .WithDescription("Launch API server with built-in web chat UI.")
+        .WithExample("serve", "Qwen/Qwen3-0.6B-GGUF", "--port", "8080");
 
 #if DEBUG
     config.AddBranch("debug", debug =>

@@ -1,5 +1,4 @@
 using DotLLM.Server.Models;
-using DotLLM.Tokenizers;
 
 namespace DotLLM.Server.Endpoints;
 
@@ -10,8 +9,9 @@ public static class TokenizeEndpoint
 {
     public static void Map(WebApplication app)
     {
-        app.MapPost("/v1/tokenize", (TokenizeRequest request, ITokenizer tokenizer) =>
+        app.MapPost("/v1/tokenize", (TokenizeRequest request, ServerState state) =>
         {
+            var tokenizer = state.Tokenizer;
             int[] tokens = tokenizer.Encode(request.Text);
             string[] tokenStrings = tokens.Select(t => tokenizer.DecodeToken(t)).ToArray();
             return new TokenizeResponse
@@ -22,9 +22,9 @@ public static class TokenizeEndpoint
             };
         });
 
-        app.MapPost("/v1/detokenize", (DetokenizeRequest request, ITokenizer tokenizer) =>
+        app.MapPost("/v1/detokenize", (DetokenizeRequest request, ServerState state) =>
         {
-            string text = tokenizer.Decode(request.Tokens);
+            string text = state.Tokenizer.Decode(request.Tokens);
             return new DetokenizeResponse { Text = text };
         });
     }

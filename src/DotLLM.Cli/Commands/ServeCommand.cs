@@ -1,26 +1,153 @@
 using System.ComponentModel;
+using System.Diagnostics;
+using DotLLM.Server;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
 namespace DotLLM.Cli.Commands;
 
 /// <summary>
-/// Stub command for launching the OpenAI-compatible API server.
+/// Launch the OpenAI-compatible API server with a built-in web chat UI.
 /// </summary>
-internal sealed class ServeCommand : Command<ServeCommand.Settings>
+internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
 {
     public sealed class Settings : CommandSettings
     {
-        [CommandOption("--port")]
+        /// <summary>Path to a GGUF file or HuggingFace repo ID.</summary>
+        [CommandArgument(0, "<model>")]
+        [Description("Path to a GGUF file or HuggingFace repo ID (e.g., Qwen/Qwen3-0.6B-GGUF).")]
+        public string Model { get; set; } = string.Empty;
+
+        /// <summary>Port to listen on.</summary>
+        [CommandOption("--port|-p")]
         [Description("Port to listen on.")]
         [DefaultValue(8080)]
         public int Port { get; set; } = 8080;
+
+        /// <summary>Host to bind to.</summary>
+        [CommandOption("--host")]
+        [Description("Host address to bind to.")]
+        [DefaultValue("localhost")]
+        public string Host { get; set; } = "localhost";
+
+        /// <summary>Compute device.</summary>
+        [CommandOption("--device|-d")]
+        [Description("Compute device: 'cpu' (default), 'gpu', 'gpu:0', 'gpu:1'.")]
+        [DefaultValue("cpu")]
+        public string Device { get; set; } = "cpu";
+
+        /// <summary>Number of GPU layers for hybrid offloading.</summary>
+        [CommandOption("--gpu-layers")]
+        [Description("Number of transformer layers to offload to GPU.")]
+        public int? GpuLayers { get; set; }
+
+        /// <summary>CPU thread count.</summary>
+        [CommandOption("--threads")]
+        [Description("Number of CPU threads for inference. 0 = auto.")]
+        [DefaultValue(0)]
+        public int Threads { get; set; }
+
+        /// <summary>Decode thread count.</summary>
+        [CommandOption("--decode-threads")]
+        [Description("Number of threads for decode. 0 = auto.")]
+        [DefaultValue(0)]
+        public int DecodeThreads { get; set; }
+
+        /// <summary>Quantization filter.</summary>
+        [CommandOption("--quant|-q")]
+        [Description("Quantization filter when multiple GGUF files exist (e.g., Q4_K_M, Q8_0).")]
+        public string? Quant { get; set; }
+
+        /// <summary>KV-cache key quantization type.</summary>
+        [CommandOption("--cache-type-k")]
+        [Description("KV-cache key quantization: f32 (default), q8_0, q4_0.")]
+        [DefaultValue("f32")]
+        public string CacheTypeK { get; set; } = "f32";
+
+        /// <summary>KV-cache value quantization type.</summary>
+        [CommandOption("--cache-type-v")]
+        [Description("KV-cache value quantization: f32 (default), q8_0, q4_0.")]
+        [DefaultValue("f32")]
+        public string CacheTypeV { get; set; } = "f32";
+
+        /// <summary>Suppress automatic browser opening.</summary>
+        [CommandOption("--no-browser")]
+        [Description("Don't auto-open the browser.")]
+        [DefaultValue(false)]
+        public bool NoBrowser { get; set; }
     }
 
-    public override int Execute(CommandContext context, Settings settings)
+    /// <inheritdoc/>
+    public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
     {
-        AnsiConsole.MarkupLine("[yellow]The 'serve' command is not yet implemented.[/]");
-        AnsiConsole.MarkupLine($"Would start server on port [bold]{settings.Port}[/].");
+        // Resolve model path
+        var resolvedPath = GgufFileResolver.Resolve(settings.Model, settings.Quant);
+        if (resolvedPath is null)
+            return 1;
+
+        // Build server options
+        string modelId = Path.GetFileNameWithoutExtension(resolvedPath);
+        if (settings.Model.Contains('/'))
+            modelId = settings.Model.Split('/')[^1];
+
+        var serverOptions = new ServerOptions
+        {
+            Model = settings.Model,
+            Quant = settings.Quant,
+            Device = settings.Device,
+            GpuLayers = settings.GpuLayers,
+            Threads = settings.Threads,
+            DecodeThreads = settings.DecodeThreads,
+            Host = settings.Host,
+            Port = settings.Port,
+            CacheTypeK = settings.CacheTypeK,
+            CacheTypeV = settings.CacheTypeV,
+            ModelId = modelId,
+        };
+
+        // Load model
+        ServerState? state = null;
+        AnsiConsole.Status()
+            .Spinner(Spinner.Known.Dots)
+            .Start("Loading model...", _ =>
+            {
+                state = ServerStartup.LoadModel(resolvedPath, serverOptions);
+            });
+
+        // Build app with UI enabled
+        var app = ServerStartup.BuildApp(state!, [], serveUi: true);
+
+        var url = $"http://{settings.Host}:{settings.Port}";
+
+        // Print banner
+        AnsiConsole.Write(new Rule($"[grey]dotllm serve[/]").LeftJustified());
+        AnsiConsole.MarkupLine(
+            $"  [bold]{state!.Config.Architecture}[/] {state.Config.NumLayers}L/{state.Config.HiddenSize}H | " +
+            $"{Markup.Escape(Path.GetFileName(resolvedPath))}");
+        AnsiConsole.MarkupLine($"  Listening on [link={url}]{url}[/]");
+        AnsiConsole.MarkupLine($"  API: [dim]/v1/chat/completions, /v1/completions, /v1/models[/]");
+        AnsiConsole.MarkupLine($"  Chat UI: [dim]{url}[/]");
+        AnsiConsole.MarkupLine("[dim]  Press Ctrl+C to stop.[/]");
+        AnsiConsole.WriteLine();
+
+        // Auto-open browser
+        if (!settings.NoBrowser)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            }
+            catch
+            {
+                // Ignore on headless systems
+            }
+        }
+
+        // Run server (blocks until shutdown)
+        await app.RunAsync(url);
+
+        // Cleanup
+        state.Dispose();
         return 0;
     }
 }

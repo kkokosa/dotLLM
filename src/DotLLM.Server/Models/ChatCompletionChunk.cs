@@ -21,6 +21,41 @@ public sealed record ChatCompletionChunk
 
     [JsonPropertyName("choices")]
     public required ChatChunkChoiceDto[] Choices { get; init; }
+
+    [JsonPropertyName("usage")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public UsageDto? Usage { get; init; }
+
+    [JsonPropertyName("timings")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TimingsDto? Timings { get; init; }
+}
+
+/// <summary>
+/// Inference timing details (dotLLM extension, not in OpenAI spec).
+/// </summary>
+public sealed record TimingsDto
+{
+    [JsonPropertyName("prefill_time_ms")]
+    public double PrefillTimeMs { get; init; }
+
+    [JsonPropertyName("decode_time_ms")]
+    public double DecodeTimeMs { get; init; }
+
+    [JsonPropertyName("sampling_time_ms")]
+    public double SamplingTimeMs { get; init; }
+
+    [JsonPropertyName("prefill_tokens_per_sec")]
+    public double PrefillTokensPerSec { get; init; }
+
+    [JsonPropertyName("decode_tokens_per_sec")]
+    public double DecodeTokensPerSec { get; init; }
+
+    [JsonPropertyName("prompt_tokens")]
+    public int PromptTokens { get; init; }
+
+    [JsonPropertyName("generated_tokens")]
+    public int GeneratedTokens { get; init; }
 }
 
 /// <summary>

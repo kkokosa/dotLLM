@@ -1,0 +1,111 @@
+/* Offline fallback — ensures usable UI without Tailwind CDN */
+body {
+    background: #18181b;
+    color: #e4e4e7;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+    margin: 0;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #52525b; }
+* { scrollbar-width: thin; scrollbar-color: #3f3f46 transparent; }
+
+/* Blinking cursor during streaming */
+@keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+}
+.cursor-blink::after {
+    content: '\2588';
+    animation: blink 0.8s step-end infinite;
+    color: #22d3ee;
+    margin-left: 1px;
+}
+
+/* Textarea auto-resize */
+#user-input {
+    field-sizing: content;
+    min-height: 2.5rem;
+}
+
+/* Code blocks */
+.msg-content pre {
+    background: #09090b;
+    border: 1px solid #27272a;
+    border-radius: 0.375rem;
+    padding: 0.75rem 1rem;
+    overflow-x: auto;
+    margin: 0.5rem 0;
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+.msg-content code {
+    background: #27272a;
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+    font-size: 0.85em;
+}
+.msg-content pre code {
+    background: transparent;
+    padding: 0;
+    border-radius: 0;
+}
+
+/* Message content typography */
+.msg-content p { margin: 0.25rem 0; }
+.msg-content strong { color: #e4e4e7; font-weight: 600; }
+.msg-content ul, .msg-content ol { padding-left: 1.5rem; margin: 0.25rem 0; }
+.msg-content li { margin: 0.125rem 0; }
+.msg-content a { color: #22d3ee; text-decoration: underline; }
+
+/* Stats bar */
+.stats-bar {
+    font-size: 0.65rem;
+    line-height: 1.4;
+    color: #71717a;
+    border-top: 1px solid #27272a;
+    padding-top: 0.375rem;
+    margin-top: 0.5rem;
+    font-variant-numeric: tabular-nums;
+}
+.stats-bar .stat-label { color: #52525b; }
+
+/* Settings panel slide transition */
+#settings-panel.open {
+    transform: translateX(0);
+}
+
+/* Loading spinner */
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+.spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #3f3f46;
+    border-top-color: #22d3ee;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+}
+
+/* Model list item */
+.model-item {
+    padding: 0.375rem 0.5rem;
+    border: 1px solid #27272a;
+    border-radius: 0.375rem;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+.model-item:hover { border-color: #3f3f46; }
+.model-item.active { border-color: #22d3ee; background: rgba(34, 211, 238, 0.05); }
+
+/* Live generation indicator */
+.gen-live {
+    font-size: 0.6rem;
+    color: #22d3ee;
+    opacity: 0.7;
+}

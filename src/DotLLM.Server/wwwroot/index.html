@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dotLLM</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        mono: ['"JetBrains Mono"', '"Fira Code"', '"Cascadia Code"', 'Consolas', 'monospace'],
+                    },
+                    colors: {
+                        accent: { DEFAULT: '#22d3ee', dim: '#0e7490' },
+                    },
+                },
+            },
+        };
+    </script>
+    <link rel="stylesheet" href="/app.css">
+</head>
+<body class="bg-zinc-900 text-zinc-100 font-mono h-screen flex flex-col overflow-hidden">
+
+    <!-- Header -->
+    <header class="flex items-center justify-between px-4 py-2 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur shrink-0">
+        <div class="flex items-center gap-3">
+            <span class="text-accent font-bold text-lg tracking-tight">dotLLM</span>
+            <span id="model-badge" class="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 truncate max-w-[300px]">loading...</span>
+        </div>
+        <div class="flex items-center gap-2">
+            <span id="status-indicator" class="text-xs text-zinc-500">...</span>
+            <button id="clear-btn" class="text-xs px-2 py-1 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 transition" title="Clear chat">Clear</button>
+            <button id="settings-btn" class="p-1.5 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 transition" title="Settings">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Chat area -->
+    <main id="chat-container" class="flex-1 overflow-y-auto px-4 py-4">
+        <div id="messages" class="max-w-3xl mx-auto space-y-4"></div>
+        <div id="welcome" class="max-w-3xl mx-auto flex flex-col items-center justify-center h-full text-zinc-500">
+            <div class="text-4xl mb-4 opacity-30">&#x2726;</div>
+            <p class="text-sm">Start a conversation</p>
+        </div>
+    </main>
+
+    <!-- Input area -->
+    <footer class="border-t border-zinc-800 bg-zinc-950/80 backdrop-blur px-4 py-3 shrink-0">
+        <!-- System prompt (collapsible) -->
+        <div id="system-prompt-bar" class="max-w-3xl mx-auto mb-2 hidden">
+            <div class="flex items-center gap-2 mb-1">
+                <span class="text-[10px] uppercase tracking-wider text-zinc-500">System Prompt</span>
+                <button id="system-prompt-clear" class="text-[10px] text-zinc-600 hover:text-zinc-400">[clear]</button>
+            </div>
+            <textarea id="system-prompt" rows="2" class="w-full bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-300 resize-none focus:outline-none focus:border-zinc-500" placeholder="You are a helpful assistant."></textarea>
+        </div>
+        <div class="max-w-3xl mx-auto flex gap-2 items-end">
+            <button id="system-prompt-toggle" class="shrink-0 p-2 rounded text-zinc-500 hover:text-zinc-300 transition" title="Toggle system prompt">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            </button>
+            <textarea id="user-input" rows="1" class="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:border-accent/50 placeholder-zinc-600 max-h-40" placeholder="Type a message... (Enter to send, Shift+Enter for newline)"></textarea>
+            <button id="send-btn" class="shrink-0 px-4 py-2 rounded-lg bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 transition text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed">Send</button>
+            <button id="stop-btn" class="shrink-0 px-4 py-2 rounded-lg bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 transition text-sm font-medium hidden">Stop</button>
+        </div>
+    </footer>
+
+    <!-- Settings panel (slide from right) -->
+    <div id="settings-overlay" class="fixed inset-0 bg-black/40 z-40 hidden"></div>
+    <aside id="settings-panel" class="fixed top-0 right-0 h-full w-80 bg-zinc-950 border-l border-zinc-800 z-50 transform translate-x-full transition-transform duration-200 overflow-y-auto">
+        <div class="p-4">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-sm font-bold uppercase tracking-wider text-zinc-400">Settings</h2>
+                <button id="settings-close" class="text-zinc-500 hover:text-zinc-300 text-lg">&times;</button>
+            </div>
+
+            <!-- Sampling section -->
+            <section class="mb-6">
+                <h3 class="text-[10px] uppercase tracking-wider text-zinc-500 mb-3">Sampling</h3>
+                <div class="space-y-3">
+                    <div>
+                        <label class="flex justify-between text-xs text-zinc-400 mb-1">
+                            <span>Temperature</span><span id="temp-val" class="text-zinc-500">0.70</span>
+                        </label>
+                        <input id="opt-temperature" type="range" min="0" max="2" step="0.05" value="0.7" class="w-full accent-cyan-500">
+                    </div>
+                    <div>
+                        <label class="flex justify-between text-xs text-zinc-400 mb-1">
+                            <span>Top-P</span><span id="topp-val" class="text-zinc-500">1.00</span>
+                        </label>
+                        <input id="opt-top-p" type="range" min="0" max="1" step="0.01" value="1.0" class="w-full accent-cyan-500">
+                    </div>
+                    <div>
+                        <label class="flex justify-between text-xs text-zinc-400 mb-1">
+                            <span>Top-K</span><span id="topk-val" class="text-zinc-500">0</span>
+                        </label>
+                        <input id="opt-top-k" type="number" min="0" max="500" value="0" class="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-zinc-500">
+                    </div>
+                    <div>
+                        <label class="flex justify-between text-xs text-zinc-400 mb-1">
+                            <span>Min-P</span><span id="minp-val" class="text-zinc-500">0.00</span>
+                        </label>
+                        <input id="opt-min-p" type="range" min="0" max="1" step="0.01" value="0" class="w-full accent-cyan-500">
+                    </div>
+                    <div>
+                        <label class="flex justify-between text-xs text-zinc-400 mb-1">
+                            <span>Rep. Penalty</span><span id="rep-val" class="text-zinc-500">1.00</span>
+                        </label>
+                        <input id="opt-rep-penalty" type="range" min="1" max="2" step="0.01" value="1.0" class="w-full accent-cyan-500">
+                    </div>
+                    <div>
+                        <label class="text-xs text-zinc-400 mb-1 block">Max Tokens</label>
+                        <input id="opt-max-tokens" type="number" min="1" max="32768" value="2048" class="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-zinc-500">
+                    </div>
+                    <div>
+                        <label class="text-xs text-zinc-400 mb-1 block">Seed <span class="text-zinc-600">(empty = random)</span></label>
+                        <input id="opt-seed" type="number" min="0" placeholder="random" class="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-zinc-500">
+                    </div>
+                    <button id="apply-config-btn" class="w-full mt-1 py-1.5 rounded text-xs bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 transition">Apply Defaults</button>
+                </div>
+            </section>
+
+            <!-- Model section -->
+            <section class="mb-6">
+                <h3 class="text-[10px] uppercase tracking-wider text-zinc-500 mb-3">Model</h3>
+                <div id="model-info" class="text-xs text-zinc-400 space-y-1 mb-3"></div>
+                <button id="refresh-models-btn" class="text-xs text-zinc-500 hover:text-zinc-300 mb-2">[refresh list]</button>
+                <div id="model-list" class="space-y-1 max-h-48 overflow-y-auto"></div>
+                <div id="model-loading" class="text-xs text-yellow-500 mt-2 hidden">Loading model...</div>
+            </section>
+
+            <!-- Display section -->
+            <section class="mb-6">
+                <h3 class="text-[10px] uppercase tracking-wider text-zinc-500 mb-3">Display</h3>
+                <label class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+                    <input id="opt-verbose" type="checkbox" class="accent-cyan-500">
+                    <span>Verbose stats (full timing breakdown)</span>
+                </label>
+            </section>
+        </div>
+    </aside>
+
+    <script src="/app.js"></script>
+</body>
+</html>

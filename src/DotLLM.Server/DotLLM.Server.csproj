@@ -7,6 +7,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="wwwroot\index.html" />
+    <EmbeddedResource Include="wwwroot\app.js" />
+    <EmbeddedResource Include="wwwroot\app.css" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
     <ProjectReference Include="..\DotLLM.Engine\DotLLM.Engine.csproj" />
     <ProjectReference Include="..\DotLLM.Models\DotLLM.Models.csproj" />

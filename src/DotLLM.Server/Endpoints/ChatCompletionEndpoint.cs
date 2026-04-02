@@ -20,14 +20,13 @@ public static class ChatCompletionEndpoint
 
     private static async Task HandleAsync(
         ChatCompletionRequest request,
-        TextGenerator generator,
-        IChatTemplate chatTemplate,
         ServerState state,
         HttpContext httpContext)
     {
         var ct = httpContext.RequestAborted;
         var requestId = RequestConverter.GenerateRequestId();
         var modelId = state.Options.ModelId;
+        var generator = state.Generator;
 
         // Convert DTOs to engine types
         var messages = RequestConverter.ToMessages(request.Messages);
@@ -40,7 +39,7 @@ public static class ChatCompletionEndpoint
             AddGenerationPrompt = true,
             Tools = tools,
         };
-        string prompt = chatTemplate.Apply(messages, templateOptions);
+        string prompt = state.ChatTemplate.Apply(messages, templateOptions);
 
         // Build inference options
         var stopSequences = CommonStopSequences;
@@ -157,6 +156,8 @@ public static class ChatCompletionEndpoint
 
         var sb = new StringBuilder();
         FinishReason finishReason = FinishReason.Length;
+        InferenceTimings? timings = null;
+        int completionTokens = 0;
 
         await state.ExecuteAsync(async () =>
         {
@@ -164,6 +165,7 @@ public static class ChatCompletionEndpoint
             {
                 if (token.Text.Length > 0)
                 {
+                    completionTokens++;
                     sb.Append(token.Text);
                     var contentChunk = new ChatCompletionChunk
                     {
@@ -178,7 +180,10 @@ public static class ChatCompletionEndpoint
                 }
 
                 if (token.FinishReason.HasValue)
+                {
                     finishReason = token.FinishReason.Value;
+                    timings = token.Timings;
+                }
             }
         }, ct);
 
@@ -197,6 +202,8 @@ public static class ChatCompletionEndpoint
             ? new ChatDeltaDto { ToolCalls = RequestConverter.ToToolCallDtos(toolCalls) }
             : new ChatDeltaDto();
 
+        int promptTokens = timings?.PrefillTokenCount ?? 0;
+
         var finalChunk = new ChatCompletionChunk
         {
             Id = requestId,
@@ -206,6 +213,22 @@ public static class ChatCompletionEndpoint
                 Delta = finalDelta,
                 FinishReason = RequestConverter.ToFinishReasonString(finishReason),
             }],
+            Usage = new UsageDto
+            {
+                PromptTokens = promptTokens,
+                CompletionTokens = completionTokens,
+                TotalTokens = promptTokens + completionTokens,
+            },
+            Timings = timings.HasValue ? new TimingsDto
+            {
+                PrefillTimeMs = timings.Value.PrefillTimeMs,
+                DecodeTimeMs = timings.Value.DecodeTimeMs,
+                SamplingTimeMs = timings.Value.SamplingTimeMs,
+                PrefillTokensPerSec = timings.Value.PrefillTokensPerSec,
+                DecodeTokensPerSec = timings.Value.DecodeTokensPerSec,
+                PromptTokens = timings.Value.PrefillTokenCount,
+                GeneratedTokens = timings.Value.DecodeTokenCount,
+            } : null,
         };
         await WriteSseChunk(httpContext, finalChunk, ct);
 

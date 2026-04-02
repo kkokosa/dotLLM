@@ -407,6 +407,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 
 ## News
 
+- **2026-04** — Built-in web chat UI — `dotllm serve model.gguf` starts the API server and opens a browser to a bundled single-page chat UI (vanilla JS + TailwindCSS, embedded as resources in the DLL). Per-message inference stats (prefill/decode tok/s, TTFT), live sampling parameter control, model hot-swap from the UI, system prompt, verbose mode. New endpoints: `/props`, `/v1/config`, `/v1/models/available`, `/v1/models/load`. Streaming SSE now includes `usage` + `timings` in the final chunk ([#86](https://github.com/kkokosa/dotLLM/issues/86))
 - **2026-04** — ASP.NET OpenAI-compatible API server — `DotLLM.Server` with `/v1/chat/completions` (streaming SSE + non-streaming), `/v1/completions`, `/v1/models`, `/v1/tokenize`, `/v1/detokenize`, health/ready probes. Chat template formatting, tool calling with `IToolCallParser` detection, `response_format` constrained decoding. Model loading at startup via `--model`/`--device` CLI args. Sequential request processing via semaphore ([#84](https://github.com/kkokosa/dotLLM/issues/84))
 - **2026-04** — Tool calling — `IToolCallParser` implementations for Llama 3.1+, Hermes/Qwen, Mistral, and generic fallback. Auto-detection factory selects parser from model architecture and chat template content. `ToolCallSchemaBuilder` generates JSON Schema from tool definitions for constrained decoding (`tool_choice=required`). `ToolCallDetector` for post-generation detection, `StreamingToolCallAccumulator` for streaming. `--tools` and `--tool-choice` CLI options with multi-turn tool use in chat REPL. Parallel tool calls supported ([#82](https://github.com/kkokosa/dotLLM/issues/82))
 - **2026-04** — Regex + CFG constrained decoding — `RegexConstraint` compiles patterns to minimized DFA (Thompson NFA → subset construction → Hopcroft minimization) with equivalence-class compression. `GrammarConstraint` parses GBNF grammars into PDA with InlineArray-based call stack. Both use zero-alloc struct simulators and dictionary-cached token masks. `--response-format regex --pattern <pattern>` and `--response-format grammar --grammar <gbnf|@file>` CLI support ([#80](https://github.com/kkokosa/dotLLM/issues/80))
@@ -444,7 +445,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 | **2 — Practical Local Inference** | Engine metrics, benchmarks, Q4_K_M, chat templates, streaming, multi-threading, more architectures | Done (10/10) |
 | **3 — CPU Performance** | Decode dispatch, Q8_1 input, weight repacking, outer-product GEMM, tiled attention, fast exp, fusion, NUMA | In Progress (7/8) |
 | **4 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Done (3/3) |
-| **5 — Constrained Decoding & API** | JSON mode, JSON Schema, regex/CFG, tool calling, logit bias, OpenAI API server | In Progress (5/6) |
+| **5 — Constrained Decoding & API** | JSON mode, JSON Schema, regex/CFG, tool calling, logit bias, OpenAI API server, chat UI | Done (6/6) |
 | **6 — Production Serving** | Continuous batching, paged KV-cache, prompt caching, speculative decoding, metrics | Planned |
 | **7 — Expand** | Hooks, logit lens, LoRA, MLA, SAE, multi-GPU, ROCm | Planned |
 

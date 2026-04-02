@@ -16,13 +16,13 @@ public static class CompletionEndpoint
 
     private static async Task HandleAsync(
         CompletionRequest request,
-        TextGenerator generator,
         ServerState state,
         HttpContext httpContext)
     {
         var ct = httpContext.RequestAborted;
         var requestId = RequestConverter.GenerateRequestId();
         var modelId = state.Options.ModelId;
+        var generator = state.Generator;
 
         var options = RequestConverter.ToInferenceOptions(request,
             new DotLLM.Core.Configuration.ThreadingConfig(
