@@ -659,7 +659,12 @@ internal sealed class JinjaEvaluator
                 case '\t': sb.Append("\\t"); break;
                 default:
                     if (c < ' ')
-                        sb.Append($"\\u{(int)c:X4}");
+                    {
+                        // Zero-alloc hex escape — control chars are always 00xx
+                        sb.Append("\\u00");
+                        sb.Append("0123456789ABCDEF"[(c >> 4) & 0xF]);
+                        sb.Append("0123456789ABCDEF"[c & 0xF]);
+                    }
                     else
                         sb.Append(c);
                     break;
