@@ -2,7 +2,7 @@
 
 ## Overview
 
-The roadmap is organized into 7 phases, each building on the previous. The principle is **end-to-end first, then optimize** — get a working inference pipeline as quickly as possible (Phase 1), then add features and performance iteratively.
+The roadmap is organized into 9 phases, each building on the previous. The principle is **end-to-end first, then optimize** — get a working inference pipeline as quickly as possible (Phase 1), then add features and performance iteratively.
 
 Each step is designed to be a discrete unit of work suitable for a single implementation session.
 
@@ -88,7 +88,7 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 
 ## Phase 5 — Constrained Decoding & Initial API
 
-**Goal**: Structured output guarantees and an OpenAI-compatible API server with built-in chat UI. These features can be developed and tested without production serving infrastructure.
+**Goal**: Structured output guarantees, an OpenAI-compatible API server with built-in chat UI, and simple prompt caching for interactive use.
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
@@ -98,43 +98,64 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 | 42 | **Tool calling** :white_check_mark: | `IToolCallParser`, chat template tool integration, structured output for function arguments. `finish_reason: "tool_calls"`. Parallel tool calls. | 16, 40 |
 | 34 | **ASP.NET server** :white_check_mark: | Minimal API endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`, `/v1/tokenize`, `/v1/detokenize`. Health + readiness probes. | 16, 17 |
 | 53 | **Chat UI (`serve` command)** :white_check_mark: | Built-in web chat interface served by the ASP.NET host. `dotllm serve model.gguf` starts the API server and opens a browser to a bundled single-page chat UI. Streaming responses via SSE, model/parameter selection, conversation history. Similar to `ollama serve` + Open WebUI or `llama.cpp --server` built-in UI. | 34 |
+| 54 | **Simple prompt caching** | Hash-based prefix cache for multi-turn conversations. Hash the token prefix, store/reuse the KV-cache state. On cache hit, skip prefill for the matching prefix and only process new tokens. Works with existing `SimpleKvCache` — no paged attention required. LRU eviction with configurable max cached sessions. `--prompt-cache` CLI flag. Dramatically reduces TTFT for multi-turn chat. | 7, 34 |
 
-**Milestone**: Guaranteed valid JSON/schema output, tool calling, a functional OpenAI-compatible API server, and a browser-based chat UI.
+**Milestone**: Guaranteed valid JSON/schema output, tool calling, a functional OpenAI-compatible API server, browser-based chat UI, and fast multi-turn conversations via prompt caching.
 
-## Phase 6 — Production Serving
+## Phase 6 — Improved Serving
 
-**Goal**: Production-ready serving infrastructure with concurrent request handling, advanced scheduling, and full observability. This is the "deploy behind an API" milestone.
+**Goal**: Performance and deployment improvements for single-user and small-scale serving. Faster startup, efficient memory management, and speculative decoding — all without requiring concurrent request infrastructure.
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
-| 35 | **Continuous batching** | `IScheduler` with iteration-level scheduling. Prefill/decode separation. Request admission based on KV-cache capacity. Sequence eviction on completion. | 7, 34 |
-| 36 | **Paged KV-cache** | PagedAttention: block-based allocation, block tables, free pool, reference counting, copy-on-write. Replace simple KV-cache. | 35 |
-| 37 | **Prompt caching** | Automatic prefix sharing via trie of computed KV blocks. Reference-counted shared blocks. LRU eviction. Optional explicit `prefix_id` API. | 36 |
-| 38 | **Rate limiting** | Per-API-key token-bucket rate limiter via `System.Threading.RateLimiting`. Requests/min, tokens/min, concurrent limits. Priority levels. HTTP 429 responses. | 34 |
-| 43 | **Speculative decoding** | `ISpeculativeDecoder`. Draft-verify-accept loop with modified rejection sampling. KV-cache rollback. Constraint state rollback via `IDecodingConstraint.Clone()`. | 35, 36 |
-| 45 | **Metrics & tracing** | `System.Diagnostics.Metrics` for throughput/latency/utilization. `System.Diagnostics.Activity` for per-request tracing. OpenTelemetry exporters. | 12, 35 |
 | 46 | **Warm-up** | JIT pre-compilation pass at startup. CUDA kernel pre-loading. Configurable `WarmupOptions`. Readiness probe gates on warm-up completion. | 34 |
+| 55 | **Native AOT (experimental)** | Trimming-safe deployment via .NET Native AOT. Audit `[DynamicallyAccessedMembers]` annotations, source-generated JSON serialization, replace reflection-based patterns. `rd.xml` for preserved types. Goal: single-file `dotllm` binary with instant startup (~50ms vs ~500ms JIT). Mark experimental — some features (runtime LoRA loading, source generators) may require JIT fallback. | 34 |
+| 36 | **Paged KV-cache** | PagedAttention: block-based allocation, block tables, free pool, reference counting, copy-on-write. Replace simple KV-cache. | 7 |
+| 37 | **Prompt caching (advanced)** | Automatic prefix sharing via trie of computed KV blocks. Reference-counted shared blocks. LRU eviction. Optional explicit `prefix_id` API. Upgrades simple prompt caching (step 54) to work with paged KV-cache. | 36 |
+| 43 | **Speculative decoding** | `ISpeculativeDecoder`. Draft-verify-accept loop with modified rejection sampling. KV-cache rollback. Constraint state rollback via `IDecodingConstraint.Clone()`. | 36 |
 
-**Milestone**: Serve concurrent API requests with continuous batching, paged KV-cache, speculative decoding, rate limiting, and full observability.
+**Milestone**: Sub-100ms startup via warm-up/AOT, paged KV-cache with advanced prompt caching, speculative decoding for 2-3× decode speedup.
 
-## Phase 7 — Expand
+## Phase 7 — Diagnostics & Interpretability
 
-**Goal**: Advanced features for specialized use cases — diagnostics, interpretability, multi-tenant serving, additional model architectures, multi-GPU.
+**Goal**: First-class diagnostic hooks, mechanistic interpretability tools, and adapter support — making dotLLM a platform for LLM research in .NET.
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
 | 18 | **Hook system** | `IInferenceHook` interface, `HookPoint` enum, hook registry on `InferenceEngine`. Fire at 8 pipeline locations. Zero-cost when no hooks registered. | 6 |
 | 19 | **Logit lens** | Built on hook system. Capture `PostLayer(i)` hidden states, project through LM head, produce per-layer token probabilities. | 18 |
 | 21 | **Logit bias** | Per-request `logit_bias` map applied as `ISamplerStep` at the start of the sampling pipeline. | 8 |
-| 44 | **Beam search** | N-best decoding with length normalization. COW KV-cache for beam prefix sharing. Per-beam constraint state. | 36 |
-| 47 | **LoRA adapters** | `IAdapterManager`. Runtime adapter loading from SafeTensors. Multi-adapter batching (group sequences by adapter). Per-request `lora_adapter` parameter. No weight merging. | 35 |
+| 47 | **LoRA adapters** | `IAdapterManager`. Runtime adapter loading from SafeTensors. Per-request `lora_adapter` parameter. No weight merging. | Phase 1 |
+| 50 | **SAE integration** | Sparse autoencoder hooks. Load pre-trained SAEs from SafeTensors. Feature analysis, steering, ablation. Sample project: `DotLLM.Sample.Interpretability`. | 18 |
+
+**Milestone**: Diagnostic hooks, logit lens, logit bias, LoRA adapter serving, and mechanistic interpretability workflows in .NET.
+
+## Phase 8 — Model Expansion
+
+**Goal**: Broaden model architecture support beyond Llama/Mistral/Phi/Qwen to cover DeepSeek, SmolLM3, Gemma, and Mixture-of-Experts architectures.
+
+| Step | Feature | Description | Depends On |
+|------|---------|-------------|------------|
 | 48 | **MLA attention** | DeepSeek-V2/V3 Multi-head Latent Attention. Down-project KV to latent, up-project during attention. `LatentKvCache`. | Phase 1 |
 | 49 | **ALiBi position encoding** | Additive linear bias to attention scores. `AlibiPositionEncoding` implementing `IPositionEncoding`. | Phase 1 |
-| 50 | **SAE integration** | Sparse autoencoder hooks. Load pre-trained SAEs from SafeTensors. Feature analysis, steering, ablation. Sample project: `DotLLM.Sample.Interpretability`. | 18 |
-| 51 | **Multi-GPU tensor parallelism** | NCCL-based TP. Split attention heads and FFN columns. All-reduce after attention and FFN. `ParallelismConfig`. See `docs/MULTI_GPU.md`. | 31 |
-| 52 | **ROCm backend** | HIP conditional compilation of CUDA kernels. `#ifdef __HIP_PLATFORM_AMD__`. Separate `DotLLM.Backend.ROCm` NuGet package. Same C# code, different native binary. | 31 |
+| 56 | **SmolLM3 architecture** | HuggingFace SmolLM3-3B. NoPE layer support in attention (skip RoPE application on marked layers). YARN context extension for 128k. GQA with 4 groups. Tool calling via `xml_tools` (Hermes-compatible) or `python_tools` (`PythonicToolCallParser`). | Phase 1 |
+| 57 | **Gemma 4 architecture** | Google Gemma 4 model family. GeGLU activation, RMS pre-norm with per-layer scaling, interleaved local/global attention, logit soft-capping. `GemmaModel` implementing `IModel` via `TransformerBlock` parameterization. | Phase 1 |
+| 58 | **Mixture of Experts** | MoE FFN with top-K expert routing. `IExpertRouter` interface, `MoeFFN` block replacing standard FFN. Sparse activation — only K of N experts compute per token. Shared expert support (DeepSeek-style). Memory: all expert weights loaded, only active experts computed. Covers: DeepSeek-V2 MoE, Granite hybrid MoE, Qwen-MoE. | Phase 1 |
 
-**Milestone**: Diagnostic hooks, logit lens, logit bias, beam search, multi-tenant LoRA serving, DeepSeek support, multi-GPU 70B inference, mechanistic interpretability workflows in .NET.
+**Milestone**: DeepSeek-V2/V3 inference, SmolLM3 with NoPE, Gemma 4, and MoE models running correctly.
+
+## Phase 9 — Production Serving
+
+**Goal**: Full production-grade serving infrastructure for concurrent multi-user deployments. Continuous batching, rate limiting, observability, and advanced scheduling.
+
+| Step | Feature | Description | Depends On |
+|------|---------|-------------|------------|
+| 35 | **Continuous batching** | `IScheduler` with iteration-level scheduling. Prefill/decode separation. Request admission based on KV-cache capacity. Sequence eviction on completion. | 7, 34 |
+| 59 | **Advanced scheduling** | Prefill/decode disaggregation — separate queues and thread pools for prefill-heavy vs decode-heavy workloads. Priority-based scheduling with preemption (swap lower-priority sequences to CPU when VRAM-constrained). Fairness constraints to prevent starvation. Chunked prefill for long prompts to avoid head-of-line blocking. | 35, 36 |
+| 38 | **Rate limiting** | Per-API-key token-bucket rate limiter via `System.Threading.RateLimiting`. Requests/min, tokens/min, concurrent limits. Priority levels. HTTP 429 responses. | 34 |
+| 45 | **Metrics & tracing** | `System.Diagnostics.Metrics` for throughput/latency/utilization. `System.Diagnostics.Activity` for per-request tracing. OpenTelemetry exporters. | 12, 35 |
+
+**Milestone**: Serve concurrent API requests with continuous batching, advanced scheduling, rate limiting, and full OpenTelemetry observability.
 
 ## Future Considerations
 
@@ -142,6 +163,9 @@ Not in the current roadmap, but the architecture should not preclude these:
 
 | Feature | Description | Architectural Impact |
 |---------|-------------|---------------------|
+| **Multi-GPU tensor parallelism** | NCCL-based TP. Split attention heads and FFN columns. All-reduce after attention and FFN. `ParallelismConfig`. See `docs/MULTI_GPU.md`. | Requires CUDA backend (31). |
+| **ROCm backend** | HIP conditional compilation of CUDA kernels. `#ifdef __HIP_PLATFORM_AMD__`. Separate `DotLLM.Backend.ROCm` NuGet package. Same C# code, different native binary. | Requires CUDA backend (31). |
+| **Beam search** | N-best decoding with length normalization. COW KV-cache for beam prefix sharing. Per-beam constraint state. | Requires paged KV-cache (36). |
 | **Runtime quantization** | Load FP16 model and quantize to Q4_K_M at load time | Add `IQuantizer` interface, quantization kernels |
 | **Vision / multimodal** | Image encoders (CLIP ViT) for LLaVA, Phi-3-Vision, Qwen-VL | `IInputEncoder` abstraction mapping raw inputs → embeddings. Model arch needs to handle image token insertion. |
 | **Guided generation** | Pause mid-stream, inject tokens (tool results), resume from arbitrary KV-cache state | KV-cache append API, generation continuation from checkpoint |
@@ -157,7 +181,6 @@ Not in the current roadmap, but the architecture should not preclude these:
 | **xLAM tool call format** | Salesforce xLAM-2-1b/3b-fc-r — best-performing sub-4B tool-calling models (65.74% BFCL v3). Output is a bare JSON array `[{"name": "...", "arguments": {...}}]` after the assistant turn, terminated by EOS. No XML wrapper, no prefix token. vLLM uses `--tool-call-parser=xlam` with custom `xlam_qwen.jinja` template. | New `XlamToolCallParser`. Custom Jinja template preset for xLAM system prompt format. The 1B model (53.97% BFCL) is the smallest competitive tool-caller. |
 | **Pythonic tool call format** | Emerging convention: model generates Python-style function invocations (`get_weather(city="Copenhagen")`) instead of JSON. Used by SmolLM3 `python_tools` mode (wrapped in `<code>` tags), Gorilla OpenFunctions (raw Python calls), NexusRaven (`Call: func(args)`), and increasingly by Llama 4 and OLMo 3. Avoids JSON escaping issues, more natural for code-trained models. | New `PythonicToolCallParser` with Python AST-style parsing (regex for function name + kwargs). Supports `<code>` wrapper (SmolLM3) and bare invocation variants. |
 | **Granite tool call format** | IBM Granite 4.0 Micro (3B dense, Apache 2.0) — enterprise-grade tool calling. Tools in `<tools></tools>` XML, calls as `<tool_call>{"name": "...", "arguments": {...}}</tool_call>`, results via `<tool_response>`. Role markers use `<\|start_of_role\|>` tokens (not ChatML). Also Granite-4.0-H-Micro (3B hybrid Mamba-2) and Granite-4.0-H-Tiny (7B MoE, ~1B active). vLLM uses `--tool-call-parser=granite`. Granite-4.0-1b scores 54.8 on BFCL v3 (best in 1B class). | `GraniteToolCallParser` (close to Hermes but different role markers). Granite-specific Jinja template preset. Granite architecture may need Mamba-2/MoE support for hybrid variants. |
-| **SmolLM3 architecture** | HuggingFace SmolLM3-3B (July 2025, Apache 2.0, 11.2T training tokens). Strong tool calling: 92.3% BFCL single-turn. Uses GQA with 4 groups, NoPE (removes RoPE from every 4th layer), 128k context via YARN extrapolation. Tool calling via `xml_tools` (Hermes-compatible `<tool_call>` tags — likely already works) or `python_tools` (`<code>` tags — needs pythonic parser). GGUF available from ggml-org, Unsloth, bartowski. | NoPE layer support in attention (skip RoPE application on marked layers). YARN context extension. `xml_tools` mode should work with existing `HermesToolCallParser`. |
 
 ## Version Milestones
 
@@ -167,9 +190,11 @@ Not in the current roadmap, but the architecture should not preclude these:
 | `v0.2.0` | Phase 2 complete | Local inference: Q4_K_M, chat, streaming, multiple architectures |
 | `v0.2.5` | Phase 3 complete | CPU performance: outer-product GEMM, tiled attention, operator fusion, NUMA |
 | `v0.3.0` | Phase 4 complete | GPU acceleration: CUDA backend, hybrid CPU/GPU, KV-cache quantization |
-| `v0.3.5` | Phase 5 complete | Constrained decoding: JSON/schema/regex, tool calling, API server, chat UI |
-| `v0.4.0` | Phase 6 complete | Production server: batching, paged KV-cache, speculative decoding, rate limiting, metrics |
-| `v0.5.0` | Phase 7 complete | Extended: hooks, logit lens, LoRA, multi-GPU, SAE, ROCm |
+| `v0.3.5` | Phase 5 complete | Constrained decoding: JSON/schema/regex, tool calling, API server, chat UI, simple prompt caching |
+| `v0.4.0` | Phase 6 complete | Improved serving: warm-up, NativeAOT, paged KV-cache, advanced prompt caching, speculative decoding |
+| `v0.5.0` | Phase 7 complete | Diagnostics: hooks, logit lens, LoRA, SAE |
+| `v0.6.0` | Phase 8 complete | Model expansion: MLA, ALiBi, SmolLM3, Gemma 4, MoE |
+| `v0.7.0` | Phase 9 complete | Production serving: continuous batching, scheduling, rate limiting, metrics |
 | `v1.0.0` | Stability | API stability commitment, comprehensive benchmarks, documentation |
 
 ## Testing Checkpoints
@@ -180,6 +205,8 @@ Each phase has a validation checkpoint:
 - **Phase 2**: Interactive chat with Llama 3 8B Q4_K_M. Mistral/Phi/Qwen models produce correct output.
 - **Phase 3**: Outer-product GEMM reaches >800 GFLOPS on AVX2. Prefill throughput exceeds llama.cpp on equivalent hardware. Tiled attention handles 4096+ context without O(n²) memory. All kernels pass numerical accuracy validation against scalar reference. Decode is bandwidth-bound: Q4_K_M faster than Q8_0.
 - **Phase 4**: GPU decode throughput within 2× of llama.cpp for equivalent model/quantization. Hybrid CPU/GPU matches pure-CPU quality. Q8_0 KV-cache produces identical output to FP16 baseline. Q4_0 KV-cache perplexity within +0.3 of baseline.
-- **Phase 5**: JSON schema constraint produces 100% valid outputs over 1000 generations. Pass OpenAI API compatibility test suite. `dotllm serve` launches browser-based chat.
-- **Phase 6**: Continuous batching maintains throughput under concurrent load. Paged KV-cache handles concurrent sequences without OOM.
-- **Phase 7**: Logit lens produces meaningful layer-wise predictions. Logit bias modifies token probabilities correctly. Beam search produces higher-quality outputs than greedy. Multi-adapter serving handles mixed-adapter batches. TP=2 produces identical output to TP=1. SAE feature steering demonstrably modifies model behavior.
+- **Phase 5**: JSON schema constraint produces 100% valid outputs over 1000 generations. Pass OpenAI API compatibility test suite. `dotllm serve` launches browser-based chat. Multi-turn TTFT drops >5× with prompt caching enabled.
+- **Phase 6**: Warm-up eliminates first-request latency spike. Paged KV-cache handles long contexts without fragmentation. Speculative decoding achieves ≥1.5× decode speedup with acceptable draft model overhead.
+- **Phase 7**: Logit lens produces meaningful layer-wise predictions. Logit bias modifies token probabilities correctly. LoRA adapter swaps complete in <100ms. SAE feature steering demonstrably modifies model behavior.
+- **Phase 8**: DeepSeek-V2 MoE produces correct output. SmolLM3 NoPE layers handled correctly. Gemma 4 matches HuggingFace reference output. MoE expert routing matches reference implementation.
+- **Phase 9**: Continuous batching maintains throughput under concurrent load. Paged KV-cache handles concurrent sequences without OOM. Advanced scheduling prevents starvation under mixed workloads.
