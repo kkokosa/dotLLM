@@ -70,6 +70,18 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
         [DefaultValue("f32")]
         public string CacheTypeV { get; set; } = "f32";
 
+        /// <summary>Disable prompt caching (enabled by default).</summary>
+        [CommandOption("--no-prompt-cache")]
+        [Description("Disable prompt caching. When enabled (default), KV-cache state is reused across turns.")]
+        [DefaultValue(false)]
+        public bool NoPromptCache { get; set; }
+
+        /// <summary>Maximum number of cached sessions for prompt caching.</summary>
+        [CommandOption("--prompt-cache-size")]
+        [Description("Maximum number of cached sessions for prompt caching.")]
+        [DefaultValue(4)]
+        public int PromptCacheSize { get; set; } = 4;
+
         /// <summary>Suppress automatic browser opening.</summary>
         [CommandOption("--no-browser")]
         [Description("Don't auto-open the browser.")]
@@ -92,6 +104,8 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
             Port = settings.Port,
             CacheTypeK = settings.CacheTypeK,
             CacheTypeV = settings.CacheTypeV,
+            PromptCacheEnabled = !settings.NoPromptCache,
+            PromptCacheSize = settings.PromptCacheSize,
             ModelId = "none",
         };
 

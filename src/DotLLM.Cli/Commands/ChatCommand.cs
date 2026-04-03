@@ -8,6 +8,7 @@ using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Engine;
 using DotLLM.Engine.Constraints;
+using DotLLM.Engine.PromptCache;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using DotLLM.Tokenizers;
@@ -174,6 +175,18 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         [Description("Mixed-precision window: recent N tokens in full precision (0 = all quantized). Only used when --cache-type-k or --cache-type-v is set.")]
         [DefaultValue(0)]
         public int CacheWindow { get; set; }
+
+        /// <summary>Disable prompt caching (enabled by default).</summary>
+        [CommandOption("--no-prompt-cache")]
+        [Description("Disable prompt caching. When enabled (default), KV-cache state is reused across turns.")]
+        [DefaultValue(false)]
+        public bool NoPromptCache { get; set; }
+
+        /// <summary>Maximum number of cached sessions for prompt caching.</summary>
+        [CommandOption("--prompt-cache-size")]
+        [Description("Maximum number of cached sessions for prompt caching.")]
+        [DefaultValue(1)]
+        public int PromptCacheSize { get; set; } = 1;
 
         /// <summary>Verbose debug output.</summary>
         [CommandOption("--verbose|-v")]
@@ -348,11 +361,14 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                 kvConfig.KeyDType, kvConfig.ValueDType, kvConfig.MixedPrecisionWindowSize);
         }
 
-        var generator = new TextGenerator(model!, tokenizer!, kvFactory);
+        PrefixCache? prefixCache = !settings.NoPromptCache
+            ? new PrefixCache(settings.PromptCacheSize)
+            : null;
+        var generator = new TextGenerator(model!, tokenizer!, kvFactory, prefixCache);
 
         try
         {
-            await RunRepl(generator, chatTemplate, inferenceOptions, history, settings, tools, toolCallParser, toolChoice, settings.Verbose);
+            await RunRepl(generator, chatTemplate, inferenceOptions, history, settings, tools, toolCallParser, toolChoice, settings.Verbose, prefixCache);
         }
         finally
         {
@@ -372,7 +388,8 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         ToolDefinition[]? tools,
         IToolCallParser? toolCallParser,
         ToolChoice toolChoice,
-        bool verbose)
+        bool verbose,
+        PrefixCache? prefixCache)
     {
         while (true)
         {
@@ -404,6 +421,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                 history.Clear();
                 if (systemMsg != null)
                     history.Add(systemMsg);
+                prefixCache?.Clear();
                 AnsiConsole.MarkupLine("[dim]History cleared.[/]");
                 continue;
             }
@@ -617,8 +635,11 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         double ttftMs = firstTokenTicks > 0 ? firstTokenTicks * 1000.0 / Stopwatch.Frequency : 0;
         double prefillTokSec = timings.PrefillTokensPerSec;
         double decodeTokSec = timings.DecodeTokensPerSec;
+        string cacheInfo = timings.CachedTokenCount > 0
+            ? $", {timings.CachedTokenCount} cached"
+            : "";
         AnsiConsole.MarkupLine(
-            $"[dim][[{promptTokenCount} prompt tokens, {tokenCount} generated tokens, " +
+            $"[dim][[{promptTokenCount} prompt tokens{cacheInfo}, {tokenCount} generated tokens, " +
             $"{ttftMs:F0} ms TTFT, {prefillTokSec:F1} prefill tok/s, {decodeTokSec:F1} decode tok/s]][/]");
         Console.WriteLine();
     }

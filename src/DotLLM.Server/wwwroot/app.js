@@ -425,6 +425,9 @@ function createStatsBar(stats) {
         parts.push(`${stats.usage.prompt_tokens} prompt`);
         parts.push(`${stats.usage.completion_tokens} gen`);
     }
+    if (stats.timings?.cached_tokens > 0) {
+        parts.push(`${stats.timings.cached_tokens} cached`);
+    }
     if (stats.ttftMs != null) {
         parts.push(`${stats.ttftMs.toFixed(0)}ms TTFT`);
     }
@@ -1238,6 +1241,7 @@ function buildExportMarkdown() {
                 parts.push(`${s.usage.prompt_tokens} prompt tokens`);
                 parts.push(`${s.usage.completion_tokens} generated tokens`);
             }
+            if (s.timings?.cached_tokens > 0) parts.push(`${s.timings.cached_tokens} cached tokens`);
             if (s.ttftMs != null) parts.push(`TTFT: ${s.ttftMs.toFixed(0)}ms`);
             if (s.timings) {
                 const t = s.timings;

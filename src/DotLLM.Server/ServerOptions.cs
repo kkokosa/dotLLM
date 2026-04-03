@@ -35,6 +35,12 @@ public sealed record ServerOptions
     /// <summary>KV-cache value quantization type.</summary>
     public string CacheTypeV { get; init; } = "f32";
 
+    /// <summary>Whether prompt caching is enabled.</summary>
+    public bool PromptCacheEnabled { get; init; } = true;
+
+    /// <summary>Maximum number of cached sessions for prompt caching.</summary>
+    public int PromptCacheSize { get; init; } = 4;
+
     /// <summary>Model display name (derived from file path).</summary>
     public string ModelId { get; init; } = "default";
 
@@ -53,6 +59,8 @@ public sealed record ServerOptions
         int port = 8080;
         string cacheTypeK = "f32";
         string cacheTypeV = "f32";
+        bool promptCacheEnabled = true;
+        int promptCacheSize = 4;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -81,6 +89,10 @@ public sealed record ServerOptions
                     cacheTypeK = next ?? "f32"; i++; break;
                 case "--cache-type-v":
                     cacheTypeV = next ?? "f32"; i++; break;
+                case "--no-prompt-cache":
+                    promptCacheEnabled = false; break;
+                case "--prompt-cache-size":
+                    promptCacheSize = int.Parse(next!); i++; break;
                 default:
                     // Positional: treat as model if not set
                     if (model is null && !arg.StartsWith('-'))
@@ -111,6 +123,8 @@ public sealed record ServerOptions
             Port = port,
             CacheTypeK = cacheTypeK,
             CacheTypeV = cacheTypeV,
+            PromptCacheEnabled = promptCacheEnabled,
+            PromptCacheSize = promptCacheSize,
             ModelId = modelId,
         };
     }

@@ -61,6 +61,9 @@ public sealed record TimingsDto
 
     [JsonPropertyName("generated_tokens")]
     public int GeneratedTokens { get; init; }
+
+    [JsonPropertyName("cached_tokens")]
+    public int CachedTokens { get; init; }
 }
 
 /// <summary>

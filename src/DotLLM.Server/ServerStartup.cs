@@ -3,6 +3,7 @@ using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Engine;
 using DotLLM.Engine.KvCache;
+using DotLLM.Engine.PromptCache;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using DotLLM.Tokenizers;
@@ -129,7 +130,10 @@ public static class ServerStartup
                 kvConfig.KeyDType, kvConfig.ValueDType, kvConfig.MixedPrecisionWindowSize);
         }
 
-        var generator = new TextGenerator(model, tokenizer, kvFactory);
+        PrefixCache? prefixCache = options.PromptCacheEnabled
+            ? new PrefixCache(options.PromptCacheSize)
+            : null;
+        var generator = new TextGenerator(model, tokenizer, kvFactory, prefixCache);
 
         return new ServerState
         {
@@ -138,6 +142,7 @@ public static class ServerStartup
             ToolCallParser = toolCallParser,
             KvCacheConfig = kvConfig,
             KvCacheFactory = kvFactory,
+            PrefixCache = prefixCache,
             IsReady = true,
             Model = model,
             Tokenizer = tokenizer,

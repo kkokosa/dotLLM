@@ -131,6 +131,18 @@ public sealed unsafe class SimpleKvCache : IKvCache
         return new TensorView(shape, DType.Float32, -1, _values[layerIndex]);
     }
 
+    /// <summary>
+    /// Resets the visible length of the cache to the given position.
+    /// Data beyond this position remains in memory but will be overwritten.
+    /// Used by prompt caching to truncate to the matched prefix length.
+    /// </summary>
+    internal void SetCurrentLength(int length)
+    {
+        if ((uint)length > (uint)_maxSeqLen)
+            throw new ArgumentOutOfRangeException(nameof(length));
+        _currentLength = length;
+    }
+
     /// <inheritdoc/>
     public void Dispose()
     {

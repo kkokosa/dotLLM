@@ -284,6 +284,54 @@ public sealed unsafe class SimpleKvCacheTests
     }
 
     [Fact]
+    public void SetCurrentLength_TruncatesToGivenPosition()
+    {
+        using var cache = new SimpleKvCache(NumLayers, NumKvHeads, HeadDim, MaxSeqLen);
+
+        // Populate 5 positions
+        nint kPtr = AllocAndFillNative(1, 1.0f);
+        nint vPtr = AllocAndFillNative(1, 2.0f);
+        try
+        {
+            var kRef = new TensorRef(1, KvStride, DType.Float32, -1, kPtr);
+            var vRef = new TensorRef(1, KvStride, DType.Float32, -1, vPtr);
+            for (int i = 0; i < 5; i++)
+                cache.Update(kRef, vRef, [i], layerIndex: 0);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)kPtr);
+            NativeMemory.AlignedFree((void*)vPtr);
+        }
+        Assert.Equal(5, cache.CurrentLength);
+
+        cache.SetCurrentLength(3);
+        Assert.Equal(3, cache.CurrentLength);
+    }
+
+    [Fact]
+    public void SetCurrentLength_ZeroResetsCache()
+    {
+        using var cache = new SimpleKvCache(NumLayers, NumKvHeads, HeadDim, MaxSeqLen);
+        cache.SetCurrentLength(0);
+        Assert.Equal(0, cache.CurrentLength);
+    }
+
+    [Fact]
+    public void SetCurrentLength_ThrowsOnNegative()
+    {
+        using var cache = new SimpleKvCache(NumLayers, NumKvHeads, HeadDim, MaxSeqLen);
+        Assert.Throws<ArgumentOutOfRangeException>(() => cache.SetCurrentLength(-1));
+    }
+
+    [Fact]
+    public void SetCurrentLength_ThrowsOnExceedMaxLength()
+    {
+        using var cache = new SimpleKvCache(NumLayers, NumKvHeads, HeadDim, MaxSeqLen);
+        Assert.Throws<ArgumentOutOfRangeException>(() => cache.SetCurrentLength(MaxSeqLen + 1));
+    }
+
+    [Fact]
     public void Finalizer_FreesMemory_WhenDisposeNotCalled()
     {
         // We can't directly test the finalizer frees memory without tooling,

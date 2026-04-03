@@ -8,6 +8,7 @@ using DotLLM.Core.Sampling;
 using DotLLM.Core.Tensors;
 using DotLLM.Engine.Constraints;
 using DotLLM.Engine.KvCache;
+using DotLLM.Engine.PromptCache;
 using DotLLM.Engine.Samplers;
 using DotLLM.Engine.Samplers.StopConditions;
 using DotLLM.Tokenizers;
@@ -23,6 +24,7 @@ public sealed class TextGenerator
     private readonly IModel _model;
     private readonly ITokenizer _tokenizer;
     private readonly Func<ModelConfig, int, Core.Attention.IKvCache>? _kvCacheFactory;
+    private readonly PrefixCache? _prefixCache;
 
     /// <summary>
     /// Creates a new text generator.
@@ -31,12 +33,16 @@ public sealed class TextGenerator
     /// <param name="tokenizer">The tokenizer for encoding/decoding text.</param>
     /// <param name="kvCacheFactory">Optional factory for creating a KV-cache. When null, uses <see cref="SimpleKvCache"/>.
     /// Parameters: (config, maxSeqLen).</param>
+    /// <param name="prefixCache">Optional prefix cache for reusing KV-cache state across calls.
+    /// When provided, the KV-cache is kept alive between calls and only new suffix tokens are prefilled.</param>
     public TextGenerator(IModel model, ITokenizer tokenizer,
-                          Func<ModelConfig, int, Core.Attention.IKvCache>? kvCacheFactory = null)
+                          Func<ModelConfig, int, Core.Attention.IKvCache>? kvCacheFactory = null,
+                          PrefixCache? prefixCache = null)
     {
         _model = model;
         _tokenizer = tokenizer;
         _kvCacheFactory = kvCacheFactory;
+        _prefixCache = prefixCache;
     }
 
     /// <summary>
@@ -107,114 +113,146 @@ public sealed class TextGenerator
                 stopConditions.Add(new StopStringCondition(seq));
         }
 
-        // Allocate KV-cache
-        int cacheSize = Math.Min(promptLen + maxTokens, _model.Config.MaxSequenceLength);
-        using var kvCache = _kvCacheFactory != null
-            ? _kvCacheFactory(_model.Config, cacheSize)
-            : new SimpleKvCache(
-                _model.Config.NumLayers,
-                _model.Config.NumKvHeads,
-                _model.Config.HeadDim,
-                cacheSize);
+        // Resolve KV-cache: reuse from prefix cache or allocate fresh
+        var (kvCache, cachedTokenCount, ownsKvCache) = ResolveKvCache(promptIds, promptLen, maxTokens);
 
-        var generatedIds = new List<int>(maxTokens);
-        var finishReason = FinishReason.Length;
-        long prefillTicks = 0;
-        long decodeTicks = 0;
-        long samplerTicks = 0;
-
-        // Prefill: run full prompt through the model
-        int[] positions = new int[promptLen];
-        for (int i = 0; i < promptLen; i++)
-            positions[i] = i;
-
-        int firstTokenId;
-        long ts0 = Stopwatch.GetTimestamp();
-        using (ITensor prefillLogits = _model.Forward(promptIds, positions, deviceId: -1, kvCache))
+        try
         {
-            long ts1 = Stopwatch.GetTimestamp();
-            prefillTicks = ts1 - ts0;
+            var generatedIds = new List<int>(maxTokens);
+            var finishReason = FinishReason.Length;
+            long prefillTicks = 0;
+            long decodeTicks = 0;
+            long samplerTicks = 0;
+            int cacheSize = kvCache.MaxLength;
 
-            unsafe
+            // Prefill: run only new suffix tokens through the model
+            int prefillStart = cachedTokenCount;
+            int prefillLen = promptLen - prefillStart;
+
+            int firstTokenId;
+            long ts0 = Stopwatch.GetTimestamp();
+
+            if (prefillLen > 0)
             {
-                long samplerStart = Stopwatch.GetTimestamp();
-                var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
-                if (constraint != null)
-                    TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                firstTokenId = pipeline.Sample(logitSpan, generatedIds);
-                samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
-            }
-        }
+                // Prefill suffix tokens
+                int[] suffixTokens = prefillStart == 0 ? promptIds : promptIds[prefillStart..];
+                int[] positions = new int[prefillLen];
+                for (int i = 0; i < prefillLen; i++)
+                    positions[i] = prefillStart + i;
 
-        constraint?.Advance(firstTokenId);
-
-        // Check stop conditions for first token
-        generatedIds.Add(firstTokenId);
-        string decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
-
-        var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds, decodedText);
-        if (stopResult != StopResult.Continue)
-        {
-            if (stopResult == StopResult.Stop)
-                generatedIds.RemoveAt(generatedIds.Count - 1);
-            else
-                onTokenGenerated?.Invoke(firstTokenId);
-
-            finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
-            return BuildResponse(promptLen, generatedIds, finishReason,
-                prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache));
-        }
-
-        onTokenGenerated?.Invoke(firstTokenId);
-
-        // Decode loop: one token at a time
-        for (int step = 1; step < maxTokens; step++)
-        {
-            int pos = promptLen + step - 1;
-            if (pos >= cacheSize)
-                break;
-
-            int lastToken = generatedIds[^1];
-            int nextTokenId;
-
-            long fwdStart = Stopwatch.GetTimestamp();
-            using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
-            {
-                decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
-
-                unsafe
+                using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
                 {
-                    long samplerStart = Stopwatch.GetTimestamp();
-                    var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
-                    if (constraint != null)
-                        TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                    nextTokenId = pipeline.Sample(logitSpan, generatedIds);
-                    samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                    long ts1 = Stopwatch.GetTimestamp();
+                    prefillTicks = ts1 - ts0;
+
+                    unsafe
+                    {
+                        long samplerStart = Stopwatch.GetTimestamp();
+                        var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
+                        if (constraint != null)
+                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                        firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                    }
+                }
+            }
+            else
+            {
+                // 100% cache hit — re-forward last prompt token to get logits
+                using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache))
+                {
+                    long ts1 = Stopwatch.GetTimestamp();
+                    prefillTicks = ts1 - ts0;
+
+                    unsafe
+                    {
+                        long samplerStart = Stopwatch.GetTimestamp();
+                        var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
+                        if (constraint != null)
+                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                        firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                    }
                 }
             }
 
-            constraint?.Advance(nextTokenId);
+            constraint?.Advance(firstTokenId);
 
-            generatedIds.Add(nextTokenId);
-            decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
+            // Check stop conditions for first token
+            generatedIds.Add(firstTokenId);
+            string decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
 
-            stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
+            var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds, decodedText);
             if (stopResult != StopResult.Continue)
             {
                 if (stopResult == StopResult.Stop)
                     generatedIds.RemoveAt(generatedIds.Count - 1);
                 else
-                    onTokenGenerated?.Invoke(nextTokenId);
+                    onTokenGenerated?.Invoke(firstTokenId);
 
                 finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
-                break;
+                StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                return BuildResponse(promptLen, generatedIds, finishReason,
+                    prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache), cachedTokenCount);
             }
 
-            onTokenGenerated?.Invoke(nextTokenId);
-        }
+            onTokenGenerated?.Invoke(firstTokenId);
 
-        return BuildResponse(promptLen, generatedIds, finishReason,
-            prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache));
+            // Decode loop: one token at a time
+            for (int step = 1; step < maxTokens; step++)
+            {
+                int pos = promptLen + step - 1;
+                if (pos >= cacheSize)
+                    break;
+
+                int lastToken = generatedIds[^1];
+                int nextTokenId;
+
+                long fwdStart = Stopwatch.GetTimestamp();
+                using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
+                {
+                    decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
+
+                    unsafe
+                    {
+                        long samplerStart = Stopwatch.GetTimestamp();
+                        var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
+                        if (constraint != null)
+                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                        nextTokenId = pipeline.Sample(logitSpan, generatedIds);
+                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                    }
+                }
+
+                constraint?.Advance(nextTokenId);
+
+                generatedIds.Add(nextTokenId);
+                decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
+
+                stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
+                if (stopResult != StopResult.Continue)
+                {
+                    if (stopResult == StopResult.Stop)
+                        generatedIds.RemoveAt(generatedIds.Count - 1);
+                    else
+                        onTokenGenerated?.Invoke(nextTokenId);
+
+                    finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+                    break;
+                }
+
+                onTokenGenerated?.Invoke(nextTokenId);
+            }
+
+            StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+            return BuildResponse(promptLen, generatedIds, finishReason,
+                prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache), cachedTokenCount);
+        }
+        finally
+        {
+            if (ownsKvCache)
+                kvCache.Dispose();
+        }
     }
 
     /// <summary>
@@ -280,122 +318,76 @@ public sealed class TextGenerator
                 stopConditions.Add(new StopStringCondition(seq));
         }
 
-        // Allocate KV-cache — disposed when the enumerator completes/disposes
-        int cacheSize = Math.Min(promptLen + maxTokens, _model.Config.MaxSequenceLength);
-        using var kvCache = _kvCacheFactory != null
-            ? _kvCacheFactory(_model.Config, cacheSize)
-            : new SimpleKvCache(
-                _model.Config.NumLayers,
-                _model.Config.NumKvHeads,
-                _model.Config.HeadDim,
-                cacheSize);
+        // Resolve KV-cache: reuse from prefix cache or allocate fresh
+        var (kvCache, cachedTokenCount, ownsKvCache) = ResolveKvCache(promptIds, promptLen, maxTokens);
         long kvBytes = GetKvCacheBytes(kvCache);
 
-        var generatedIds = new List<int>(maxTokens);
-        long prefillTicks = 0;
-        long decodeTicks = 0;
-        long samplerTicks = 0;
-        int previousDecodeLength = 0;
-
-        // Prefill: run full prompt through the model
-        int[] positions = new int[promptLen];
-        for (int i = 0; i < promptLen; i++)
-            positions[i] = i;
-
-        int firstTokenId;
-        long ts0 = Stopwatch.GetTimestamp();
-        using (ITensor prefillLogits = _model.Forward(promptIds, positions, deviceId: -1, kvCache))
+        try
         {
-            long ts1 = Stopwatch.GetTimestamp();
-            prefillTicks = ts1 - ts0;
+            var generatedIds = new List<int>(maxTokens);
+            long prefillTicks = 0;
+            long decodeTicks = 0;
+            long samplerTicks = 0;
+            int previousDecodeLength = 0;
+            int cacheSize = kvCache.MaxLength;
 
-            unsafe
+            // Prefill: run only new suffix tokens through the model
+            int prefillStart = cachedTokenCount;
+            int prefillLen = promptLen - prefillStart;
+
+            int firstTokenId;
+            long ts0 = Stopwatch.GetTimestamp();
+
+            if (prefillLen > 0)
             {
-                long samplerStart = Stopwatch.GetTimestamp();
-                var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
-                if (constraint != null)
-                    TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                firstTokenId = pipeline.Sample(logitSpan, generatedIds);
-                samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
-            }
-        }
+                int[] suffixTokens = prefillStart == 0 ? promptIds : promptIds[prefillStart..];
+                int[] positions = new int[prefillLen];
+                for (int i = 0; i < prefillLen; i++)
+                    positions[i] = prefillStart + i;
 
-        constraint?.Advance(firstTokenId);
+                using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
+                {
+                    long ts1 = Stopwatch.GetTimestamp();
+                    prefillTicks = ts1 - ts0;
 
-        // Check stop conditions for first token
-        generatedIds.Add(firstTokenId);
-        string decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
-
-        var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds, decodedText);
-        if (stopResult != StopResult.Continue)
-        {
-            var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
-
-            if (stopResult == StopResult.Stop)
-            {
-                // Token excluded — match sync path which removes it before computing timings
-                generatedIds.RemoveAt(generatedIds.Count - 1);
-                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
-                yield return new GenerationToken(firstTokenId, string.Empty, fr, timings);
+                    unsafe
+                    {
+                        long samplerStart = Stopwatch.GetTimestamp();
+                        var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
+                        if (constraint != null)
+                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                        firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                    }
+                }
             }
             else
             {
-                // Token included
-                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
-                string text = decodedText[previousDecodeLength..];
-                yield return new GenerationToken(firstTokenId, text, fr, timings);
-            }
-            yield break;
-        }
-
-        // Yield first token — check if it's also the last (maxTokens == 1)
-        {
-            bool firstIsLast = maxTokens <= 1;
-            string text = decodedText[previousDecodeLength..];
-            if (firstIsLast)
-            {
-                var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
-                yield return new GenerationToken(firstTokenId, text, FinishReason.Length, timings);
-                yield break;
-            }
-            previousDecodeLength = decodedText.Length;
-            yield return new GenerationToken(firstTokenId, text, null);
-        }
-
-        // Decode loop: one token at a time
-        for (int step = 1; step < maxTokens; step++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            int pos = promptLen + step - 1;
-            if (pos >= cacheSize)
-                break;
-
-            int lastToken = generatedIds[^1];
-            int nextTokenId;
-
-            long fwdStart = Stopwatch.GetTimestamp();
-            using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
-            {
-                decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
-
-                unsafe
+                // 100% cache hit — re-forward last prompt token to get logits
+                using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache))
                 {
-                    long samplerStart = Stopwatch.GetTimestamp();
-                    var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
-                    if (constraint != null)
-                        TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                    nextTokenId = pipeline.Sample(logitSpan, generatedIds);
-                    samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                    long ts1 = Stopwatch.GetTimestamp();
+                    prefillTicks = ts1 - ts0;
+
+                    unsafe
+                    {
+                        long samplerStart = Stopwatch.GetTimestamp();
+                        var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
+                        if (constraint != null)
+                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                        firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                    }
                 }
             }
 
-            constraint?.Advance(nextTokenId);
+            constraint?.Advance(firstTokenId);
 
-            generatedIds.Add(nextTokenId);
-            decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
+            // Check stop conditions for first token
+            generatedIds.Add(firstTokenId);
+            string decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
 
-            stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
+            var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds, decodedText);
             if (stopResult != StopResult.Continue)
             {
                 var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
@@ -403,31 +395,110 @@ public sealed class TextGenerator
                 if (stopResult == StopResult.Stop)
                 {
                     generatedIds.RemoveAt(generatedIds.Count - 1);
-                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
-                    yield return new GenerationToken(nextTokenId, string.Empty, fr, timings);
+                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
+                    yield return new GenerationToken(firstTokenId, string.Empty, fr, timings);
                 }
                 else
                 {
-                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
+                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
                     string text = decodedText[previousDecodeLength..];
-                    yield return new GenerationToken(nextTokenId, text, fr, timings);
+                    yield return new GenerationToken(firstTokenId, text, fr, timings);
                 }
                 yield break;
             }
 
-            // Yield token — attach finish reason if this is the last iteration
+            // Yield first token — check if it's also the last (maxTokens == 1)
             {
-                bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
+                bool firstIsLast = maxTokens <= 1;
                 string text = decodedText[previousDecodeLength..];
-                if (isLastStep)
+                if (firstIsLast)
                 {
-                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes);
-                    yield return new GenerationToken(nextTokenId, text, FinishReason.Length, timings);
+                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
+                    yield return new GenerationToken(firstTokenId, text, FinishReason.Length, timings);
                     yield break;
                 }
                 previousDecodeLength = decodedText.Length;
-                yield return new GenerationToken(nextTokenId, text, null);
+                yield return new GenerationToken(firstTokenId, text, null);
             }
+
+            // Decode loop: one token at a time
+            for (int step = 1; step < maxTokens; step++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                int pos = promptLen + step - 1;
+                if (pos >= cacheSize)
+                    break;
+
+                int lastToken = generatedIds[^1];
+                int nextTokenId;
+
+                long fwdStart = Stopwatch.GetTimestamp();
+                using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
+                {
+                    decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
+
+                    unsafe
+                    {
+                        long samplerStart = Stopwatch.GetTimestamp();
+                        var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
+                        if (constraint != null)
+                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                        nextTokenId = pipeline.Sample(logitSpan, generatedIds);
+                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                    }
+                }
+
+                constraint?.Advance(nextTokenId);
+
+                generatedIds.Add(nextTokenId);
+                decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
+
+                stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
+                if (stopResult != StopResult.Continue)
+                {
+                    var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+
+                    if (stopResult == StopResult.Stop)
+                    {
+                        generatedIds.RemoveAt(generatedIds.Count - 1);
+                        StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                        var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
+                        yield return new GenerationToken(nextTokenId, string.Empty, fr, timings);
+                    }
+                    else
+                    {
+                        StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                        var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
+                        string text = decodedText[previousDecodeLength..];
+                        yield return new GenerationToken(nextTokenId, text, fr, timings);
+                    }
+                    yield break;
+                }
+
+                // Yield token — attach finish reason if this is the last iteration
+                {
+                    bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
+                    string text = decodedText[previousDecodeLength..];
+                    if (isLastStep)
+                    {
+                        StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                        var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
+                        yield return new GenerationToken(nextTokenId, text, FinishReason.Length, timings);
+                        yield break;
+                    }
+                    previousDecodeLength = decodedText.Length;
+                    yield return new GenerationToken(nextTokenId, text, null);
+                }
+            }
+        }
+        finally
+        {
+            if (ownsKvCache)
+                kvCache.Dispose();
         }
     }
 
@@ -448,6 +519,77 @@ public sealed class TextGenerator
             yield return token.Text;
     }
 
+    /// <summary>
+    /// Resolves the KV-cache to use: either from the prefix cache (on hit) or freshly allocated.
+    /// Returns the cache, number of cached tokens, and whether the caller owns (should dispose) the cache.
+    /// </summary>
+    private (Core.Attention.IKvCache KvCache, int CachedTokenCount, bool OwnsKvCache) ResolveKvCache(
+        int[] promptIds, int promptLen, int maxTokens)
+    {
+        if (_prefixCache != null)
+        {
+            var (entry, matchedTokens) = _prefixCache.FindMatch(promptIds);
+
+            if (entry != null && matchedTokens > 0 && entry.KvCache is SimpleKvCache simpleCache)
+            {
+                // Cache hit — reuse existing KV-cache, truncate to matched prefix
+                simpleCache.SetCurrentLength(matchedTokens);
+
+                // Verify the cache is large enough for the new prompt + generation
+                int requiredSize = promptLen + maxTokens;
+                if (simpleCache.MaxLength >= requiredSize || simpleCache.MaxLength >= promptLen)
+                    return (entry.KvCache, matchedTokens, false);
+
+                // Cache too small — fall through to allocate fresh
+            }
+
+            // Cache miss or incompatible — allocate with full model context for future reuse
+            int cacheSize = Math.Min(promptLen + maxTokens, _model.Config.MaxSequenceLength);
+            var kvCache = AllocateKvCache(cacheSize);
+            return (kvCache, 0, false); // ownsKvCache=false: will be transferred to prefix cache
+        }
+
+        // No prefix cache — allocate normally, caller owns
+        {
+            int cacheSize = Math.Min(promptLen + maxTokens, _model.Config.MaxSequenceLength);
+            var kvCache = AllocateKvCache(cacheSize);
+            return (kvCache, 0, true);
+        }
+    }
+
+    /// <summary>
+    /// Allocates a fresh KV-cache using the factory or default SimpleKvCache.
+    /// </summary>
+    private Core.Attention.IKvCache AllocateKvCache(int cacheSize)
+    {
+        return _kvCacheFactory != null
+            ? _kvCacheFactory(_model.Config, cacheSize)
+            : new SimpleKvCache(
+                _model.Config.NumLayers,
+                _model.Config.NumKvHeads,
+                _model.Config.HeadDim,
+                cacheSize);
+    }
+
+    /// <summary>
+    /// Stores the KV-cache in the prefix cache after generation completes.
+    /// Transfers ownership so the cache is not disposed by the caller.
+    /// </summary>
+    private void StoreInPrefixCache(Core.Attention.IKvCache kvCache, int[] promptIds,
+        List<int> generatedIds, ref bool ownsKvCache)
+    {
+        if (_prefixCache == null)
+            return;
+
+        // Build full token sequence: prompt + generated
+        var fullSequence = new int[promptIds.Length + generatedIds.Count];
+        Array.Copy(promptIds, fullSequence, promptIds.Length);
+        CollectionsMarshal.AsSpan(generatedIds).CopyTo(fullSequence.AsSpan(promptIds.Length));
+
+        _prefixCache.Store(fullSequence, kvCache);
+        ownsKvCache = false;
+    }
+
     private static StopResult CheckStopConditions(
         List<IStopCondition> conditions, int tokenId,
         IReadOnlyList<int> generatedTokens, string decodedText)
@@ -463,7 +605,7 @@ public sealed class TextGenerator
 
     private InferenceResponse BuildResponse(int promptLen, List<int> generatedIds,
         FinishReason finishReason, long prefillTicks, long decodeTicks, long samplerTicks,
-        long kvCacheBytes = 0)
+        long kvCacheBytes = 0, int cachedTokenCount = 0)
     {
         string text = generatedIds.Count > 0
             ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false)
@@ -476,12 +618,13 @@ public sealed class TextGenerator
             FinishReason = finishReason,
             PromptTokenCount = promptLen,
             GeneratedTokenCount = generatedIds.Count,
-            Timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvCacheBytes)
+            Timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvCacheBytes, cachedTokenCount)
         };
     }
 
     private static InferenceTimings BuildTimings(int promptLen, int generatedCount,
-        long prefillTicks, long decodeTicks, long samplerTicks, long kvCacheBytes = 0)
+        long prefillTicks, long decodeTicks, long samplerTicks, long kvCacheBytes = 0,
+        int cachedTokenCount = 0)
     {
         double tickFreq = Stopwatch.Frequency;
         int decodeSteps = generatedCount > 1 ? generatedCount - 1 : 0;
@@ -493,7 +636,8 @@ public sealed class TextGenerator
             SamplingTimeMs = samplerTicks / tickFreq * 1000.0,
             PrefillTokenCount = promptLen,
             DecodeTokenCount = decodeSteps,
-            KvCacheBytes = kvCacheBytes
+            KvCacheBytes = kvCacheBytes,
+            CachedTokenCount = cachedTokenCount
         };
     }
 

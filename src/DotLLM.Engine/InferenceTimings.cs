@@ -23,6 +23,9 @@ public readonly record struct InferenceTimings
     /// <summary>Actual bytes allocated for the KV-cache (reflects quantization compression).</summary>
     public long KvCacheBytes { get; init; }
 
+    /// <summary>Number of prompt tokens served from the prefix cache (skipped during prefill).</summary>
+    public int CachedTokenCount { get; init; }
+
     /// <summary>Prefill throughput in tokens per second.</summary>
     public double PrefillTokensPerSec => PrefillTokenCount > 0 && PrefillTimeMs > 0
         ? PrefillTokenCount / (PrefillTimeMs / 1000.0) : 0;

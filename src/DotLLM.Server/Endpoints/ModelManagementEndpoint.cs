@@ -60,6 +60,7 @@ public static class ModelManagementEndpoint
                     state.ToolCallParser = newState.ToolCallParser;
                     state.KvCacheConfig = newState.KvCacheConfig;
                     state.KvCacheFactory = newState.KvCacheFactory;
+                    state.PrefixCache = newState.PrefixCache;
                     state.LoadedModelPath = resolvedPath;
                     state.CurrentGguf = newState.CurrentGguf;
 

@@ -235,6 +235,7 @@ public static class ChatCompletionEndpoint
                 DecodeTokensPerSec = timings.Value.DecodeTokensPerSec,
                 PromptTokens = timings.Value.PrefillTokenCount,
                 GeneratedTokens = timings.Value.DecodeTokenCount,
+                CachedTokens = timings.Value.CachedTokenCount,
             } : null,
             Prompt = prompt,
         };
