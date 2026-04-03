@@ -145,6 +145,7 @@ dotLLM/
 | Diagnostics & interpretability | [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) | Hooks, logit lens, SAE |
 | Telemetry & observability | [docs/TELEMETRY.md](docs/TELEMETRY.md) | Metrics, request tracing |
 | Server & API | [docs/SERVER.md](docs/SERVER.md) | Endpoints, rate limiting, warm-up |
+| Warm-up | [docs/WARMUP.md](docs/WARMUP.md) | Startup warm-up, JIT compilation, CUDA warm-up |
 | GPU inference | [docs/GPU.md](docs/GPU.md) | GPU forward pass, weight loading, KV-cache, CLI |
 | CUDA backend | [docs/CUDA.md](docs/CUDA.md) | PTX architecture, P/Invoke, kernel conventions, build |
 | Multi-GPU | [docs/MULTI_GPU.md](docs/MULTI_GPU.md) | Tensor/pipeline parallelism, NCCL |

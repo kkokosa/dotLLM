@@ -1,3 +1,5 @@
+using DotLLM.Engine;
+
 namespace DotLLM.Server;
 
 /// <summary>
@@ -41,6 +43,9 @@ public sealed record ServerOptions
     /// <summary>Maximum number of cached sessions for prompt caching.</summary>
     public int PromptCacheSize { get; init; } = 4;
 
+    /// <summary>Warm-up configuration for JIT pre-compilation and CUDA kernel loading.</summary>
+    public WarmupOptions Warmup { get; init; } = WarmupOptions.Default;
+
     /// <summary>Model display name (derived from file path).</summary>
     public string ModelId { get; init; } = "default";
 
@@ -61,6 +66,8 @@ public sealed record ServerOptions
         string cacheTypeV = "f32";
         bool promptCacheEnabled = true;
         int promptCacheSize = 4;
+        bool warmupEnabled = true;
+        int warmupIterations = 3;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -93,6 +100,12 @@ public sealed record ServerOptions
                     promptCacheEnabled = false; break;
                 case "--prompt-cache-size":
                     promptCacheSize = int.Parse(next!); i++; break;
+                case "--warmup":
+                    warmupEnabled = true; break;
+                case "--no-warmup":
+                    warmupEnabled = false; break;
+                case "--warmup-iterations":
+                    warmupIterations = int.Parse(next!); i++; break;
                 default:
                     // Positional: treat as model if not set
                     if (model is null && !arg.StartsWith('-'))
@@ -125,6 +138,11 @@ public sealed record ServerOptions
             CacheTypeV = cacheTypeV,
             PromptCacheEnabled = promptCacheEnabled,
             PromptCacheSize = promptCacheSize,
+            Warmup = new WarmupOptions
+            {
+                Enabled = warmupEnabled,
+                Iterations = warmupIterations,
+            },
             ModelId = modelId,
         };
     }

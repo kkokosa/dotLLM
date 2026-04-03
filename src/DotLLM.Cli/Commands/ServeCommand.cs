@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using DotLLM.Engine;
 using DotLLM.Server;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -82,6 +83,18 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
         [DefaultValue(4)]
         public int PromptCacheSize { get; set; } = 4;
 
+        /// <summary>Disable warm-up (enabled by default).</summary>
+        [CommandOption("--no-warmup")]
+        [Description("Disable warm-up passes at startup. When enabled (default), dummy inference runs trigger JIT compilation.")]
+        [DefaultValue(false)]
+        public bool NoWarmup { get; set; }
+
+        /// <summary>Number of warm-up iterations.</summary>
+        [CommandOption("--warmup-iterations")]
+        [Description("Number of warm-up iterations (default: 3). More iterations improve JIT optimization via Dynamic PGO.")]
+        [DefaultValue(3)]
+        public int WarmupIterations { get; set; } = 3;
+
         /// <summary>Suppress automatic browser opening.</summary>
         [CommandOption("--no-browser")]
         [Description("Don't auto-open the browser.")]
@@ -106,6 +119,11 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
             CacheTypeV = settings.CacheTypeV,
             PromptCacheEnabled = !settings.NoPromptCache,
             PromptCacheSize = settings.PromptCacheSize,
+            Warmup = new WarmupOptions
+            {
+                Enabled = !settings.NoWarmup,
+                Iterations = settings.WarmupIterations,
+            },
             ModelId = "none",
         };
 
@@ -125,7 +143,7 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
 
             AnsiConsole.Status()
                 .Spinner(Spinner.Known.Dots)
-                .Start("Loading model...", _ =>
+                .Start("Loading and warming up model...", _ =>
                 {
                     state = ServerStartup.LoadModel(resolvedPath, serverOptions);
                 });
