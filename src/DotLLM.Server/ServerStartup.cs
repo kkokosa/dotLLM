@@ -137,6 +137,7 @@ public static class ServerStartup
 
         // Warm-up: JIT pre-compilation + CUDA kernel loading
         WarmupRunner.Run(generator, tokenizer, options.Warmup);
+        prefixCache?.Clear(); // Discard warm-up KV-cache entries
 
         return new ServerState
         {

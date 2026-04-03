@@ -791,8 +791,8 @@ async function handleModalLoad() {
 
     modalLoadBtn.disabled = true;
     modalCancelBtn.disabled = true;
-    modalStatus.innerHTML = '<span class="spinner"></span> <span class="text-yellow-500">Loading model...</span>';
-    setStatus('Loading model...', 'text-yellow-500');
+    modalStatus.innerHTML = '<span class="spinner"></span> <span class="text-yellow-500">Loading and warming up model...</span>';
+    setStatus('Loading and warming up model...', 'text-yellow-500');
 
     try {
         const res = await loadModel(repo, quant, {
