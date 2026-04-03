@@ -10,7 +10,7 @@ namespace DotLLM.Engine.PromptCache;
 internal sealed class PrefixCacheEntry : IDisposable
 {
     /// <summary>Full token sequence (prompt + generated) stored in the KV-cache.</summary>
-    public int[] TokenSequence { get; }
+    public int[] TokenSequence { get; set; }
 
     /// <summary>Live KV-cache with state for <see cref="TokenSequence"/>.</summary>
     public IKvCache KvCache { get; }
@@ -29,15 +29,7 @@ internal sealed class PrefixCacheEntry : IDisposable
     /// Returns the number of leading tokens shared between this entry and the given prompt.
     /// </summary>
     public int GetPrefixMatchLength(ReadOnlySpan<int> promptTokenIds)
-    {
-        int maxLen = Math.Min(TokenSequence.Length, promptTokenIds.Length);
-        for (int i = 0; i < maxLen; i++)
-        {
-            if (TokenSequence[i] != promptTokenIds[i])
-                return i;
-        }
-        return maxLen;
-    }
+        => TokenSequence.AsSpan().CommonPrefixLength(promptTokenIds);
 
     public void Dispose() => KvCache.Dispose();
 }

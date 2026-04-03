@@ -65,8 +65,9 @@ public sealed class PrefixCache : IDisposable
         {
             if (ReferenceEquals(_entries[i].KvCache, kvCache))
             {
-                // Update token sequence and access time for existing entry
-                _entries[i] = new PrefixCacheEntry(tokenSequence, kvCache);
+                // Update token sequence and access time in-place (no allocation)
+                _entries[i].TokenSequence = tokenSequence;
+                _entries[i].LastAccessTicks = Stopwatch.GetTimestamp();
                 return;
             }
         }

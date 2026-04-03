@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -134,29 +135,37 @@ public sealed class TextGenerator
 
             if (prefillLen > 0)
             {
-                // Prefill suffix tokens
-                int[] suffixTokens = prefillStart == 0 ? promptIds : promptIds[prefillStart..];
-                int[] positions = new int[prefillLen];
-                for (int i = 0; i < prefillLen; i++)
-                    positions[i] = prefillStart + i;
-
-                using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
+                // Prefill suffix tokens — span slice avoids array allocation
+                ReadOnlySpan<int> suffixTokens = promptIds.AsSpan(prefillStart);
+                int[] positionsArray = ArrayPool<int>.Shared.Rent(prefillLen);
+                try
                 {
-                    long ts1 = Stopwatch.GetTimestamp();
-                    prefillTicks = ts1 - ts0;
+                    Span<int> positions = positionsArray.AsSpan(0, prefillLen);
+                    for (int i = 0; i < prefillLen; i++)
+                        positions[i] = prefillStart + i;
 
-                    unsafe
+                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
                     {
-                        long samplerStart = Stopwatch.GetTimestamp();
-                        var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
-                        if (constraint != null)
-                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                        firstTokenId = pipeline.Sample(logitSpan, generatedIds);
-                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                        long ts1 = Stopwatch.GetTimestamp();
+                        prefillTicks = ts1 - ts0;
+
+                        unsafe
+                        {
+                            long samplerStart = Stopwatch.GetTimestamp();
+                            var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
+                            if (constraint != null)
+                                TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                            firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                            samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                        }
                     }
                 }
+                finally
+                {
+                    ArrayPool<int>.Shared.Return(positionsArray);
+                }
             }
-            else
+            else if (promptLen > 0)
             {
                 // 100% cache hit — re-forward last prompt token to get logits
                 using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache))
@@ -174,6 +183,11 @@ public sealed class TextGenerator
                         samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                     }
                 }
+            }
+            else
+            {
+                // Unreachable: empty prompt guard ensures promptLen >= 1
+                throw new InvalidOperationException("Prompt is empty after guard.");
             }
 
             constraint?.Advance(firstTokenId);
@@ -340,28 +354,37 @@ public sealed class TextGenerator
 
             if (prefillLen > 0)
             {
-                int[] suffixTokens = prefillStart == 0 ? promptIds : promptIds[prefillStart..];
-                int[] positions = new int[prefillLen];
-                for (int i = 0; i < prefillLen; i++)
-                    positions[i] = prefillStart + i;
-
-                using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
+                // Span slice avoids array allocation for suffix tokens
+                ReadOnlySpan<int> suffixTokens = promptIds.AsSpan(prefillStart);
+                int[] positionsArray = ArrayPool<int>.Shared.Rent(prefillLen);
+                try
                 {
-                    long ts1 = Stopwatch.GetTimestamp();
-                    prefillTicks = ts1 - ts0;
+                    Span<int> positions = positionsArray.AsSpan(0, prefillLen);
+                    for (int i = 0; i < prefillLen; i++)
+                        positions[i] = prefillStart + i;
 
-                    unsafe
+                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
                     {
-                        long samplerStart = Stopwatch.GetTimestamp();
-                        var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
-                        if (constraint != null)
-                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                        firstTokenId = pipeline.Sample(logitSpan, generatedIds);
-                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                        long ts1 = Stopwatch.GetTimestamp();
+                        prefillTicks = ts1 - ts0;
+
+                        unsafe
+                        {
+                            long samplerStart = Stopwatch.GetTimestamp();
+                            var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
+                            if (constraint != null)
+                                TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                            firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                            samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                        }
                     }
                 }
+                finally
+                {
+                    ArrayPool<int>.Shared.Return(positionsArray);
+                }
             }
-            else
+            else if (promptLen > 0)
             {
                 // 100% cache hit — re-forward last prompt token to get logits
                 using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache))
@@ -379,6 +402,11 @@ public sealed class TextGenerator
                         samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                     }
                 }
+            }
+            else
+            {
+                // Unreachable: empty prompt guard ensures promptLen >= 1
+                throw new InvalidOperationException("Prompt is empty after guard.");
             }
 
             constraint?.Advance(firstTokenId);
