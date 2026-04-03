@@ -43,6 +43,9 @@ public sealed record ServerOptions
     /// <summary>Maximum number of cached sessions for prompt caching.</summary>
     public int PromptCacheSize { get; init; } = 4;
 
+    /// <summary>Whether to use paged KV-cache (block-based allocation). Default true for serve.</summary>
+    public bool UsePaged { get; init; } = true;
+
     /// <summary>Warm-up configuration for JIT pre-compilation and CUDA kernel loading.</summary>
     public WarmupOptions Warmup { get; init; } = WarmupOptions.Default;
 
@@ -66,6 +69,7 @@ public sealed record ServerOptions
         string cacheTypeV = "f32";
         bool promptCacheEnabled = true;
         int promptCacheSize = 4;
+        bool usePaged = true;
         bool warmupEnabled = true;
         int warmupIterations = 3;
 
@@ -100,6 +104,8 @@ public sealed record ServerOptions
                     promptCacheEnabled = false; break;
                 case "--prompt-cache-size":
                     promptCacheSize = int.Parse(next!); i++; break;
+                case "--no-paged":
+                    usePaged = false; break;
                 case "--warmup":
                     warmupEnabled = true; break;
                 case "--no-warmup":
@@ -138,6 +144,7 @@ public sealed record ServerOptions
             CacheTypeV = cacheTypeV,
             PromptCacheEnabled = promptCacheEnabled,
             PromptCacheSize = promptCacheSize,
+            UsePaged = usePaged,
             Warmup = new WarmupOptions
             {
                 Enabled = warmupEnabled,

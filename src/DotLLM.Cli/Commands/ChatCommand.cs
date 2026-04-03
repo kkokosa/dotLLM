@@ -176,6 +176,12 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         [DefaultValue(0)]
         public int CacheWindow { get; set; }
 
+        /// <summary>Use paged KV-cache (block-based allocation).</summary>
+        [CommandOption("--paged")]
+        [Description("Use paged KV-cache with block-based allocation instead of pre-allocated simple cache.")]
+        [DefaultValue(false)]
+        public bool Paged { get; set; }
+
         /// <summary>Disable prompt caching (enabled by default).</summary>
         [CommandOption("--no-prompt-cache")]
         [Description("Disable prompt caching. When enabled (default), KV-cache state is reused across turns.")]
@@ -346,14 +352,34 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
             settings.CacheWindow);
 
         Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
+        DotLLM.Engine.KvCache.PagedKvCacheFactory? pagedFactory = null;
         if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
         {
+            if (settings.Paged)
+                AnsiConsole.MarkupLine("[yellow]WARNING: Paged KV-cache not supported with CUDA, using GPU cache.[/]");
             kvFactory = kvConfig.IsQuantized
                 ? (cfg, size) => cudaModel.CreateKvCache(size, kvConfig)
                 : (cfg, size) => cudaModel.CreateKvCache(size);
         }
         else if (model is DotLLM.Cuda.HybridTransformerModel hybridModel)
+        {
+            if (settings.Paged)
+                AnsiConsole.MarkupLine("[yellow]WARNING: Paged KV-cache not supported with hybrid GPU, using hybrid cache.[/]");
             kvFactory = (cfg, size) => hybridModel.CreateKvCache(size);
+        }
+        else if (settings.Paged && !kvConfig.IsQuantized)
+        {
+            pagedFactory = new DotLLM.Engine.KvCache.PagedKvCacheFactory(
+                config!.NumLayers, config.NumKvHeads, config.HeadDim);
+            kvFactory = (cfg, size) => pagedFactory.Create(size);
+        }
+        else if (settings.Paged && kvConfig.IsQuantized)
+        {
+            AnsiConsole.MarkupLine("[yellow]WARNING: Paged KV-cache does not support quantization yet, using quantized simple cache.[/]");
+            kvFactory = (cfg, size) => new DotLLM.Engine.KvCache.QuantizedKvCache(
+                cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, size,
+                kvConfig.KeyDType, kvConfig.ValueDType, kvConfig.MixedPrecisionWindowSize);
+        }
         else if (kvConfig.IsQuantized)
         {
             kvFactory = (cfg, size) => new DotLLM.Engine.KvCache.QuantizedKvCache(
@@ -372,6 +398,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         }
         finally
         {
+            pagedFactory?.Dispose();
             model?.Dispose();
             gguf?.Dispose();
         }

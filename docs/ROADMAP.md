@@ -110,7 +110,7 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 |------|---------|-------------|------------|
 | 46 | **Warm-up** :white_check_mark: | JIT pre-compilation pass at startup. CUDA kernel pre-loading. Configurable `WarmupOptions`. Readiness probe gates on warm-up completion. | 34 |
 | 55 | **Native AOT (experimental)** :white_check_mark: | Trimming-safe deployment via .NET Native AOT. Audit `[DynamicallyAccessedMembers]` annotations, source-generated JSON serialization, replace reflection-based patterns. `rd.xml` for preserved types. Goal: single-file `dotllm` binary with instant startup (~50ms vs ~500ms JIT). Mark experimental — some features (runtime LoRA loading, source generators) may require JIT fallback. | 34 |
-| 36 | **Paged KV-cache** | PagedAttention: block-based allocation, block tables, free pool, reference counting, copy-on-write. Replace simple KV-cache. | 7 |
+| 36 | **Paged KV-cache** :white_check_mark: | PagedAttention: block-based allocation, block tables, free pool, reference counting, copy-on-write. Staging-buffer gather for attention kernel compatibility. `--paged` (opt-in for CLI), `--no-paged` (opt-out for serve). `--no-ui` for API-only hosting. | 7 |
 | 37 | **Prompt caching (advanced)** | Automatic prefix sharing via trie of computed KV blocks. Reference-counted shared blocks. LRU eviction. Optional explicit `prefix_id` API. Upgrades simple prompt caching (step 54) to work with paged KV-cache. | 36 |
 | 43 | **Speculative decoding** | `ISpeculativeDecoder`. Draft-verify-accept loop with modified rejection sampling. KV-cache rollback. Constraint state rollback via `IDecodingConstraint.Clone()`. | 36 |
 
@@ -165,6 +165,9 @@ Not in the current roadmap, but the architecture should not preclude these:
 |---------|-------------|---------------------|
 | **Multi-GPU tensor parallelism** | NCCL-based TP. Split attention heads and FFN columns. All-reduce after attention and FFN. `ParallelismConfig`. See `docs/MULTI_GPU.md`. | Requires CUDA backend (31). |
 | **ROCm backend** | HIP conditional compilation of CUDA kernels. `#ifdef __HIP_PLATFORM_AMD__`. Separate `DotLLM.Backend.ROCm` NuGet package. Same C# code, different native binary. | Requires CUDA backend (31). |
+| **Paged attention kernels** | Eliminate staging-buffer gather by reading KV blocks directly in tiled attention via block table indirection. Significant decode throughput improvement for long sequences. | Extends paged KV-cache (36). |
+| **Quantized paged KV-cache** | Extend PagedKvCache to support Q8_0/Q4_0 block storage. Combines memory savings of paging with KV compression. | Extends paged KV-cache (36) + quantized KV (33). |
+| **CUDA paged KV-cache** | GPU-resident block pool with device-side block tables. May be combined with the above two into a single step. | Extends paged KV-cache (36) + CUDA backend (31). |
 | **Beam search** | N-best decoding with length normalization. COW KV-cache for beam prefix sharing. Per-beam constraint state. | Requires paged KV-cache (36). |
 | **Runtime quantization** | Load FP16 model and quantize to Q4_K_M at load time | Add `IQuantizer` interface, quantization kernels |
 | **Vision / multimodal** | Image encoders (CLIP ViT) for LLaVA, Phi-3-Vision, Qwen-VL | `IInputEncoder` abstraction mapping raw inputs → embeddings. Model arch needs to handle image token insertion. |

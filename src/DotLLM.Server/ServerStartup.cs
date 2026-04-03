@@ -115,14 +115,35 @@ public static class ServerStartup
             KvCacheConfig.ParseDType(options.CacheTypeV));
 
         Func<ModelConfig, int, IKvCache>? kvFactory = null;
+        PagedKvCacheFactory? pagedFactory = null;
         if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
         {
+            if (options.UsePaged)
+                Console.WriteLine("[dotllm] Paged KV-cache not supported with CUDA, using GPU cache.");
             kvFactory = kvConfig.IsQuantized
                 ? (cfg, size) => cudaModel.CreateKvCache(size, kvConfig)
                 : (cfg, size) => cudaModel.CreateKvCache(size);
         }
         else if (model is DotLLM.Cuda.HybridTransformerModel hybridModel)
+        {
+            if (options.UsePaged)
+                Console.WriteLine("[dotllm] Paged KV-cache not supported with hybrid GPU, using hybrid cache.");
             kvFactory = (cfg, size) => hybridModel.CreateKvCache(size);
+        }
+        else if (options.UsePaged && !kvConfig.IsQuantized)
+        {
+            pagedFactory = new PagedKvCacheFactory(
+                config.NumLayers, config.NumKvHeads, config.HeadDim);
+            kvFactory = (cfg, size) => pagedFactory.Create(size);
+            Console.WriteLine("[dotllm] Using paged KV-cache (block-based allocation)");
+        }
+        else if (options.UsePaged && kvConfig.IsQuantized)
+        {
+            Console.WriteLine("[dotllm] Paged KV-cache does not support quantization yet, using quantized simple cache.");
+            kvFactory = (cfg, size) => new QuantizedKvCache(
+                cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, size,
+                kvConfig.KeyDType, kvConfig.ValueDType, kvConfig.MixedPrecisionWindowSize);
+        }
         else if (kvConfig.IsQuantized)
         {
             kvFactory = (cfg, size) => new QuantizedKvCache(
@@ -146,6 +167,7 @@ public static class ServerStartup
             ToolCallParser = toolCallParser,
             KvCacheConfig = kvConfig,
             KvCacheFactory = kvFactory,
+            PagedFactory = pagedFactory,
             PrefixCache = prefixCache,
             IsReady = true,
             Model = model,

@@ -407,6 +407,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 
 ## News
 
+- **2026-04** — Paged KV-cache (PagedAttention) — block-based KV-cache allocation with shared pool, block tables, ref counting, and copy-on-write. `--paged` (opt-in for CLI), on by default for `serve`. `--no-ui` flag for API-only hosting. Staging-buffer gather for zero-modification attention kernel compatibility. See [docs/KV_CACHE.md](docs/KV_CACHE.md) ([#96](https://github.com/kkokosa/dotLLM/issues/96))
 - **2026-04** — Native AOT (experimental) — opt-in `dotnet publish -p:PublishAot=true` produces a single-file `dotllm` binary with ~50ms startup (vs ~500ms JIT). Source-generated JSON serialization across all projects, `CreateSlimBuilder` for ASP.NET, `TrimmerRoots.xml` for Spectre.Console.Cli type preservation. JIT remains default for best throughput (Dynamic PGO). See [docs/AOT.md](docs/AOT.md) ([#94](https://github.com/kkokosa/dotLLM/issues/94))
 - **2026-04** — **Phase 6 begins**: Warm-up — configurable dummy inference passes at server startup trigger .NET Tier-1 JIT promotion (Dynamic PGO) and exercise CUDA/cuBLAS pipelines. `/ready` probe gates on warm-up completion. `--no-warmup` to disable, `--warmup-iterations N` to configure ([#92](https://github.com/kkokosa/dotLLM/issues/92))
 - **2026-04** — **Phase 5 complete**: simple prompt caching completes the constrained decoding & API phase — all 7 steps done (JSON mode, JSON Schema, regex/CFG, tool calling, API server, chat UI, prompt caching)
@@ -450,7 +451,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 | **3 — CPU Performance** | Decode dispatch, Q8_1 input, weight repacking, outer-product GEMM, tiled attention, fast exp, fusion, NUMA | In Progress (7/8) |
 | **4 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Done (3/3) |
 | **5 — Constrained Decoding & API** | JSON mode, JSON Schema, regex/CFG, tool calling, OpenAI API server, chat UI, prompt caching | Done (7/7) |
-| **6 — Improved Serving** | Warm-up, NativeAOT, paged KV-cache, advanced prefix sharing, speculative decoding | In Progress (2/5) |
+| **6 — Improved Serving** | Warm-up, NativeAOT, paged KV-cache, advanced prefix sharing, speculative decoding | In Progress (3/5) |
 | **7 — Diagnostics & Interpretability** | Hook system, logit lens, logit bias, LoRA adapters, SAE integration | Planned (0/5) |
 | **8 — Model Expansion** | MLA attention, ALiBi, SmolLM3, Gemma 4, Mixture of Experts | Planned (0/5) |
 | **9 — Production Serving** | Continuous batching, advanced scheduling, rate limiting, metrics & tracing | Planned (0/4) |

@@ -2,6 +2,7 @@ using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Engine;
+using DotLLM.Engine.KvCache;
 using DotLLM.Engine.PromptCache;
 using DotLLM.Models.Gguf;
 using DotLLM.Tokenizers;
@@ -32,6 +33,9 @@ public sealed class ServerState : IDisposable
 
     /// <summary>KV-cache factory for the loaded model/device.</summary>
     public Func<ModelConfig, int, IKvCache>? KvCacheFactory { get; set; }
+
+    /// <summary>Paged KV-cache factory (non-null when paged mode is active). Owns the shared block pool.</summary>
+    public PagedKvCacheFactory? PagedFactory { get; set; }
 
     /// <summary>Prefix cache for prompt caching (null when disabled).</summary>
     public PrefixCache? PrefixCache { get; set; }
@@ -85,6 +89,8 @@ public sealed class ServerState : IDisposable
         {
             PrefixCache?.Dispose();
             PrefixCache = null;
+            PagedFactory?.Dispose();
+            PagedFactory = null;
             Model?.Dispose();
             CurrentGguf?.Dispose();
             CurrentGguf = null;
@@ -99,6 +105,7 @@ public sealed class ServerState : IDisposable
     public void Dispose()
     {
         PrefixCache?.Dispose();
+        PagedFactory?.Dispose();
         Model?.Dispose();
         CurrentGguf?.Dispose();
         _requestGate.Dispose();

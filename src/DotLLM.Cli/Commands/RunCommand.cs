@@ -128,6 +128,12 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [Description("GBNF grammar string or file path (prefixed with @) for grammar response format.")]
         public string? Grammar { get; set; }
 
+        /// <summary>Use paged KV-cache (block-based allocation).</summary>
+        [CommandOption("--paged")]
+        [Description("Use paged KV-cache with block-based allocation instead of pre-allocated simple cache.")]
+        [DefaultValue(false)]
+        public bool Paged { get; set; }
+
         /// <summary>KV-cache key quantization type.</summary>
         [CommandOption("--cache-type-k")]
         [Description("KV-cache key quantization: f32 (default), q8_0, q4_0.")]
@@ -287,6 +293,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             AnsiConsole.WriteLine();
         }
 
+        DotLLM.Engine.KvCache.PagedKvCacheFactory? pagedFactory = null;
         try
         {
             // Add stop sequences for tool calling end-of-turn tokens
@@ -313,12 +320,31 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
             if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
             {
+                if (settings.Paged)
+                    Console.Error.WriteLine("WARNING: Paged KV-cache not supported with CUDA, using GPU cache.");
                 kvFactory = kvConfig.IsQuantized
                     ? (cfg, size) => cudaModel.CreateKvCache(size, kvConfig)
                     : (cfg, size) => cudaModel.CreateKvCache(size);
             }
             else if (model is DotLLM.Cuda.HybridTransformerModel hybridModel)
+            {
+                if (settings.Paged)
+                    Console.Error.WriteLine("WARNING: Paged KV-cache not supported with hybrid GPU, using hybrid cache.");
                 kvFactory = (cfg, size) => hybridModel.CreateKvCache(size);
+            }
+            else if (settings.Paged && !kvConfig.IsQuantized)
+            {
+                pagedFactory = new DotLLM.Engine.KvCache.PagedKvCacheFactory(
+                    config.NumLayers, config.NumKvHeads, config.HeadDim);
+                kvFactory = (cfg, size) => pagedFactory.Create(size);
+            }
+            else if (settings.Paged && kvConfig.IsQuantized)
+            {
+                Console.Error.WriteLine("WARNING: Paged KV-cache does not support quantization yet, using quantized simple cache.");
+                kvFactory = (cfg, size) => new DotLLM.Engine.KvCache.QuantizedKvCache(
+                    cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, size,
+                    kvConfig.KeyDType, kvConfig.ValueDType, kvConfig.MixedPrecisionWindowSize);
+            }
             else if (kvConfig.IsQuantized)
             {
                 kvFactory = (cfg, size) => new DotLLM.Engine.KvCache.QuantizedKvCache(
@@ -497,6 +523,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         }
         finally
         {
+            pagedFactory?.Dispose();
             model.Dispose();
             gguf.Dispose();
         }

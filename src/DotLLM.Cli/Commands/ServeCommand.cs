@@ -100,6 +100,18 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
         [Description("Don't auto-open the browser.")]
         [DefaultValue(false)]
         public bool NoBrowser { get; set; }
+
+        /// <summary>Disable the built-in web chat UI. Serve API endpoints only.</summary>
+        [CommandOption("--no-ui")]
+        [Description("Disable the built-in web chat UI. Only serve API endpoints.")]
+        [DefaultValue(false)]
+        public bool NoUi { get; set; }
+
+        /// <summary>Disable paged KV-cache (enabled by default for serve).</summary>
+        [CommandOption("--no-paged")]
+        [Description("Disable paged KV-cache. When enabled (default), uses block-based allocation for memory efficiency.")]
+        [DefaultValue(false)]
+        public bool NoPaged { get; set; }
     }
 
     /// <inheritdoc/>
@@ -124,6 +136,7 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
                 Enabled = !settings.NoWarmup,
                 Iterations = settings.WarmupIterations,
             },
+            UsePaged = !settings.NoPaged,
             ModelId = "none",
         };
 
@@ -154,8 +167,8 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
             state = ServerStartup.CreateBareState(serverOptions);
         }
 
-        // Build app with UI enabled
-        var app = ServerStartup.BuildApp(state!, [], serveUi: true);
+        // Build app (UI enabled unless --no-ui)
+        var app = ServerStartup.BuildApp(state!, [], serveUi: !settings.NoUi);
 
         var url = $"http://{settings.Host}:{settings.Port}";
 
@@ -172,12 +185,13 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
             AnsiConsole.MarkupLine("  [yellow]No model loaded[/] — select one from the UI");
         }
         AnsiConsole.MarkupLine($"  Listening on [link={url}]{url}[/]");
-        AnsiConsole.MarkupLine($"  Chat UI: [dim]{url}[/]");
+        if (!settings.NoUi)
+            AnsiConsole.MarkupLine($"  Chat UI: [dim]{url}[/]");
         AnsiConsole.MarkupLine("[dim]  Press Ctrl+C to stop.[/]");
         AnsiConsole.WriteLine();
 
-        // Auto-open browser
-        if (!settings.NoBrowser)
+        // Auto-open browser (skip when UI is disabled)
+        if (!settings.NoUi && !settings.NoBrowser)
         {
             try
             {
