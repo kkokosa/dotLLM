@@ -73,8 +73,9 @@ body {
 }
 .stats-bar .stat-label { color: #52525b; }
 
-/* Settings panel slide transition */
-#settings-panel.open {
+/* Settings / Tools panel slide transition */
+#settings-panel.open,
+#tools-panel.open {
     transform: translateX(0);
 }
 

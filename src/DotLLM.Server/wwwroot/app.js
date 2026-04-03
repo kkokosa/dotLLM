@@ -11,11 +11,66 @@ const state = {
     verbose: false,
     systemPrompt: '',
     abortController: null,
+    toolsEnabled: false,
+    toolsJson: '',
+    awaitingToolResults: false,
     // Modal state
     modalSelectedRepo: null,
     modalSelectedFile: null,
     modalSelectedFilename: null,
 };
+
+const SAMPLE_TOOLS_JSON = `[
+  {
+    "type": "function",
+    "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a location.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string",
+            "description": "City name, e.g. 'Warsaw' or 'New York'"
+          },
+          "unit": {
+            "type": "string",
+            "enum": ["celsius", "fahrenheit"],
+            "description": "Temperature unit"
+          }
+        },
+        "required": ["location"]
+      },
+      "response_example": {
+        "temperature": 22,
+        "unit": "celsius",
+        "condition": "sunny",
+        "humidity": 45
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_time",
+      "description": "Get the current date and time in a given timezone.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timezone": {
+            "type": "string",
+            "description": "IANA timezone, e.g. 'Europe/Warsaw' or 'America/New_York'"
+          }
+        },
+        "required": ["timezone"]
+      },
+      "response_example": {
+        "datetime": "2026-04-03T14:30:00+02:00",
+        "timezone": "Europe/Warsaw"
+      }
+    }
+  }
+]`;
 
 // ── DOM REFS ──
 
@@ -26,10 +81,22 @@ const userInput = $('#user-input');
 const sendBtn = $('#send-btn');
 const stopBtn = $('#stop-btn');
 const clearBtn = $('#clear-btn');
+const exportBtn = $('#export-btn');
+const exportDropdown = $('#export-dropdown');
+const exportDownloadBtn = $('#export-download-btn');
 const settingsBtn = $('#settings-btn');
 const settingsPanel = $('#settings-panel');
 const settingsOverlay = $('#settings-overlay');
 const settingsClose = $('#settings-close');
+const toolsBtn = $('#tools-btn');
+const toolsPanel = $('#tools-panel');
+const toolsOverlay = $('#tools-overlay');
+const toolsClose = $('#tools-close');
+const toolsEnabled = $('#tools-enabled');
+const toolsJsonInput = $('#tools-json');
+const toolsJsonError = $('#tools-json-error');
+const toolsResetBtn = $('#tools-reset-btn');
+const toolsValidateBtn = $('#tools-validate-btn');
 const modelBadge = $('#model-badge');
 const statusIndicator = $('#status-indicator');
 const systemPromptBar = $('#system-prompt-bar');
@@ -120,6 +187,9 @@ async function* streamChat(messages, params) {
     if (params.seed != null) {
         body.seed = params.seed;
     }
+    if (params.tools) {
+        body.tools = params.tools;
+    }
 
     const response = await fetch('/v1/chat/completions', {
         method: 'POST',
@@ -153,6 +223,9 @@ async function* streamChat(messages, params) {
 
                     if (choice?.delta?.content) {
                         yield { type: 'delta', content: choice.delta.content };
+                    }
+                    if (choice?.delta?.tool_calls) {
+                        yield { type: 'tool_calls', toolCalls: choice.delta.tool_calls };
                     }
                     if (choice?.finish_reason) {
                         yield { type: 'finish', reason: choice.finish_reason };
@@ -236,7 +309,7 @@ function buildModelBadgeText(config) {
         const threads = config.threads || '?';
         parts.push(`CPU ${threads}t`);
     } else if (config.gpu_layers && config.num_layers && config.gpu_layers < config.num_layers) {
-        parts.push(`Hybrid ${config.gpu_layers}/${config.num_layers} GPU`);
+        parts.push(`Hybrid ${config.gpu_layers}/${config.num_layers} GPU layers`);
     } else {
         parts.push('GPU');
     }
@@ -251,7 +324,7 @@ function updateModelBadge() {
 
 function updateSendButtonState() {
     const ready = state.config?.is_ready;
-    if (state.isGenerating) {
+    if (state.isGenerating || state.awaitingToolResults) {
         sendBtn.disabled = true;
     } else {
         sendBtn.disabled = !ready;
@@ -480,6 +553,79 @@ function updateRangeDisplays() {
     $('#rep-val').textContent = parseFloat($('#opt-rep-penalty').value).toFixed(2);
 }
 
+// ── TOOLS PANEL ──
+
+function openTools() {
+    toolsPanel.classList.add('open');
+    toolsOverlay.classList.remove('hidden');
+}
+
+function closeTools() {
+    toolsPanel.classList.remove('open');
+    toolsOverlay.classList.add('hidden');
+    // Save state
+    state.toolsEnabled = toolsEnabled.checked;
+    state.toolsJson = toolsJsonInput.value;
+    saveConversation();
+}
+
+function validateToolsJson() {
+    const text = toolsJsonInput.value.trim();
+    toolsJsonError.classList.add('hidden');
+    if (!text) return true;
+    try {
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed)) {
+            toolsJsonError.textContent = 'Must be a JSON array of tool definitions';
+            toolsJsonError.classList.remove('hidden');
+            return false;
+        }
+        return true;
+    } catch (e) {
+        toolsJsonError.textContent = `Invalid JSON: ${e.message}`;
+        toolsJsonError.classList.remove('hidden');
+        return false;
+    }
+}
+
+function getToolsForRequest() {
+    if (!state.toolsEnabled) return null;
+    const text = toolsJsonInput.value.trim();
+    if (!text) return null;
+    try {
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed) || parsed.length === 0) return null;
+        // Strip response_example before sending (not part of OpenAI spec)
+        return parsed.map(t => ({
+            ...t,
+            function: {
+                ...t.function,
+                response_example: undefined,
+            },
+        }));
+    } catch { /* invalid, skip */ }
+    return null;
+}
+
+function getResponseExample(functionName) {
+    try {
+        const parsed = JSON.parse(toolsJsonInput.value.trim());
+        if (!Array.isArray(parsed)) return null;
+        const tool = parsed.find(t => t.function?.name === functionName);
+        if (tool?.function?.response_example) {
+            return JSON.stringify(tool.function.response_example);
+        }
+    } catch { /* ignore */ }
+    return null;
+}
+
+function resetToolsJson() {
+    toolsJsonInput.value = SAMPLE_TOOLS_JSON;
+    state.toolsJson = SAMPLE_TOOLS_JSON;
+    toolsJsonError.classList.add('hidden');
+    saveConversation();
+}
+
 // ── MODEL LOAD MODAL ──
 
 // Modal-local state
@@ -677,34 +823,53 @@ async function handleModalLoad() {
 
 // ── STREAMING HANDLER ──
 
-async function handleSend() {
-    const text = userInput.value.trim();
-    if (!text || state.isGenerating) return;
-    if (!state.config?.is_ready) return;
+const MAX_TOOL_ROUNDS = 5;
 
-    userInput.value = '';
-    userInput.style.height = 'auto';
-
-    // Build messages array
+function buildApiMessages() {
     const apiMessages = [];
     if (state.systemPrompt) {
         apiMessages.push({ role: 'system', content: state.systemPrompt });
     }
     for (const m of state.messages) {
-        apiMessages.push({ role: m.role, content: m.content });
+        const msg = { role: m.role, content: m.content };
+        if (m.tool_calls) msg.tool_calls = m.tool_calls;
+        if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+        // Assistant tool-call messages have null content per OpenAI spec
+        if (m.role === 'assistant' && m.tool_calls) msg.content = null;
+        apiMessages.push(msg);
     }
-    apiMessages.push({ role: 'user', content: text });
+    return apiMessages;
+}
+
+async function handleSend() {
+    const text = userInput.value.trim();
+    if (!text || state.isGenerating || state.awaitingToolResults) return;
+    if (!state.config?.is_ready) return;
+
+    userInput.value = '';
+    userInput.style.height = 'auto';
 
     // Add user message to state and DOM
     state.messages.push({ role: 'user', content: text });
     addMessageToDOM('user', text);
+
+    await runGeneration(0);
+}
+
+async function runGeneration(round) {
+    if (round >= MAX_TOOL_ROUNDS) {
+        addSystemNote('Max tool call rounds reached');
+        return;
+    }
+
+    const apiMessages = buildApiMessages();
 
     // Prepare for generation
     state.isGenerating = true;
     sendBtn.classList.add('hidden');
     stopBtn.classList.remove('hidden');
     updateSendButtonState();
-    setStatus('Generating...', 'text-accent');
+    setStatus(round > 0 ? `Generating (tool round ${round + 1})...` : 'Generating...', 'text-accent');
 
     const placeholder = createAssistantPlaceholder();
     let fullText = '';
@@ -712,11 +877,27 @@ async function handleSend() {
     let usageData = null;
     let timingsData = null;
     let rawPrompt = null;
+    let detectedToolCalls = null;
+    let finishReason = null;
     const startTime = performance.now();
     let firstTokenTime = null;
 
-    // Get current sampling params
+    // Show live timer immediately (before first token)
+    placeholder.liveStats.classList.remove('hidden');
+    placeholder.liveStats.textContent = '0.0s';
+    const liveTimer = setInterval(() => {
+        const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+        if (tokenCount === 0) {
+            placeholder.liveStats.textContent = `${elapsed}s`;
+        } else {
+            placeholder.liveStats.textContent = `${tokenCount} tokens | ${elapsed}s`;
+        }
+    }, 100);
+
+    // Get current sampling params + tools
     const params = getSettingsFromUI();
+    const tools = getToolsForRequest();
+    if (tools) params.tools = tools;
 
     try {
         for await (const event of streamChat(apiMessages, params)) {
@@ -726,14 +907,12 @@ async function handleSend() {
                 }
                 tokenCount++;
                 fullText += event.content;
-                // Update content progressively
                 placeholder.contentEl.innerHTML = renderMarkdown(fullText);
                 scrollToBottom();
-
-                // Update live stats
-                const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-                placeholder.liveStats.classList.remove('hidden');
-                placeholder.liveStats.textContent = `${tokenCount} tokens | ${elapsed}s`;
+            } else if (event.type === 'tool_calls') {
+                detectedToolCalls = event.toolCalls;
+            } else if (event.type === 'finish') {
+                finishReason = event.reason;
             } else if (event.type === 'usage') {
                 usageData = event.usage;
                 timingsData = event.timings;
@@ -749,24 +928,85 @@ async function handleSend() {
     }
 
     // Finalize
+    clearInterval(liveTimer);
     placeholder.contentEl.classList.remove('cursor-blink');
-    placeholder.contentEl.innerHTML = renderMarkdown(fullText);
     placeholder.liveStats.remove();
 
-    // Compute TTFT
     const ttftMs = firstTokenTime ? firstTokenTime - startTime : null;
-
-    // Add stats bar (always full breakdown)
     const statsInfo = { usage: usageData, timings: timingsData, ttftMs };
-    const statsBar = createStatsBar(statsInfo);
-    placeholder.bubble.appendChild(statsBar);
 
-    // Add verbose diagnostics if enabled (raw prompt + raw response)
+    // Tool call detected?
+    if (detectedToolCalls && detectedToolCalls.length > 0 && finishReason === 'tool_calls') {
+        // Replace streamed text with clean tool call display
+        placeholder.contentEl.innerHTML = '';
+        const toolCallEl = createToolCallDisplay(detectedToolCalls);
+        placeholder.contentEl.appendChild(toolCallEl);
+
+        placeholder.bubble.appendChild(createStatsBar(statsInfo));
+        if (state.verbose) {
+            placeholder.bubble.appendChild(createVerboseDiagnostics(rawPrompt, fullText));
+        }
+
+        // Save assistant message with tool_calls
+        state.messages.push({
+            role: 'assistant',
+            content: fullText,
+            tool_calls: detectedToolCalls,
+            stats: statsInfo,
+            rawPrompt,
+            rawResponse: fullText,
+        });
+        saveConversation();
+
+        // Show result inputs and wait for user
+        const resultArea = createToolResultInputs(detectedToolCalls);
+        placeholder.bubble.appendChild(resultArea.container);
+        scrollToBottom();
+
+        // Pause generation — user fills in tool results
+        state.isGenerating = false;
+        state.awaitingToolResults = true;
+        sendBtn.classList.remove('hidden');
+        sendBtn.disabled = true;
+        stopBtn.classList.add('hidden');
+        setStatus('Awaiting tool results...', 'text-yellow-500');
+
+        // Wait for "Send Results" click
+        const results = await resultArea.promise;
+        state.awaitingToolResults = false;
+        if (!results) {
+            // User cancelled
+            updateSendButtonState();
+            setStatus('Ready', 'text-emerald-500');
+            userInput.focus();
+            saveConversation();
+            return;
+        }
+
+        // Add tool result messages to state and show them
+        resultArea.container.remove();
+        for (const r of results) {
+            state.messages.push({
+                role: 'tool',
+                content: r.content,
+                tool_call_id: r.tool_call_id,
+            });
+            addToolResultToDOM(r.functionName, r.content);
+        }
+        saveConversation();
+
+        // Re-generate with tool results
+        await runGeneration(round + 1);
+        return;
+    }
+
+    // Normal (non-tool-call) completion
+    placeholder.contentEl.innerHTML = renderMarkdown(fullText);
+    placeholder.bubble.appendChild(createStatsBar(statsInfo));
     if (state.verbose) {
         placeholder.bubble.appendChild(createVerboseDiagnostics(rawPrompt, fullText));
     }
 
-    // Save to state
     state.messages.push({ role: 'assistant', content: fullText, stats: statsInfo, rawPrompt, rawResponse: fullText });
 
     // Reset UI
@@ -777,6 +1017,136 @@ async function handleSend() {
     setStatus('Ready', 'text-emerald-500');
     userInput.focus();
     saveConversation();
+}
+
+// ── TOOL CALL UI ──
+
+function createToolCallDisplay(toolCalls) {
+    const container = document.createElement('div');
+    container.className = 'space-y-2';
+
+    for (const tc of toolCalls) {
+        const card = document.createElement('div');
+        card.className = 'bg-zinc-800/50 border border-zinc-700 rounded px-3 py-2';
+
+        const header = document.createElement('div');
+        header.className = 'text-[10px] uppercase tracking-wider text-yellow-500/80 mb-1';
+        header.textContent = 'tool call';
+        card.appendChild(header);
+
+        const name = document.createElement('div');
+        name.className = 'text-xs text-accent font-medium';
+        name.textContent = tc.function.name;
+        card.appendChild(name);
+
+        if (tc.function.arguments) {
+            const args = document.createElement('pre');
+            args.className = 'mt-1 text-[10px] text-zinc-400 bg-zinc-950 rounded p-2 overflow-x-auto';
+            try {
+                args.textContent = JSON.stringify(JSON.parse(tc.function.arguments), null, 2);
+            } catch {
+                args.textContent = tc.function.arguments;
+            }
+            card.appendChild(args);
+        }
+
+        container.appendChild(card);
+    }
+
+    return container;
+}
+
+function createToolResultInputs(toolCalls) {
+    const container = document.createElement('div');
+    container.className = 'mt-3 border-t border-zinc-700 pt-3 space-y-2';
+
+    const heading = document.createElement('div');
+    heading.className = 'text-[10px] uppercase tracking-wider text-zinc-500 mb-2';
+    heading.textContent = 'Tool results (pre-filled from response_example, edit as needed)';
+    container.appendChild(heading);
+
+    const inputs = [];
+    for (const tc of toolCalls) {
+        const row = document.createElement('div');
+        row.className = 'flex items-start gap-2';
+
+        const label = document.createElement('span');
+        label.className = 'text-xs text-accent shrink-0 pt-1';
+        label.textContent = tc.function.name;
+        row.appendChild(label);
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = getResponseExample(tc.function.name) || '{}';
+        input.className = 'flex-1 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-300 font-mono focus:outline-none focus:border-zinc-500';
+        input.dataset.callId = tc.id;
+        input.dataset.functionName = tc.function.name;
+        row.appendChild(input);
+        inputs.push(input);
+
+        container.appendChild(row);
+    }
+
+    const btnRow = document.createElement('div');
+    btnRow.className = 'flex gap-2 mt-2';
+
+    const sendResultsBtn = document.createElement('button');
+    sendResultsBtn.className = 'flex-1 py-1.5 rounded text-xs bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 transition';
+    sendResultsBtn.textContent = 'Send Results';
+    btnRow.appendChild(sendResultsBtn);
+
+    const skipBtn = document.createElement('button');
+    skipBtn.className = 'px-3 py-1.5 rounded text-xs border border-zinc-700 text-zinc-500 hover:text-zinc-300 hover:border-zinc-500 transition';
+    skipBtn.textContent = 'Skip';
+    btnRow.appendChild(skipBtn);
+
+    container.appendChild(btnRow);
+
+    // Focus the first input
+    setTimeout(() => inputs[0]?.focus(), 50);
+
+    const promise = new Promise((resolve) => {
+        sendResultsBtn.addEventListener('click', () => {
+            const results = inputs.map(inp => ({
+                tool_call_id: inp.dataset.callId,
+                functionName: inp.dataset.functionName,
+                content: inp.value.trim() || '{}',
+            }));
+            resolve(results);
+        });
+        skipBtn.addEventListener('click', () => resolve(null));
+    });
+
+    return { container, promise };
+}
+
+function addToolResultToDOM(functionName, content) {
+    hideWelcome();
+    const wrapper = document.createElement('div');
+    const bubble = document.createElement('div');
+    bubble.className = 'bg-zinc-900 border border-yellow-500/20 rounded-lg px-4 py-2 max-w-full text-sm';
+
+    const label = document.createElement('div');
+    label.className = 'text-[10px] uppercase tracking-wider mb-1 text-yellow-500/60';
+    label.textContent = `tool result: ${functionName}`;
+    bubble.appendChild(label);
+
+    const contentEl = document.createElement('div');
+    contentEl.className = 'text-xs text-zinc-400 font-mono';
+    contentEl.textContent = content;
+    bubble.appendChild(contentEl);
+
+    wrapper.appendChild(bubble);
+    messagesEl.appendChild(wrapper);
+    scrollToBottom();
+}
+
+function addSystemNote(text) {
+    const note = document.createElement('div');
+    note.className = 'text-center text-[10px] text-zinc-600 py-1';
+    note.textContent = text;
+    messagesEl.appendChild(note);
+    scrollToBottom();
 }
 
 function handleStop() {
@@ -792,15 +1162,154 @@ function handleClear() {
     saveConversation();
 }
 
+// ── EXPORT ──
+
+function buildExportMarkdown() {
+    const includeStats = $('#exp-stats').checked;
+    const includeRaw = $('#exp-raw').checked;
+    const includeModel = $('#exp-model').checked;
+
+    const lines = [];
+    lines.push('# dotLLM Chat Export');
+    lines.push(`*Exported: ${new Date().toISOString()}*`);
+    lines.push('');
+
+    // Model & configuration section
+    if (includeModel && state.config) {
+        lines.push('## Model Configuration');
+        lines.push('');
+        lines.push('| Parameter | Value |');
+        lines.push('|-----------|-------|');
+        if (state.config.model_id) lines.push(`| Model | ${state.config.model_id} |`);
+        if (state.config.model_path) {
+            const quant = extractQuantFromPath(state.config.model_path);
+            if (quant) lines.push(`| Quantization | ${quant} |`);
+        }
+        if (state.config.architecture) lines.push(`| Architecture | ${state.config.architecture} |`);
+        if (state.config.num_layers) lines.push(`| Layers | ${state.config.num_layers} |`);
+        if (state.config.hidden_size) lines.push(`| Hidden size | ${state.config.hidden_size} |`);
+        if (state.config.max_sequence_length) lines.push(`| Max context | ${state.config.max_sequence_length.toLocaleString()} |`);
+        lines.push(`| Device | ${state.config.device || 'cpu'} |`);
+        if (state.config.gpu_layers) lines.push(`| GPU layers | ${state.config.gpu_layers}/${state.config.num_layers} |`);
+        if (state.config.threads) lines.push(`| Threads | ${state.config.threads} |`);
+        lines.push('');
+
+        // Sampling defaults
+        const d = state.config.sampling_defaults;
+        if (d) {
+            lines.push('**Sampling:** ' + [
+                `temp=${d.temperature}`,
+                `top_p=${d.top_p}`,
+                d.top_k ? `top_k=${d.top_k}` : null,
+                d.min_p ? `min_p=${d.min_p}` : null,
+                d.repetition_penalty !== 1.0 ? `rep=${d.repetition_penalty}` : null,
+                `max_tokens=${d.max_tokens}`,
+                d.seed != null ? `seed=${d.seed}` : null,
+            ].filter(Boolean).join(', '));
+            lines.push('');
+        }
+    }
+
+    if (state.systemPrompt) {
+        lines.push('## System Prompt');
+        lines.push('');
+        lines.push('```');
+        lines.push(state.systemPrompt);
+        lines.push('```');
+        lines.push('');
+    }
+
+    // Conversation
+    lines.push('## Conversation');
+    lines.push('');
+
+    for (const m of state.messages) {
+        const label = m.role === 'user' ? '**User**' : '**Assistant**';
+        lines.push(`### ${label}`);
+        lines.push('');
+        lines.push(m.content);
+        lines.push('');
+
+        // Stats
+        if (includeStats && m.role === 'assistant' && m.stats) {
+            const s = m.stats;
+            const parts = [];
+            if (s.usage) {
+                parts.push(`${s.usage.prompt_tokens} prompt tokens`);
+                parts.push(`${s.usage.completion_tokens} generated tokens`);
+            }
+            if (s.ttftMs != null) parts.push(`TTFT: ${s.ttftMs.toFixed(0)}ms`);
+            if (s.timings) {
+                const t = s.timings;
+                if (t.prefill_tokens_per_sec > 0) parts.push(`prefill: ${formatNum(t.prefill_tokens_per_sec)} tok/s`);
+                if (t.decode_tokens_per_sec > 0) parts.push(`decode: ${formatNum(t.decode_tokens_per_sec)} tok/s`);
+                if (t.prefill_time_ms != null) parts.push(`prefill time: ${t.prefill_time_ms.toFixed(1)}ms`);
+                if (t.decode_time_ms != null) parts.push(`decode time: ${t.decode_time_ms.toFixed(0)}ms`);
+                if (t.sampling_time_ms != null) parts.push(`sampling time: ${t.sampling_time_ms.toFixed(1)}ms`);
+            }
+            if (parts.length) {
+                lines.push(`> *Stats: ${parts.join(' | ')}*`);
+                lines.push('');
+            }
+        }
+
+        // Raw prompt / response
+        if (includeRaw && m.role === 'assistant') {
+            if (m.rawPrompt) {
+                lines.push('<details><summary>Raw prompt (after template)</summary>');
+                lines.push('');
+                lines.push('```');
+                lines.push(m.rawPrompt);
+                lines.push('```');
+                lines.push('</details>');
+                lines.push('');
+            }
+            if (m.rawResponse) {
+                lines.push('<details><summary>Raw response</summary>');
+                lines.push('');
+                lines.push('```');
+                lines.push(m.rawResponse);
+                lines.push('```');
+                lines.push('</details>');
+                lines.push('');
+            }
+        }
+    }
+
+    lines.push('---');
+    lines.push('*Generated by [dotLLM](https://github.com/kkokosa/dotLLM)*');
+    return lines.join('\n');
+}
+
+function downloadExport() {
+    const md = buildExportMarkdown();
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    a.href = url;
+    a.download = `dotllm-chat-${timestamp}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+    exportDropdown.classList.add('hidden');
+}
+
 // ── PERSISTENCE (localStorage) ──
 
 function saveConversation() {
     try {
         localStorage.setItem('dotllm-messages', JSON.stringify(
-            state.messages.map(m => ({ role: m.role, content: m.content }))
+            state.messages.map(m => {
+                const msg = { role: m.role, content: m.content };
+                if (m.tool_calls) msg.tool_calls = m.tool_calls;
+                if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+                return msg;
+            })
         ));
         localStorage.setItem('dotllm-system-prompt', state.systemPrompt);
         localStorage.setItem('dotllm-verbose', state.verbose ? '1' : '0');
+        localStorage.setItem('dotllm-tools-enabled', state.toolsEnabled ? '1' : '0');
+        localStorage.setItem('dotllm-tools-json', state.toolsJson);
     } catch { /* localStorage full or unavailable */ }
 }
 
@@ -809,15 +1318,47 @@ function loadConversation() {
         const msgs = JSON.parse(localStorage.getItem('dotllm-messages') || '[]');
         state.systemPrompt = localStorage.getItem('dotllm-system-prompt') || '';
         state.verbose = localStorage.getItem('dotllm-verbose') === '1';
+        state.toolsEnabled = localStorage.getItem('dotllm-tools-enabled') === '1';
+        const savedToolsJson = localStorage.getItem('dotllm-tools-json');
+        // Auto-upgrade: if saved JSON is the old sample (no response_example), replace with new sample
+        state.toolsJson = (!savedToolsJson || !savedToolsJson.includes('response_example'))
+            ? SAMPLE_TOOLS_JSON : savedToolsJson;
 
         if (state.systemPrompt) {
             systemPromptInput.value = state.systemPrompt;
             systemPromptBar.classList.remove('hidden');
         }
 
+        // Restore tools UI
+        toolsEnabled.checked = state.toolsEnabled;
+        toolsJsonInput.value = state.toolsJson;
+
         for (const m of msgs) {
-            state.messages.push({ role: m.role, content: m.content });
-            addMessageToDOM(m.role, m.content);
+            const stateMsg = { role: m.role, content: m.content };
+            if (m.tool_calls) stateMsg.tool_calls = m.tool_calls;
+            if (m.tool_call_id) stateMsg.tool_call_id = m.tool_call_id;
+            state.messages.push(stateMsg);
+
+            if (m.role === 'tool') {
+                // Find function name from tool_call_id
+                const fnName = m.tool_call_id || 'tool';
+                addToolResultToDOM(fnName, m.content);
+            } else if (m.role === 'assistant' && m.tool_calls) {
+                // Show tool call display instead of raw text
+                const wrapper = document.createElement('div');
+                const bubble = document.createElement('div');
+                bubble.className = 'bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-2.5 max-w-full text-sm';
+                const label = document.createElement('div');
+                label.className = 'text-[10px] uppercase tracking-wider mb-1 text-accent/60';
+                label.textContent = 'assistant';
+                bubble.appendChild(label);
+                bubble.appendChild(createToolCallDisplay(m.tool_calls));
+                wrapper.appendChild(bubble);
+                messagesEl.appendChild(wrapper);
+                hideWelcome();
+            } else {
+                addMessageToDOM(m.role, m.content);
+            }
         }
     } catch { /* corrupted data, ignore */ }
 }
@@ -827,6 +1368,18 @@ function loadConversation() {
 sendBtn.addEventListener('click', handleSend);
 stopBtn.addEventListener('click', handleStop);
 clearBtn.addEventListener('click', handleClear);
+
+// Export dropdown toggle + download
+exportBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    exportDropdown.classList.toggle('hidden');
+});
+exportDownloadBtn.addEventListener('click', downloadExport);
+document.addEventListener('click', (e) => {
+    if (!exportDropdown.contains(e.target) && e.target !== exportBtn) {
+        exportDropdown.classList.add('hidden');
+    }
+});
 
 userInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -838,6 +1391,20 @@ userInput.addEventListener('keydown', (e) => {
 settingsBtn.addEventListener('click', openSettings);
 settingsClose.addEventListener('click', closeSettings);
 settingsOverlay.addEventListener('click', closeSettings);
+
+toolsBtn.addEventListener('click', openTools);
+toolsClose.addEventListener('click', closeTools);
+toolsOverlay.addEventListener('click', closeTools);
+toolsResetBtn.addEventListener('click', resetToolsJson);
+toolsValidateBtn.addEventListener('click', validateToolsJson);
+toolsEnabled.addEventListener('change', () => {
+    state.toolsEnabled = toolsEnabled.checked;
+    saveConversation();
+});
+toolsJsonInput.addEventListener('input', () => {
+    state.toolsJson = toolsJsonInput.value;
+    toolsJsonError.classList.add('hidden');
+});
 
 // Range slider live display
 for (const id of ['opt-temperature', 'opt-top-p', 'opt-min-p', 'opt-rep-penalty']) {
@@ -898,6 +1465,8 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         if (!modelModalOverlay.classList.contains('hidden')) {
             closeModelModal();
+        } else if (toolsPanel.classList.contains('open')) {
+            closeTools();
         } else {
             closeSettings();
         }

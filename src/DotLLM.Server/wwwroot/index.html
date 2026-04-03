@@ -28,12 +28,31 @@
     <header class="flex items-center justify-between px-4 py-2 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur shrink-0">
         <div class="flex items-center gap-3">
             <span class="text-accent font-bold text-lg tracking-tight">dotLLM</span>
-            <span id="model-badge" class="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 truncate max-w-[400px]">loading...</span>
+            <span id="model-badge" class="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">loading...</span>
             <button id="reload-model-btn" class="text-xs px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-500 hover:text-zinc-200 hover:border-zinc-500 transition" title="Load / change model">&#x21bb;</button>
         </div>
         <div class="flex items-center gap-2">
             <span id="status-indicator" class="text-xs text-zinc-500">...</span>
             <button id="clear-btn" class="text-xs px-2 py-1 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 transition" title="Clear chat">Clear</button>
+            <div class="relative">
+                <button id="export-btn" class="text-xs px-2 py-1 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 transition" title="Export chat">Export</button>
+                <div id="export-dropdown" class="hidden absolute right-0 top-full mt-1 w-56 bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl p-3 space-y-2" style="z-index: 70;">
+                    <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Include in export</div>
+                    <label class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+                        <input type="checkbox" id="exp-stats" checked class="accent-cyan-500"><span>Performance stats</span>
+                    </label>
+                    <label class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+                        <input type="checkbox" id="exp-raw" checked class="accent-cyan-500"><span>Raw prompt / response</span>
+                    </label>
+                    <label class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+                        <input type="checkbox" id="exp-model" checked class="accent-cyan-500"><span>Model &amp; configuration</span>
+                    </label>
+                    <button id="export-download-btn" class="w-full mt-1 py-1 rounded text-xs bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 transition">Download .md</button>
+                </div>
+            </div>
+            <button id="tools-btn" class="p-1.5 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 transition" title="Tools">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085"/></svg>
+            </button>
             <button id="settings-btn" class="p-1.5 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 transition" title="Settings">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
@@ -131,6 +150,37 @@
                     <input id="opt-verbose" type="checkbox" class="accent-cyan-500">
                     <span>Verbose diagnostics (show full prompt)</span>
                 </label>
+            </section>
+        </div>
+    </aside>
+
+    <!-- Tools panel (slide from right) -->
+    <div id="tools-overlay" class="fixed inset-0 bg-black/40 z-40 hidden"></div>
+    <aside id="tools-panel" class="fixed top-0 right-0 h-full w-96 bg-zinc-950 border-l border-zinc-800 z-50 transform translate-x-full transition-transform duration-200 overflow-y-auto">
+        <div class="p-4">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-sm font-bold uppercase tracking-wider text-zinc-400">Tools</h2>
+                <button id="tools-close" class="text-zinc-500 hover:text-zinc-300 text-lg">&times;</button>
+            </div>
+
+            <!-- Enable toggle -->
+            <section class="mb-4">
+                <label class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+                    <input id="tools-enabled" type="checkbox" class="accent-cyan-500">
+                    <span>Enable tool calling</span>
+                </label>
+                <p class="text-[10px] text-zinc-600 mt-1">When enabled, tool definitions below are sent with each request. The model can invoke these tools in its response. Add <code class="bg-zinc-800 px-0.5 rounded">response_example</code> to pre-fill fake results.</p>
+            </section>
+
+            <!-- Tool definitions JSON -->
+            <section>
+                <label class="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">Tool Definitions (OpenAI format)</label>
+                <textarea id="tools-json" rows="24" spellcheck="false" class="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-xs text-zinc-300 font-mono resize-y focus:outline-none focus:border-zinc-500 leading-relaxed" placeholder="[{...}]"></textarea>
+                <div id="tools-json-error" class="text-[10px] text-red-400 mt-1 hidden"></div>
+                <div class="flex gap-2 mt-2">
+                    <button id="tools-reset-btn" class="flex-1 py-1 rounded text-[10px] border border-zinc-700 text-zinc-500 hover:text-zinc-300 hover:border-zinc-500 transition">Reset to sample</button>
+                    <button id="tools-validate-btn" class="flex-1 py-1 rounded text-[10px] bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 transition">Validate JSON</button>
+                </div>
             </section>
         </div>
     </aside>
