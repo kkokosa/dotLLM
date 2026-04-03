@@ -32,5 +32,11 @@ public static class ConfigEndpoint
 
             return Results.Ok(PropsEndpoint.ToDto(state.SamplingDefaults));
         });
+
+        app.MapPost("/v1/cache/clear", (ServerState state) =>
+        {
+            state.PrefixCache?.Clear();
+            return Results.Ok(new { status = "cleared" });
+        });
     }
 }

@@ -8,7 +8,7 @@ const state = {
     messages: [],       // {role, content, stats?, rawPrompt?, rawResponse?}
     config: null,       // from /props
     isGenerating: false,
-    verbose: false,
+    verbose: true,
     systemPrompt: '',
     abortController: null,
     toolsEnabled: false,
@@ -1163,6 +1163,8 @@ function handleClear() {
     messagesEl.innerHTML = '';
     welcomeEl.classList.remove('hidden');
     saveConversation();
+    // Clear server-side prompt cache so stale KV-cache state isn't reused
+    fetch('/v1/cache/clear', { method: 'POST' }).catch(() => {});
 }
 
 // ── EXPORT ──
@@ -1321,7 +1323,7 @@ function loadConversation() {
     try {
         const msgs = JSON.parse(localStorage.getItem('dotllm-messages') || '[]');
         state.systemPrompt = localStorage.getItem('dotllm-system-prompt') || '';
-        state.verbose = localStorage.getItem('dotllm-verbose') === '1';
+        state.verbose = localStorage.getItem('dotllm-verbose') !== '0';
         state.toolsEnabled = localStorage.getItem('dotllm-tools-enabled') === '1';
         const savedToolsJson = localStorage.getItem('dotllm-tools-json');
         // Auto-upgrade: if saved JSON is the old sample (no response_example), replace with new sample

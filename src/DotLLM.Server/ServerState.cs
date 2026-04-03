@@ -113,7 +113,7 @@ public sealed class ServerState : IDisposable
 public sealed record SamplingDefaults
 {
     /// <summary>Sampling temperature. 0 = greedy.</summary>
-    public float Temperature { get; init; } = 0.7f;
+    public float Temperature { get; init; } = 0.0f;
 
     /// <summary>Top-P (nucleus) sampling threshold.</summary>
     public float TopP { get; init; } = 1.0f;
