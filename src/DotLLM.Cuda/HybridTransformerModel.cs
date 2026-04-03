@@ -198,10 +198,14 @@ public sealed unsafe class HybridTransformerModel : IModel
     }
 
     /// <summary>Creates a <see cref="HybridKvCache"/> for this model.</summary>
-    public HybridKvCache CreateKvCache(int maxSeqLen) => new(
-        new CudaKvCache(_numGpuLayers, Config.NumKvHeads, Config.HeadDim, maxSeqLen),
-        new SimpleKvCache(Config.NumLayers - _numGpuLayers, Config.NumKvHeads, Config.HeadDim, maxSeqLen),
-        _numGpuLayers);
+    public HybridKvCache CreateKvCache(int maxSeqLen)
+    {
+        _context.MakeCurrent();
+        return new HybridKvCache(
+            new CudaKvCache(_numGpuLayers, Config.NumKvHeads, Config.HeadDim, maxSeqLen),
+            new SimpleKvCache(Config.NumLayers - _numGpuLayers, Config.NumKvHeads, Config.HeadDim, maxSeqLen),
+            _numGpuLayers);
+    }
 
     /// <inheritdoc/>
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions, int deviceId)
@@ -217,6 +221,7 @@ public sealed unsafe class HybridTransformerModel : IModel
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
                            int deviceId, IKvCache? kvCache)
     {
+        _context.MakeCurrent();
         int maxSeq = Config.MaxSequenceLength;
         for (int i = 0; i < positions.Length; i++)
         {

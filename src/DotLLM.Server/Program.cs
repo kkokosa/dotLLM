@@ -20,7 +20,7 @@ var state = ServerStartup.LoadModel(resolvedPath, serverOptions);
 var app = ServerStartup.BuildApp(state, args, serveUi: false);
 
 var url = $"http://{serverOptions.Host}:{serverOptions.Port}";
-Console.WriteLine($"[dotllm] {state.Config.Architecture} {state.Config.NumLayers}L/{state.Config.HiddenSize}H | {Path.GetFileName(resolvedPath)}");
+Console.WriteLine($"[dotllm] {state.Config!.Architecture} {state.Config.NumLayers}L/{state.Config.HiddenSize}H | {Path.GetFileName(resolvedPath)}");
 Console.WriteLine($"[dotllm] Listening on {url}");
 Console.WriteLine($"[dotllm] Endpoints: /v1/chat/completions, /v1/completions, /v1/models, /v1/tokenize, /v1/detokenize");
 

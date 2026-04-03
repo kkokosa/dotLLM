@@ -14,13 +14,13 @@ public static class PropsEndpoint
             var threading = new ThreadingConfig(state.Options.Threads, state.Options.DecodeThreads);
             return new PropsResponse
             {
-                ModelId = state.Options.ModelId,
-                ModelPath = state.LoadedModelPath,
-                Architecture = state.Config.Architecture.ToString(),
-                NumLayers = state.Config.NumLayers,
-                HiddenSize = state.Config.HiddenSize,
-                VocabSize = state.Config.VocabSize,
-                MaxSequenceLength = state.Config.MaxSequenceLength,
+                ModelId = state.IsReady ? state.Options.ModelId : null,
+                ModelPath = state.IsReady ? state.LoadedModelPath : null,
+                Architecture = state.Config?.Architecture.ToString(),
+                NumLayers = state.Config?.NumLayers ?? 0,
+                HiddenSize = state.Config?.HiddenSize ?? 0,
+                VocabSize = state.Config?.VocabSize ?? 0,
+                MaxSequenceLength = state.Config?.MaxSequenceLength ?? 0,
                 Device = state.Options.Device,
                 GpuLayers = state.Options.GpuLayers,
                 Threads = threading.EffectiveThreadCount,

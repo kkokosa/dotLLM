@@ -463,6 +463,28 @@ internal sealed class JinjaEvaluator
             };
         }
 
+        // Fallback: coerce to string for string-like methods
+        if (obj is not null && expr.MethodName is "strip" or "lstrip" or "rstrip"
+                or "upper" or "lower" or "startswith" or "endswith" or "replace" or "split")
+        {
+            var str = Stringify(obj);
+            return expr.MethodName switch
+            {
+                "strip" => str.Trim(),
+                "lstrip" => str.TrimStart(),
+                "rstrip" => str.TrimEnd(),
+                "upper" => str.ToUpperInvariant(),
+                "lower" => str.ToLowerInvariant(),
+                "startswith" => args.Count > 0 && str.StartsWith(Stringify(args[0]), StringComparison.Ordinal),
+                "endswith" => args.Count > 0 && str.EndsWith(Stringify(args[0]), StringComparison.Ordinal),
+                "replace" => args.Count >= 2 ? str.Replace(Stringify(args[0]), Stringify(args[1])) : str,
+                "split" => args.Count > 0
+                    ? str.Split(Stringify(args[0])).Cast<object?>().ToList()
+                    : (object)str.Split().Cast<object?>().ToList(),
+                _ => str,
+            };
+        }
+
         throw new JinjaException($"Cannot call method '{expr.MethodName}' on {obj?.GetType().Name ?? "null"}");
     }
 

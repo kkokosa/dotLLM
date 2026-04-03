@@ -28,7 +28,8 @@
     <header class="flex items-center justify-between px-4 py-2 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur shrink-0">
         <div class="flex items-center gap-3">
             <span class="text-accent font-bold text-lg tracking-tight">dotLLM</span>
-            <span id="model-badge" class="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 truncate max-w-[300px]">loading...</span>
+            <span id="model-badge" class="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 truncate max-w-[400px]">loading...</span>
+            <button id="reload-model-btn" class="text-xs px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-500 hover:text-zinc-200 hover:border-zinc-500 transition" title="Load / change model">&#x21bb;</button>
         </div>
         <div class="flex items-center gap-2">
             <span id="status-indicator" class="text-xs text-zinc-500">...</span>
@@ -63,7 +64,7 @@
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
             </button>
             <textarea id="user-input" rows="1" class="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:border-accent/50 placeholder-zinc-600 max-h-40" placeholder="Type a message... (Enter to send, Shift+Enter for newline)"></textarea>
-            <button id="send-btn" class="shrink-0 px-4 py-2 rounded-lg bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 transition text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed">Send</button>
+            <button id="send-btn" class="shrink-0 px-4 py-2 rounded-lg bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 transition text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed" title="Send">Send</button>
             <button id="stop-btn" class="shrink-0 px-4 py-2 rounded-lg bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 transition text-sm font-medium hidden">Stop</button>
         </div>
     </footer>
@@ -123,25 +124,128 @@
                 </div>
             </section>
 
-            <!-- Model section -->
-            <section class="mb-6">
-                <h3 class="text-[10px] uppercase tracking-wider text-zinc-500 mb-3">Model</h3>
-                <div id="model-info" class="text-xs text-zinc-400 space-y-1 mb-3"></div>
-                <button id="refresh-models-btn" class="text-xs text-zinc-500 hover:text-zinc-300 mb-2">[refresh list]</button>
-                <div id="model-list" class="space-y-1 max-h-48 overflow-y-auto"></div>
-                <div id="model-loading" class="text-xs text-yellow-500 mt-2 hidden">Loading model...</div>
-            </section>
-
             <!-- Display section -->
             <section class="mb-6">
                 <h3 class="text-[10px] uppercase tracking-wider text-zinc-500 mb-3">Display</h3>
                 <label class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
                     <input id="opt-verbose" type="checkbox" class="accent-cyan-500">
-                    <span>Verbose stats (full timing breakdown)</span>
+                    <span>Verbose diagnostics (show full prompt)</span>
                 </label>
             </section>
         </div>
     </aside>
+
+    <!-- Model Load Modal (centered overlay) -->
+    <div id="model-modal-overlay" class="fixed inset-0 bg-black/60 hidden items-center justify-center" style="z-index: 60;">
+        <div class="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-[600px] max-h-[85vh] flex flex-col overflow-hidden">
+            <!-- Modal header -->
+            <div class="flex items-center justify-between px-5 py-3 border-b border-zinc-800 shrink-0">
+                <h2 class="text-sm font-bold uppercase tracking-wider text-zinc-300">Load Model</h2>
+                <button id="model-modal-close" class="text-zinc-500 hover:text-zinc-300 text-lg leading-none">&times;</button>
+            </div>
+
+            <!-- Modal body -->
+            <div class="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+
+                <!-- Model selector (dropdown) -->
+                <div>
+                    <label class="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">Model File</label>
+                    <p class="text-[10px] text-zinc-600 mb-1.5">Select a locally downloaded GGUF model. Use <code class="bg-zinc-800 px-1 rounded">dotllm model pull</code> to download more.</p>
+                    <select id="modal-model-select" class="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-zinc-500">
+                        <option value="">Loading models...</option>
+                    </select>
+                    <div id="modal-model-info" class="mt-1.5 text-[10px] text-zinc-600 hidden"></div>
+                </div>
+
+                <!-- Options (shown after selecting a model) -->
+                <div id="modal-options" class="hidden space-y-4 border-t border-zinc-800 pt-4">
+
+                    <!-- Compute device -->
+                    <div>
+                        <label class="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">Compute Device</label>
+                        <p class="text-[10px] text-zinc-600 mb-1.5">CPU is universal. GPU requires an NVIDIA GPU with enough VRAM.</p>
+                        <div class="flex items-center gap-4">
+                            <label class="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer">
+                                <input type="radio" name="modal-device" value="cpu" class="accent-cyan-500" checked>
+                                <span>CPU</span>
+                            </label>
+                            <label class="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer">
+                                <input type="radio" name="modal-device" value="gpu" class="accent-cyan-500">
+                                <span>GPU</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- GPU offloading (shown when GPU selected) -->
+                    <div id="modal-gpu-section" class="hidden">
+                        <label class="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">GPU Offloading</label>
+                        <p class="text-[10px] text-zinc-600 mb-1.5">Slide right to offload more layers to GPU. More layers = faster but needs more VRAM. All layers = full GPU inference.</p>
+                        <div class="flex items-center gap-3">
+                            <span class="text-[10px] text-zinc-600 shrink-0">0</span>
+                            <input id="modal-gpu-layers" type="range" min="0" max="32" value="32" class="flex-1 accent-cyan-500">
+                            <span id="modal-gpu-layers-max" class="text-[10px] text-zinc-600 shrink-0">32</span>
+                        </div>
+                        <div class="flex justify-between mt-1">
+                            <span class="text-[10px] text-zinc-600">CPU only</span>
+                            <span id="modal-gpu-layers-val" class="text-[10px] text-accent font-medium">32 layers on GPU</span>
+                            <span class="text-[10px] text-zinc-600">Full GPU</span>
+                        </div>
+                        <div id="modal-size-estimate" class="mt-2 text-[10px] text-zinc-500 bg-zinc-800/50 rounded px-2 py-1.5"></div>
+                    </div>
+
+                    <!-- KV-Cache options -->
+                    <div>
+                        <label class="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">KV-Cache Quantization</label>
+                        <p class="text-[10px] text-zinc-600 mb-1.5">Compress the attention cache to fit longer contexts. Lower precision = less memory but slightly lower quality. f32 is full precision.</p>
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="text-[10px] text-zinc-500 block mb-0.5">Keys</label>
+                                <select id="modal-cache-k" class="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-zinc-500">
+                                    <option value="f32" selected>f32 (full precision)</option>
+                                    <option value="q8_0">q8_0 (2x compression)</option>
+                                    <option value="q4_0">q4_0 (4x compression)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-[10px] text-zinc-500 block mb-0.5">Values</label>
+                                <select id="modal-cache-v" class="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-zinc-500">
+                                    <option value="f32" selected>f32 (full precision)</option>
+                                    <option value="q8_0">q8_0 (2x compression)</option>
+                                    <option value="q4_0">q4_0 (4x compression)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- CPU Threads -->
+                    <div>
+                        <label class="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">CPU Threads</label>
+                        <p class="text-[10px] text-zinc-600 mb-1.5">Number of threads for compute. 0 = auto-detect (uses all cores). Decode threads are auto-capped to memory channel count.</p>
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="text-[10px] text-zinc-500 block mb-0.5">Prefill threads</label>
+                                <input id="modal-threads" type="number" min="0" max="256" value="0" class="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-zinc-500" placeholder="0 = auto">
+                            </div>
+                            <div>
+                                <label class="text-[10px] text-zinc-500 block mb-0.5">Decode threads</label>
+                                <input id="modal-decode-threads" type="number" min="0" max="256" value="0" class="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-zinc-500" placeholder="0 = auto">
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- Modal footer -->
+            <div class="flex items-center justify-between px-5 py-3 border-t border-zinc-800 shrink-0">
+                <div id="modal-status" class="text-xs text-zinc-500 flex items-center gap-2"></div>
+                <div class="flex items-center gap-2">
+                    <button id="modal-cancel-btn" class="text-xs px-3 py-1.5 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 transition">Cancel</button>
+                    <button id="modal-load-btn" class="text-xs px-4 py-1.5 rounded bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 transition disabled:opacity-40 disabled:cursor-not-allowed" disabled>Load Model</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <script src="/app.js"></script>
 </body>

@@ -11,16 +11,17 @@ namespace DotLLM.Server;
 /// <summary>
 /// Shared server state: loaded model, concurrency control, mutable configuration.
 /// Endpoints access live model/generator instances through this object.
+/// May start "bare" (no model loaded) when <c>dotllm serve</c> is run without a model argument.
 /// </summary>
 public sealed class ServerState : IDisposable
 {
     private readonly SemaphoreSlim _requestGate = new(1, 1);
 
-    /// <summary>Server startup options.</summary>
-    public required ServerOptions Options { get; init; }
+    /// <summary>Server startup options (updated on model swap).</summary>
+    public required ServerOptions Options { get; set; }
 
-    /// <summary>Model configuration (updated on model swap).</summary>
-    public required ModelConfig Config { get; set; }
+    /// <summary>Model configuration (null when no model loaded).</summary>
+    public ModelConfig? Config { get; set; }
 
     /// <summary>Tool call parser for the loaded model.</summary>
     public IToolCallParser? ToolCallParser { get; set; }
@@ -31,22 +32,22 @@ public sealed class ServerState : IDisposable
     /// <summary>KV-cache factory for the loaded model/device.</summary>
     public Func<ModelConfig, int, IKvCache>? KvCacheFactory { get; set; }
 
-    /// <summary>Whether the server is ready to accept requests.</summary>
+    /// <summary>Whether a model is loaded and ready to accept requests.</summary>
     public bool IsReady { get; set; }
 
-    // ── Live instances (mutable for model swap) ──
+    // ── Live instances (nullable — null when no model loaded) ──
 
     /// <summary>Currently loaded model.</summary>
-    public required IModel Model { get; set; }
+    public IModel? Model { get; set; }
 
     /// <summary>Tokenizer for the loaded model.</summary>
-    public required ITokenizer Tokenizer { get; set; }
+    public ITokenizer? Tokenizer { get; set; }
 
     /// <summary>Chat template for the loaded model.</summary>
-    public required IChatTemplate ChatTemplate { get; set; }
+    public IChatTemplate? ChatTemplate { get; set; }
 
     /// <summary>Text generator wired to the current model.</summary>
-    public required TextGenerator Generator { get; set; }
+    public TextGenerator? Generator { get; set; }
 
     /// <summary>Mutable sampling parameter defaults (changeable from the UI).</summary>
     public SamplingDefaults SamplingDefaults { get; set; } = new();
@@ -69,8 +70,8 @@ public sealed class ServerState : IDisposable
     }
 
     /// <summary>
-    /// Swaps the loaded model under the request gate.
-    /// Blocks new requests during the swap, disposes the old model, and runs the load action.
+    /// Loads or swaps a model under the request gate.
+    /// Blocks new requests during the swap, disposes the old model (if any), and runs the load action.
     /// </summary>
     public async Task SwapModelAsync(Func<Task> loadAction, CancellationToken ct)
     {
@@ -78,7 +79,7 @@ public sealed class ServerState : IDisposable
         IsReady = false;
         try
         {
-            Model.Dispose();
+            Model?.Dispose();
             CurrentGguf?.Dispose();
             CurrentGguf = null;
 
@@ -91,7 +92,7 @@ public sealed class ServerState : IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
-        Model.Dispose();
+        Model?.Dispose();
         CurrentGguf?.Dispose();
         _requestGate.Dispose();
     }

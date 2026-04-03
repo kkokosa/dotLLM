@@ -22,6 +22,7 @@ public static class EndpointExtensions
         PropsEndpoint.Map(app);
         ConfigEndpoint.Map(app);
         ModelManagementEndpoint.Map(app);
+        ModelInspectEndpoint.Map(app);
 
         if (serveUi)
             WebUIEndpoint.Map(app);

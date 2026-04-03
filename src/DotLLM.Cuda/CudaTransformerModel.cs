@@ -136,6 +136,7 @@ public sealed unsafe class CudaTransformerModel : IModel
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
                            int deviceId, IKvCache? kvCache)
     {
+        _context.MakeCurrent();
         int seqLen = tokenIds.Length;
         int hiddenSize = Config.HiddenSize;
         int numHeads = Config.NumAttentionHeads;
@@ -353,6 +354,7 @@ public sealed unsafe class CudaTransformerModel : IModel
     /// <param name="maxSeqLen">Maximum sequence length for the cache.</param>
     public CudaKvCache CreateKvCache(int maxSeqLen)
     {
+        _context.MakeCurrent();
         return new CudaKvCache(Config.NumLayers, Config.NumKvHeads, Config.HeadDim, maxSeqLen);
     }
 
@@ -363,8 +365,9 @@ public sealed unsafe class CudaTransformerModel : IModel
     /// </summary>
     public Core.Attention.IKvCache CreateKvCache(int maxSeqLen, Core.Configuration.KvCacheConfig config)
     {
+        _context.MakeCurrent();
         if (!config.IsQuantized)
-            return CreateKvCache(maxSeqLen);
+            return new CudaKvCache(Config.NumLayers, Config.NumKvHeads, Config.HeadDim, maxSeqLen);
         return new CudaQuantizedKvCache(Config.NumLayers, Config.NumKvHeads, Config.HeadDim, maxSeqLen, config);
     }
 

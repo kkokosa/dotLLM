@@ -8,13 +8,16 @@ namespace DotLLM.Server.Models;
 public sealed record PropsResponse
 {
     [JsonPropertyName("model_id")]
-    public required string ModelId { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ModelId { get; init; }
 
     [JsonPropertyName("model_path")]
-    public required string ModelPath { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ModelPath { get; init; }
 
     [JsonPropertyName("architecture")]
-    public required string Architecture { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Architecture { get; init; }
 
     [JsonPropertyName("num_layers")]
     public int NumLayers { get; init; }
@@ -29,7 +32,7 @@ public sealed record PropsResponse
     public int MaxSequenceLength { get; init; }
 
     [JsonPropertyName("device")]
-    public required string Device { get; init; }
+    public string Device { get; init; } = "cpu";
 
     [JsonPropertyName("gpu_layers")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

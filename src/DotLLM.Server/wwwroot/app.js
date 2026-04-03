@@ -5,12 +5,16 @@
 // ── STATE ──
 
 const state = {
-    messages: [],       // {role, content, stats?}
+    messages: [],       // {role, content, stats?, rawPrompt?, rawResponse?}
     config: null,       // from /props
     isGenerating: false,
     verbose: false,
     systemPrompt: '',
     abortController: null,
+    // Modal state
+    modalSelectedRepo: null,
+    modalSelectedFile: null,
+    modalSelectedFilename: null,
 };
 
 // ── DOM REFS ──
@@ -32,11 +36,27 @@ const systemPromptBar = $('#system-prompt-bar');
 const systemPromptInput = $('#system-prompt');
 const systemPromptToggle = $('#system-prompt-toggle');
 const systemPromptClear = $('#system-prompt-clear');
-const modelInfo = $('#model-info');
-const modelList = $('#model-list');
-const modelLoading = $('#model-loading');
-const refreshModelsBtn = $('#refresh-models-btn');
 const applyConfigBtn = $('#apply-config-btn');
+const reloadModelBtn = $('#reload-model-btn');
+
+// Modal refs
+const modelModalOverlay = $('#model-modal-overlay');
+const modelModalClose = $('#model-modal-close');
+const modalModelSelect = $('#modal-model-select');
+const modalModelInfo = $('#modal-model-info');
+const modalOptions = $('#modal-options');
+const modalGpuSection = $('#modal-gpu-section');
+const modalGpuLayers = $('#modal-gpu-layers');
+const modalGpuLayersMax = $('#modal-gpu-layers-max');
+const modalGpuLayersVal = $('#modal-gpu-layers-val');
+const modalSizeEstimate = $('#modal-size-estimate');
+const modalCacheK = $('#modal-cache-k');
+const modalCacheV = $('#modal-cache-v');
+const modalThreads = $('#modal-threads');
+const modalDecodeThreads = $('#modal-decode-threads');
+const modalStatus = $('#modal-status');
+const modalCancelBtn = $('#modal-cancel-btn');
+const modalLoadBtn = $('#modal-load-btn');
 
 // ── API LAYER ──
 
@@ -50,9 +70,20 @@ async function fetchAvailableModels() {
     return res.json();
 }
 
-async function loadModel(model, quant) {
+async function inspectModel(fullPath) {
+    const res = await fetch(`/v1/models/inspect?path=${encodeURIComponent(fullPath)}`);
+    return res.ok ? res.json() : null;
+}
+
+async function loadModel(model, quant, opts) {
     const body = { model };
     if (quant) body.quant = quant;
+    if (opts?.device) body.device = opts.device;
+    if (opts?.device === 'gpu' && opts?.gpuLayers != null) body.gpu_layers = opts.gpuLayers;
+    if (opts?.cacheTypeK && opts.cacheTypeK !== 'f32') body.cache_type_k = opts.cacheTypeK;
+    if (opts?.cacheTypeV && opts.cacheTypeV !== 'f32') body.cache_type_v = opts.cacheTypeV;
+    if (opts?.threads) body.threads = opts.threads;
+    if (opts?.decodeThreads) body.decode_threads = opts.decodeThreads;
     const res = await fetch('/v1/models/load', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -126,8 +157,8 @@ async function* streamChat(messages, params) {
                     if (choice?.finish_reason) {
                         yield { type: 'finish', reason: choice.finish_reason };
                     }
-                    if (chunk.usage || chunk.timings) {
-                        yield { type: 'usage', usage: chunk.usage, timings: chunk.timings };
+                    if (chunk.usage || chunk.timings || chunk.prompt) {
+                        yield { type: 'usage', usage: chunk.usage, timings: chunk.timings, prompt: chunk.prompt };
                     }
                 } catch { /* skip malformed chunks */ }
             }
@@ -179,6 +210,55 @@ function renderMarkdown(text) {
     return `<p>${html}</p>`;
 }
 
+// ── MODEL BADGE ──
+
+function extractQuantFromPath(modelPath) {
+    if (!modelPath) return null;
+    // Match patterns like .Q4_K_M.gguf, .Q8_0.gguf, .IQ3_XXS.gguf, etc.
+    const match = modelPath.match(/[.\-]((?:Q|IQ|F|BF)\w+)\.gguf$/i);
+    return match ? match[1] : null;
+}
+
+function buildModelBadgeText(config) {
+    if (!config || !config.is_ready) return 'no model loaded';
+
+    const parts = [];
+
+    // Model name
+    parts.push(config.model_id || 'unknown');
+
+    // Quant from filename
+    const quant = extractQuantFromPath(config.model_path);
+    if (quant) parts.push(quant);
+
+    // Device label
+    if (config.device === 'cpu' || (!config.device && !config.gpu_layers)) {
+        const threads = config.threads || '?';
+        parts.push(`CPU ${threads}t`);
+    } else if (config.gpu_layers && config.num_layers && config.gpu_layers < config.num_layers) {
+        parts.push(`Hybrid ${config.gpu_layers}/${config.num_layers} GPU`);
+    } else {
+        parts.push('GPU');
+    }
+
+    return parts.join(' | ');
+}
+
+function updateModelBadge() {
+    modelBadge.textContent = buildModelBadgeText(state.config);
+    updateSendButtonState();
+}
+
+function updateSendButtonState() {
+    const ready = state.config?.is_ready;
+    if (state.isGenerating) {
+        sendBtn.disabled = true;
+    } else {
+        sendBtn.disabled = !ready;
+    }
+    sendBtn.title = ready ? 'Send' : 'Load a model first';
+}
+
 // ── UI RENDERING ──
 
 function setStatus(text, color = 'text-zinc-500') {
@@ -190,7 +270,7 @@ function hideWelcome() {
     welcomeEl.classList.add('hidden');
 }
 
-function addMessageToDOM(role, content, stats) {
+function addMessageToDOM(role, content, stats, rawPrompt, rawResponse) {
     hideWelcome();
 
     const wrapper = document.createElement('div');
@@ -223,6 +303,11 @@ function addMessageToDOM(role, content, stats) {
     // Stats
     if (stats) {
         bubble.appendChild(createStatsBar(stats));
+    }
+
+    // Verbose diagnostics: show full prompt as expandable details
+    if (role === 'assistant' && state.verbose && (rawPrompt || rawResponse)) {
+        bubble.appendChild(createVerboseDiagnostics(rawPrompt, rawResponse));
     }
 
     wrapper.appendChild(bubble);
@@ -277,24 +362,56 @@ function createStatsBar(stats) {
         if (stats.timings.decode_tokens_per_sec > 0) {
             parts.push(`${formatNum(stats.timings.decode_tokens_per_sec)} dec t/s`);
         }
+        if (stats.timings.prefill_time_ms != null) {
+            parts.push(`prefill: ${stats.timings.prefill_time_ms.toFixed(1)}ms`);
+        }
+        if (stats.timings.decode_time_ms != null) {
+            parts.push(`decode: ${stats.timings.decode_time_ms.toFixed(0)}ms`);
+        }
+        if (stats.timings.sampling_time_ms != null) {
+            parts.push(`sampling: ${stats.timings.sampling_time_ms.toFixed(1)}ms`);
+        }
     }
 
     bar.textContent = parts.length ? `[${parts.join(' | ')}]` : '';
+    return bar;
+}
 
-    // Verbose: full breakdown
-    if (state.verbose && stats.timings) {
-        const detail = document.createElement('div');
-        detail.className = 'mt-1 text-zinc-600';
-        const t = stats.timings;
-        detail.innerHTML = [
-            `prefill: ${t.prefill_time_ms?.toFixed(1)}ms (${t.prompt_tokens} tok)`,
-            `decode: ${t.decode_time_ms?.toFixed(1)}ms (${t.generated_tokens} tok)`,
-            `sampling: ${t.sampling_time_ms?.toFixed(1)}ms`,
-        ].join(' &middot; ');
-        bar.appendChild(detail);
+function createVerboseDiagnostics(rawPrompt, rawResponse) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'mt-2 border-t border-zinc-800 pt-2 space-y-1';
+
+    // Raw prompt (after chat template)
+    if (rawPrompt) {
+        const promptDetails = document.createElement('details');
+        promptDetails.className = '';
+        const promptSummary = document.createElement('summary');
+        promptSummary.className = 'text-[10px] uppercase tracking-wider text-zinc-600 cursor-pointer hover:text-zinc-400 select-none';
+        promptSummary.textContent = 'Raw prompt (after template)';
+        promptDetails.appendChild(promptSummary);
+        const promptPre = document.createElement('pre');
+        promptPre.className = 'mt-1 text-[10px] text-zinc-600 bg-zinc-950 border border-zinc-800 rounded p-2 overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap';
+        promptPre.textContent = rawPrompt;
+        promptDetails.appendChild(promptPre);
+        wrapper.appendChild(promptDetails);
     }
 
-    return bar;
+    // Raw response
+    if (rawResponse) {
+        const respDetails = document.createElement('details');
+        respDetails.className = '';
+        const respSummary = document.createElement('summary');
+        respSummary.className = 'text-[10px] uppercase tracking-wider text-zinc-600 cursor-pointer hover:text-zinc-400 select-none';
+        respSummary.textContent = 'Raw response';
+        respDetails.appendChild(respSummary);
+        const respPre = document.createElement('pre');
+        respPre.className = 'mt-1 text-[10px] text-zinc-600 bg-zinc-950 border border-zinc-800 rounded p-2 overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap';
+        respPre.textContent = rawResponse;
+        respDetails.appendChild(respPre);
+        wrapper.appendChild(respDetails);
+    }
+
+    return wrapper;
 }
 
 function formatNum(n) {
@@ -363,71 +480,198 @@ function updateRangeDisplays() {
     $('#rep-val').textContent = parseFloat($('#opt-rep-penalty').value).toFixed(2);
 }
 
-function renderModelInfo() {
-    if (!state.config) return;
-    const c = state.config;
-    modelInfo.innerHTML = [
-        `<div><span class="stat-label">Model:</span> ${esc(c.model_id)}</div>`,
-        `<div><span class="stat-label">Arch:</span> ${esc(c.architecture)} ${c.num_layers}L/${c.hidden_size}H</div>`,
-        `<div><span class="stat-label">Vocab:</span> ${c.vocab_size?.toLocaleString() ?? '?'}</div>`,
-        `<div><span class="stat-label">Context:</span> ${c.max_sequence_length?.toLocaleString() ?? '?'}</div>`,
-        `<div><span class="stat-label">Device:</span> ${esc(c.device)}${c.gpu_layers ? ` (${c.gpu_layers} GPU layers)` : ''} | ${c.threads} threads</div>`,
-    ].join('');
+// ── MODEL LOAD MODAL ──
+
+// Modal-local state
+let modalModels = [];      // flat list from /v1/models/available
+let modalInspect = null;   // inspect result for selected model
+let modalSelectedFullPath = null;
+
+function openModelModal() {
+    modalSelectedFullPath = null;
+    modalInspect = null;
+    modalOptions.classList.add('hidden');
+    modalGpuSection.classList.add('hidden');
+    modalModelInfo.classList.add('hidden');
+    modalLoadBtn.disabled = true;
+    modalStatus.innerHTML = '';
+    modalCacheK.value = 'f32';
+    modalCacheV.value = 'f32';
+    document.querySelector('input[name="modal-device"][value="cpu"]').checked = true;
+    modelModalOverlay.classList.remove('hidden');
+    modelModalOverlay.style.display = 'flex';
+    populateModalDropdown();
 }
 
-async function renderModelList() {
-    modelList.innerHTML = '<div class="text-xs text-zinc-600">Loading...</div>';
+function closeModelModal() {
+    modelModalOverlay.classList.add('hidden');
+    modelModalOverlay.style.display = 'none';
+}
+
+function formatFileSize(bytes) {
+    if (bytes == null) return '?';
+    if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(2) + ' GB';
+    return (bytes / 1048576).toFixed(0) + ' MB';
+}
+
+async function populateModalDropdown() {
+    modalModelSelect.innerHTML = '<option value="">Loading...</option>';
     try {
         const data = await fetchAvailableModels();
-        const models = data.models || [];
-        if (models.length === 0) {
-            modelList.innerHTML = '<div class="text-xs text-zinc-600">No local models found. Use <code>dotllm model pull</code>.</div>';
+        modalModels = data.models || [];
+
+        if (modalModels.length === 0) {
+            modalModelSelect.innerHTML = '<option value="">No models found — use dotllm model pull</option>';
             return;
         }
-        modelList.innerHTML = '';
-        for (const m of models) {
-            const item = document.createElement('div');
-            item.className = 'model-item text-xs';
-            const sizeMB = (m.size_bytes / 1048576).toFixed(0);
-            const isCurrent = state.config?.model_path === m.full_path;
-            if (isCurrent) item.classList.add('active');
-            item.innerHTML = `<div class="text-zinc-300 truncate">${esc(m.repo_id)}/${esc(m.filename)}</div>` +
-                `<div class="text-zinc-600">${sizeMB} MB${isCurrent ? ' <span class="text-accent">(loaded)</span>' : ''}</div>`;
-            if (!isCurrent) {
-                item.addEventListener('click', () => handleModelLoad(m.repo_id, m.filename));
+
+        // Group by repo
+        const groups = {};
+        for (const m of modalModels) {
+            const repo = m.repo_id || 'local';
+            if (!groups[repo]) groups[repo] = [];
+            groups[repo].push(m);
+        }
+
+        modalModelSelect.innerHTML = '<option value="">Select a model...</option>';
+        for (const [repo, files] of Object.entries(groups)) {
+            const optgroup = document.createElement('optgroup');
+            optgroup.label = repo;
+            for (const f of files) {
+                const opt = document.createElement('option');
+                opt.value = f.full_path;
+                const size = formatFileSize(f.size_bytes);
+                const isCurrent = state.config?.model_path === f.full_path;
+                opt.textContent = `${f.filename} (${size})${isCurrent ? ' ✓ loaded' : ''}`;
+                opt.dataset.repo = repo;
+                opt.dataset.filename = f.filename;
+                opt.dataset.sizeBytes = f.size_bytes;
+                optgroup.appendChild(opt);
             }
-            modelList.appendChild(item);
+            modalModelSelect.appendChild(optgroup);
         }
     } catch {
-        modelList.innerHTML = '<div class="text-xs text-red-400">Failed to load models</div>';
+        modalModelSelect.innerHTML = '<option value="">Failed to load models</option>';
     }
 }
 
-async function handleModelLoad(repoId, filename) {
-    if (state.isGenerating) return;
-    if (!confirm(`Load model ${repoId}/${filename}?`)) return;
+async function onModalModelChange() {
+    const fullPath = modalModelSelect.value;
+    if (!fullPath) {
+        modalOptions.classList.add('hidden');
+        modalModelInfo.classList.add('hidden');
+        modalLoadBtn.disabled = true;
+        modalInspect = null;
+        modalSelectedFullPath = null;
+        return;
+    }
 
-    modelLoading.classList.remove('hidden');
+    modalSelectedFullPath = fullPath;
+    modalLoadBtn.disabled = false;
+    modalModelInfo.classList.remove('hidden');
+    modalModelInfo.textContent = 'Inspecting model...';
+
+    // Inspect the selected model to get layer count
+    modalInspect = await inspectModel(fullPath);
+    if (modalInspect) {
+        const size = formatFileSize(modalInspect.file_size_bytes);
+        modalModelInfo.textContent = `${modalInspect.architecture} | ${modalInspect.num_layers} layers | ${modalInspect.hidden_size}H | ctx ${modalInspect.max_sequence_length?.toLocaleString() ?? '?'} | ${size}`;
+
+        // Update GPU slider range
+        modalGpuLayers.max = modalInspect.num_layers;
+        modalGpuLayers.value = modalInspect.num_layers;
+        modalGpuLayersMax.textContent = modalInspect.num_layers;
+        updateGpuLayersDisplay();
+    } else {
+        modalModelInfo.textContent = 'Could not read model metadata';
+    }
+
+    modalOptions.classList.remove('hidden');
+    updateGpuVisibility();
+}
+
+function getModalDevice() {
+    return document.querySelector('input[name="modal-device"]:checked')?.value || 'cpu';
+}
+
+function updateGpuVisibility() {
+    if (getModalDevice() === 'gpu') {
+        modalGpuSection.classList.remove('hidden');
+        updateGpuLayersDisplay();
+    } else {
+        modalGpuSection.classList.add('hidden');
+    }
+}
+
+function updateGpuLayersDisplay() {
+    const layers = parseInt(modalGpuLayers.value) || 0;
+    const maxLayers = parseInt(modalGpuLayers.max) || 32;
+
+    if (layers === 0) {
+        modalGpuLayersVal.textContent = 'CPU only (no offloading)';
+    } else if (layers >= maxLayers) {
+        modalGpuLayersVal.textContent = `All ${maxLayers} layers on GPU`;
+    } else {
+        modalGpuLayersVal.textContent = `${layers}/${maxLayers} layers on GPU`;
+    }
+
+    // Size estimate
+    if (modalInspect?.file_size_bytes) {
+        const total = modalInspect.file_size_bytes;
+        const frac = maxLayers > 0 ? layers / maxLayers : 0;
+        const gpuBytes = total * frac;
+        const cpuBytes = total - gpuBytes;
+        modalSizeEstimate.innerHTML =
+            `<span class="text-zinc-400">Estimated:</span> ` +
+            `GPU ≈ ${formatFileSize(gpuBytes)} | RAM ≈ ${formatFileSize(cpuBytes)}` +
+            `<span class="text-zinc-600"> (weights only, excludes KV-cache)</span>`;
+    }
+}
+
+async function handleModalLoad() {
+    if (!modalSelectedFullPath) return;
+
+    const opt = modalModelSelect.selectedOptions[0];
+    const repo = opt?.dataset.repo;
+    const filename = opt?.dataset.filename;
+    const quant = extractQuantFromPath(filename);
+    const device = getModalDevice();
+    const gpuLayers = device === 'gpu' ? parseInt(modalGpuLayers.value) : undefined;
+    const threads = parseInt(modalThreads.value) || 0;
+    const decodeThreads = parseInt(modalDecodeThreads.value) || 0;
+
+    modalLoadBtn.disabled = true;
+    modalCancelBtn.disabled = true;
+    modalStatus.innerHTML = '<span class="spinner"></span> <span class="text-yellow-500">Loading model...</span>';
     setStatus('Loading model...', 'text-yellow-500');
 
     try {
-        const res = await loadModel(repoId);
+        const res = await loadModel(repo, quant, {
+            device,
+            gpuLayers,
+            cacheTypeK: modalCacheK.value,
+            cacheTypeV: modalCacheV.value,
+            threads: threads || undefined,
+            decodeThreads: decodeThreads || undefined,
+        });
         if (res.ok) {
-            // Refresh state
             state.config = await fetchProps();
-            modelBadge.textContent = state.config.model_id;
-            renderModelInfo();
+            updateModelBadge();
             syncSettingsFromState();
-            await renderModelList();
             setStatus('Ready', 'text-emerald-500');
+            closeModelModal();
         } else {
             const err = await res.json().catch(() => ({}));
-            setStatus(`Load failed: ${err.error || res.status}`, 'text-red-400');
+            const errMsg = err.error || `HTTP ${res.status}`;
+            modalStatus.innerHTML = `<span class="text-red-400">Failed: ${esc(errMsg)}</span>`;
+            setStatus(`Load failed: ${errMsg}`, 'text-red-400');
         }
     } catch (e) {
+        modalStatus.innerHTML = `<span class="text-red-400">Failed: ${esc(e.message)}</span>`;
         setStatus('Load failed', 'text-red-400');
     } finally {
-        modelLoading.classList.add('hidden');
+        modalLoadBtn.disabled = false;
+        modalCancelBtn.disabled = false;
     }
 }
 
@@ -436,6 +680,7 @@ async function handleModelLoad(repoId, filename) {
 async function handleSend() {
     const text = userInput.value.trim();
     if (!text || state.isGenerating) return;
+    if (!state.config?.is_ready) return;
 
     userInput.value = '';
     userInput.style.height = 'auto';
@@ -458,7 +703,7 @@ async function handleSend() {
     state.isGenerating = true;
     sendBtn.classList.add('hidden');
     stopBtn.classList.remove('hidden');
-    sendBtn.disabled = true;
+    updateSendButtonState();
     setStatus('Generating...', 'text-accent');
 
     const placeholder = createAssistantPlaceholder();
@@ -466,6 +711,7 @@ async function handleSend() {
     let tokenCount = 0;
     let usageData = null;
     let timingsData = null;
+    let rawPrompt = null;
     const startTime = performance.now();
     let firstTokenTime = null;
 
@@ -491,6 +737,7 @@ async function handleSend() {
             } else if (event.type === 'usage') {
                 usageData = event.usage;
                 timingsData = event.timings;
+                rawPrompt = event.prompt;
             }
         }
     } catch (e) {
@@ -509,19 +756,24 @@ async function handleSend() {
     // Compute TTFT
     const ttftMs = firstTokenTime ? firstTokenTime - startTime : null;
 
-    // Add stats bar
+    // Add stats bar (always full breakdown)
     const statsInfo = { usage: usageData, timings: timingsData, ttftMs };
     const statsBar = createStatsBar(statsInfo);
     placeholder.bubble.appendChild(statsBar);
 
+    // Add verbose diagnostics if enabled (raw prompt + raw response)
+    if (state.verbose) {
+        placeholder.bubble.appendChild(createVerboseDiagnostics(rawPrompt, fullText));
+    }
+
     // Save to state
-    state.messages.push({ role: 'assistant', content: fullText, stats: statsInfo });
+    state.messages.push({ role: 'assistant', content: fullText, stats: statsInfo, rawPrompt, rawResponse: fullText });
 
     // Reset UI
     state.isGenerating = false;
     sendBtn.classList.remove('hidden');
     stopBtn.classList.add('hidden');
-    sendBtn.disabled = false;
+    updateSendButtonState();
     setStatus('Ready', 'text-emerald-500');
     userInput.focus();
     saveConversation();
@@ -623,12 +875,33 @@ systemPromptClear.addEventListener('click', () => {
     saveConversation();
 });
 
-// Model list refresh
-refreshModelsBtn.addEventListener('click', () => renderModelList());
+// Model modal events
+reloadModelBtn.addEventListener('click', openModelModal);
+modelModalClose.addEventListener('click', closeModelModal);
+modalCancelBtn.addEventListener('click', closeModelModal);
+modelModalOverlay.addEventListener('click', (e) => {
+    if (e.target === modelModalOverlay) closeModelModal();
+});
+modalLoadBtn.addEventListener('click', handleModalLoad);
+modalModelSelect.addEventListener('change', onModalModelChange);
 
-// Keyboard shortcut: Escape to close settings
+// Device radio toggle → show/hide GPU section
+document.querySelectorAll('input[name="modal-device"]').forEach(radio => {
+    radio.addEventListener('change', updateGpuVisibility);
+});
+
+// GPU layers slider live update
+modalGpuLayers.addEventListener('input', updateGpuLayersDisplay);
+
+// Keyboard shortcut: Escape to close settings or modal
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeSettings();
+    if (e.key === 'Escape') {
+        if (!modelModalOverlay.classList.contains('hidden')) {
+            closeModelModal();
+        } else {
+            closeSettings();
+        }
+    }
 });
 
 // ── HELPERS ──
@@ -646,15 +919,16 @@ async function init() {
 
     try {
         state.config = await fetchProps();
-        modelBadge.textContent = state.config.model_id;
+        updateModelBadge();
         syncSettingsFromState();
-        renderModelInfo();
         loadConversation();
         setStatus('Ready', 'text-emerald-500');
+        updateSendButtonState();
         userInput.focus();
     } catch (e) {
         setStatus('Connection failed', 'text-red-400');
         modelBadge.textContent = 'offline';
+        updateSendButtonState();
     }
 }
 

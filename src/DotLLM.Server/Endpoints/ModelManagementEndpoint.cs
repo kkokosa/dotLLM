@@ -40,11 +40,18 @@ public static class ModelManagementEndpoint
                     {
                         Model = request.Model,
                         Quant = request.Quant,
+                        Device = request.Device ?? state.Options.Device,
+                        GpuLayers = request.GpuLayers ?? state.Options.GpuLayers,
+                        CacheTypeK = request.CacheTypeK ?? state.Options.CacheTypeK,
+                        CacheTypeV = request.CacheTypeV ?? state.Options.CacheTypeV,
+                        Threads = request.Threads ?? state.Options.Threads,
+                        DecodeThreads = request.DecodeThreads ?? state.Options.DecodeThreads,
                         ModelId = Path.GetFileNameWithoutExtension(resolvedPath),
                     };
                     var newState = ServerStartup.LoadModel(resolvedPath, newOptions);
 
                     // Transfer new state fields into the existing ServerState
+                    state.Options = newOptions;
                     state.Config = newState.Config;
                     state.Model = newState.Model;
                     state.Tokenizer = newState.Tokenizer;

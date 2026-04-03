@@ -11,21 +11,26 @@ public static class TokenizeEndpoint
     {
         app.MapPost("/v1/tokenize", (TokenizeRequest request, ServerState state) =>
         {
-            var tokenizer = state.Tokenizer;
+            if (state.Tokenizer is not { } tokenizer)
+                return Results.StatusCode(503);
+
             int[] tokens = tokenizer.Encode(request.Text);
             string[] tokenStrings = tokens.Select(t => tokenizer.DecodeToken(t)).ToArray();
-            return new TokenizeResponse
+            return Results.Ok(new TokenizeResponse
             {
                 Tokens = tokens,
                 TokenStrings = tokenStrings,
                 Count = tokens.Length,
-            };
+            });
         });
 
         app.MapPost("/v1/detokenize", (DetokenizeRequest request, ServerState state) =>
         {
-            string text = state.Tokenizer.Decode(request.Tokens);
-            return new DetokenizeResponse { Text = text };
+            if (state.Tokenizer is not { } tokenizer)
+                return Results.StatusCode(503);
+
+            string text = tokenizer.Decode(request.Tokens);
+            return Results.Ok(new DetokenizeResponse { Text = text });
         });
     }
 }

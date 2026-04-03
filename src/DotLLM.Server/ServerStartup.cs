@@ -50,6 +50,16 @@ public static class ServerStartup
     }
 
     /// <summary>
+    /// Creates a bare <see cref="ServerState"/> with no model loaded.
+    /// The server starts and serves UI, but inference requests return 503 until a model is loaded.
+    /// </summary>
+    public static ServerState CreateBareState(ServerOptions options) => new()
+    {
+        Options = options,
+        IsReady = false,
+    };
+
+    /// <summary>
     /// Loads a model from the given GGUF path and returns a fully populated <see cref="ServerState"/>.
     /// </summary>
     public static ServerState LoadModel(string resolvedPath, ServerOptions options)

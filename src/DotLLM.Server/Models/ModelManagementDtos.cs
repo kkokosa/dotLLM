@@ -40,6 +40,34 @@ public sealed record ModelLoadRequest
     [JsonPropertyName("quant")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Quant { get; init; }
+
+    [JsonPropertyName("device")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Device { get; init; }
+
+    [JsonPropertyName("gpu_layers")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? GpuLayers { get; init; }
+
+    [JsonPropertyName("cache_type_k")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CacheTypeK { get; init; }
+
+    [JsonPropertyName("cache_type_v")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CacheTypeV { get; init; }
+
+    [JsonPropertyName("cache_window")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? CacheWindow { get; init; }
+
+    [JsonPropertyName("threads")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? Threads { get; init; }
+
+    [JsonPropertyName("decode_threads")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? DecodeThreads { get; init; }
 }
 
 /// <summary>

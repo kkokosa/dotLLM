@@ -14,9 +14,9 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
     public sealed class Settings : CommandSettings
     {
         /// <summary>Path to a GGUF file or HuggingFace repo ID.</summary>
-        [CommandArgument(0, "<model>")]
-        [Description("Path to a GGUF file or HuggingFace repo ID (e.g., Qwen/Qwen3-0.6B-GGUF).")]
-        public string Model { get; set; } = string.Empty;
+        [CommandArgument(0, "[model]")]
+        [Description("Path to a GGUF file or HuggingFace repo ID. Omit to start without a model (load from UI).")]
+        public string? Model { get; set; }
 
         /// <summary>Port to listen on.</summary>
         [CommandOption("--port|-p")]
@@ -80,19 +80,9 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
     /// <inheritdoc/>
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
     {
-        // Resolve model path
-        var resolvedPath = GgufFileResolver.Resolve(settings.Model, settings.Quant);
-        if (resolvedPath is null)
-            return 1;
-
-        // Build server options
-        string modelId = Path.GetFileNameWithoutExtension(resolvedPath);
-        if (settings.Model.Contains('/'))
-            modelId = settings.Model.Split('/')[^1];
-
         var serverOptions = new ServerOptions
         {
-            Model = settings.Model,
+            Model = settings.Model ?? "",
             Quant = settings.Quant,
             Device = settings.Device,
             GpuLayers = settings.GpuLayers,
@@ -102,17 +92,35 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
             Port = settings.Port,
             CacheTypeK = settings.CacheTypeK,
             CacheTypeV = settings.CacheTypeV,
-            ModelId = modelId,
+            ModelId = "none",
         };
 
-        // Load model
         ServerState? state = null;
-        AnsiConsole.Status()
-            .Spinner(Spinner.Known.Dots)
-            .Start("Loading model...", _ =>
-            {
-                state = ServerStartup.LoadModel(resolvedPath, serverOptions);
-            });
+
+        if (!string.IsNullOrEmpty(settings.Model))
+        {
+            // Resolve and load model
+            var resolvedPath = GgufFileResolver.Resolve(settings.Model, settings.Quant);
+            if (resolvedPath is null)
+                return 1;
+
+            string modelId = Path.GetFileNameWithoutExtension(resolvedPath);
+            if (settings.Model.Contains('/'))
+                modelId = settings.Model.Split('/')[^1];
+            serverOptions = serverOptions with { ModelId = modelId };
+
+            AnsiConsole.Status()
+                .Spinner(Spinner.Known.Dots)
+                .Start("Loading model...", _ =>
+                {
+                    state = ServerStartup.LoadModel(resolvedPath, serverOptions);
+                });
+        }
+        else
+        {
+            // Start without a model — load from UI
+            state = ServerStartup.CreateBareState(serverOptions);
+        }
 
         // Build app with UI enabled
         var app = ServerStartup.BuildApp(state!, [], serveUi: true);
@@ -121,11 +129,17 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
 
         // Print banner
         AnsiConsole.Write(new Rule($"[grey]dotllm serve[/]").LeftJustified());
-        AnsiConsole.MarkupLine(
-            $"  [bold]{state!.Config.Architecture}[/] {state.Config.NumLayers}L/{state.Config.HiddenSize}H | " +
-            $"{Markup.Escape(Path.GetFileName(resolvedPath))}");
+        if (state!.IsReady)
+        {
+            AnsiConsole.MarkupLine(
+                $"  [bold]{state.Config!.Architecture}[/] {state.Config.NumLayers}L/{state.Config.HiddenSize}H | " +
+                $"{Markup.Escape(Path.GetFileName(state.LoadedModelPath))}");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("  [yellow]No model loaded[/] — select one from the UI");
+        }
         AnsiConsole.MarkupLine($"  Listening on [link={url}]{url}[/]");
-        AnsiConsole.MarkupLine($"  API: [dim]/v1/chat/completions, /v1/completions, /v1/models[/]");
         AnsiConsole.MarkupLine($"  Chat UI: [dim]{url}[/]");
         AnsiConsole.MarkupLine("[dim]  Press Ctrl+C to stop.[/]");
         AnsiConsole.WriteLine();

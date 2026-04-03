@@ -24,6 +24,7 @@ namespace DotLLM.Server;
 [JsonSerializable(typeof(ModelLoadRequest))]
 [JsonSerializable(typeof(ModelLoadResponse))]
 [JsonSerializable(typeof(TimingsDto))]
+[JsonSerializable(typeof(ModelInspectResponse))]
 [JsonSourceGenerationOptions(
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower)]

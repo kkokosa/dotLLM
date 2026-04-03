@@ -23,6 +23,13 @@ public static class ChatCompletionEndpoint
         ServerState state,
         HttpContext httpContext)
     {
+        if (!state.IsReady || state.Generator is null || state.ChatTemplate is null)
+        {
+            httpContext.Response.StatusCode = 503;
+            await httpContext.Response.WriteAsJsonAsync(new { error = "No model loaded" }, httpContext.RequestAborted);
+            return;
+        }
+
         var ct = httpContext.RequestAborted;
         var requestId = RequestConverter.GenerateRequestId();
         var modelId = state.Options.ModelId;
@@ -229,6 +236,7 @@ public static class ChatCompletionEndpoint
                 PromptTokens = timings.Value.PrefillTokenCount,
                 GeneratedTokens = timings.Value.DecodeTokenCount,
             } : null,
+            Prompt = prompt,
         };
         await WriteSseChunk(httpContext, finalChunk, ct);
 
