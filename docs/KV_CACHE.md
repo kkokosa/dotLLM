@@ -85,7 +85,49 @@ On each new token write, the oldest window entry is quantized and appended to th
 
 Orthogonal to weight quantization — Q4_K_M model can use Q8_0 KV-cache.
 
-## Prompt Caching / Automatic Prefix Sharing
+## Simple Prompt Caching (Step 54)
+
+Live KV-cache reuse for multi-turn conversations. No paged attention required — works with `SimpleKvCache`.
+
+### Design: Live Reuse (not Snapshots)
+
+After each generation, the KV-cache is transferred to a `PrefixCache` instead of being disposed. On the next call:
+
+1. `PrefixCache.FindMatch(promptTokenIds)` scans entries (max 1–4) with element-wise prefix comparison (`MemoryExtensions.CommonPrefixLength`, SIMD-vectorized).
+2. On hit: `SimpleKvCache.SetCurrentLength(matchedTokens)` truncates visible length. Suffix tokens are prefilled at positions `[matchedLen..promptLen)`.
+3. On miss: fresh KV-cache allocated, full prefill as usual.
+
+No data copying on cache hit. The same KV-cache object persists across calls.
+
+### Key Classes
+
+- `PrefixCache` — LRU cache with configurable max entries. Owns cached KV-cache instances.
+- `PrefixCacheEntry` — Token sequence + live KV-cache + LRU timestamp.
+- `SimpleKvCache.SetCurrentLength(int)` — Truncates visible length for prefix reuse.
+
+### Multi-turn Chat Pattern
+
+Each turn's prompt = previous prompt + assistant response + new user message. The stored token sequence (prompt + generated) shares a prefix with the new prompt. Typical cache hit rate: near 100%.
+
+### CLI
+
+```
+--no-prompt-cache      # Disable (enabled by default in chat/serve)
+--prompt-cache-size 1  # Max cached sessions (1 for chat, 4 for serve)
+```
+
+### Scope
+
+- CPU `SimpleKvCache` only. QuantizedKvCache and GPU caches fall back to no caching.
+- Cache cleared on model swap, `/clear` command (CLI), or `POST /v1/cache/clear` (server).
+
+### Stats
+
+`InferenceTimings.CachedTokenCount` reports how many prompt tokens were served from cache. Displayed in CLI output, API `timings.cached_tokens`, and Chat UI stats bar.
+
+## Advanced Prompt Caching / Prefix Sharing (Future — Step 36+)
+
+Requires paged KV-cache. Enables cross-request prefix sharing (e.g., shared system prompts across users).
 
 ### Problem
 Many requests share the same system prompt (e.g., all chat requests in a deployment).

@@ -101,6 +101,54 @@ When `tools` are provided in the request:
 4. **Response**: If tool calls detected, return with `finish_reason: "tool_calls"` and structured `tool_calls` array.
 5. **Continuation**: Client sends tool results as `tool` role messages. Server applies chat template again and generates final response.
 
+## Prompt Caching
+
+Multi-turn conversations benefit from prompt caching — reusing KV-cache state from previous turns to skip redundant prefill.
+
+### How It Works
+
+1. After each generation, `TextGenerator` stores the KV-cache and its full token sequence (prompt + generated) in a `PrefixCache`.
+2. On the next request, the new prompt's token IDs are compared element-wise against cached entries to find the longest common prefix.
+3. On cache hit: the cached KV-cache is reused, `CurrentLength` is truncated to the matched prefix, and only the new suffix tokens are prefilled.
+4. On cache miss: a fresh KV-cache is allocated as usual.
+
+This dramatically reduces time-to-first-token (TTFT) for multi-turn chat, where each turn's prompt shares a long prefix with the previous turn.
+
+### Configuration
+
+Prompt caching is **enabled by default** in both `chat` and `serve` commands.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--no-prompt-cache` | `false` | Disable prompt caching |
+| `--prompt-cache-size` | 1 (chat) / 4 (serve) | Maximum number of cached sessions (LRU eviction) |
+
+### API
+
+Cached token statistics are included in the `timings` field of streaming SSE responses:
+
+```json
+{
+  "timings": {
+    "prefill_time_ms": 2.1,
+    "cached_tokens": 847,
+    "prompt_tokens": 892
+  }
+}
+```
+
+### `POST /v1/cache/clear`
+
+Clears all cached KV-cache sessions. Called automatically by the Chat UI when the conversation is cleared. Useful for freeing memory or resetting state.
+
+**Response**: `{"status": "cleared"}`
+
+### Scope
+
+- CPU `SimpleKvCache` only. QuantizedKvCache and GPU caches fall back to no caching.
+- Cache is cleared on model swap/reload.
+- No session-based routing — single global LRU cache, serialized by the request gate.
+
 ## Rate Limiting
 
 Per-API-key controls using `System.Threading.RateLimiting`:
