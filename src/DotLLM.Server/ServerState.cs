@@ -99,29 +99,30 @@ public sealed class ServerState : IDisposable
 }
 
 /// <summary>
-/// Mutable sampling parameter defaults that can be changed from the UI.
+/// Immutable sampling parameter defaults that can be changed from the UI.
 /// These serve as defaults when the per-request body does not specify a value.
+/// Replaced atomically via <c>with</c> expressions to avoid torn reads.
 /// </summary>
-public sealed class SamplingDefaults
+public sealed record SamplingDefaults
 {
     /// <summary>Sampling temperature. 0 = greedy.</summary>
-    public float Temperature { get; set; } = 0.7f;
+    public float Temperature { get; init; } = 0.7f;
 
     /// <summary>Top-P (nucleus) sampling threshold.</summary>
-    public float TopP { get; set; } = 1.0f;
+    public float TopP { get; init; } = 1.0f;
 
     /// <summary>Top-K sampling. 0 = disabled.</summary>
-    public int TopK { get; set; }
+    public int TopK { get; init; }
 
     /// <summary>Min-P sampling threshold. 0 = disabled.</summary>
-    public float MinP { get; set; }
+    public float MinP { get; init; }
 
     /// <summary>Repetition penalty factor. 1.0 = disabled.</summary>
-    public float RepetitionPenalty { get; set; } = 1.0f;
+    public float RepetitionPenalty { get; init; } = 1.0f;
 
     /// <summary>Maximum tokens to generate per response.</summary>
-    public int MaxTokens { get; set; } = 2048;
+    public int MaxTokens { get; init; } = 2048;
 
     /// <summary>Random seed for reproducibility. Null = non-deterministic.</summary>
-    public int? Seed { get; set; }
+    public int? Seed { get; init; }
 }

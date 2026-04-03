@@ -18,23 +18,19 @@ public static class ConfigEndpoint
             using var doc = await JsonDocument.ParseAsync(httpContext.Request.Body, cancellationToken: httpContext.RequestAborted);
             var root = doc.RootElement;
 
-            var defaults = state.SamplingDefaults;
-            if (root.TryGetProperty("temperature", out var temp))
-                defaults.Temperature = temp.GetSingle();
-            if (root.TryGetProperty("top_p", out var topP))
-                defaults.TopP = topP.GetSingle();
-            if (root.TryGetProperty("top_k", out var topK))
-                defaults.TopK = topK.GetInt32();
-            if (root.TryGetProperty("min_p", out var minP))
-                defaults.MinP = minP.GetSingle();
-            if (root.TryGetProperty("repetition_penalty", out var rep))
-                defaults.RepetitionPenalty = rep.GetSingle();
-            if (root.TryGetProperty("max_tokens", out var maxTok))
-                defaults.MaxTokens = maxTok.GetInt32();
-            if (root.TryGetProperty("seed", out var seed))
-                defaults.Seed = seed.ValueKind == JsonValueKind.Null ? null : seed.GetInt32();
+            var d = state.SamplingDefaults;
+            state.SamplingDefaults = d with
+            {
+                Temperature = root.TryGetProperty("temperature", out var temp) ? temp.GetSingle() : d.Temperature,
+                TopP = root.TryGetProperty("top_p", out var topP) ? topP.GetSingle() : d.TopP,
+                TopK = root.TryGetProperty("top_k", out var topK) ? topK.GetInt32() : d.TopK,
+                MinP = root.TryGetProperty("min_p", out var minP) ? minP.GetSingle() : d.MinP,
+                RepetitionPenalty = root.TryGetProperty("repetition_penalty", out var rep) ? rep.GetSingle() : d.RepetitionPenalty,
+                MaxTokens = root.TryGetProperty("max_tokens", out var maxTok) ? maxTok.GetInt32() : d.MaxTokens,
+                Seed = root.TryGetProperty("seed", out var seed) ? (seed.ValueKind == JsonValueKind.Null ? null : seed.GetInt32()) : d.Seed,
+            };
 
-            return Results.Ok(PropsEndpoint.ToDto(defaults));
+            return Results.Ok(PropsEndpoint.ToDto(state.SamplingDefaults));
         });
     }
 }

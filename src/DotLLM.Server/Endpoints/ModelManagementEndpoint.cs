@@ -48,7 +48,7 @@ public static class ModelManagementEndpoint
                         DecodeThreads = request.DecodeThreads ?? state.Options.DecodeThreads,
                         ModelId = Path.GetFileNameWithoutExtension(resolvedPath),
                     };
-                    var newState = ServerStartup.LoadModel(resolvedPath, newOptions);
+                    var newState = await Task.Run(() => ServerStartup.LoadModel(resolvedPath, newOptions), ct);
 
                     // Transfer new state fields into the existing ServerState
                     state.Options = newOptions;
