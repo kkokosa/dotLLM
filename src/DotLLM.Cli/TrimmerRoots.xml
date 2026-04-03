@@ -1,0 +1,8 @@
+<linker>
+  <!-- Spectre.Console.Cli discovers command settings properties and their attributes
+       (CommandArgument, CommandOption, Description) via reflection at runtime.
+       Preserve entire assemblies to ensure all metadata survives AOT compilation. -->
+  <assembly fullname="dotllm" preserve="all" />
+  <assembly fullname="Spectre.Console.Cli" preserve="all" />
+  <assembly fullname="Spectre.Console" preserve="all" />
+</linker>

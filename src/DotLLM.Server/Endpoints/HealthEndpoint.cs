@@ -1,3 +1,5 @@
+using DotLLM.Server.Models;
+
 namespace DotLLM.Server.Endpoints;
 
 /// <summary>
@@ -7,11 +9,11 @@ public static class HealthEndpoint
 {
     public static void Map(WebApplication app)
     {
-        app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+        app.MapGet("/health", () => Results.Ok(new StatusResponse { Status = "ok" }));
 
         app.MapGet("/ready", (ServerState state) =>
             state.IsReady
-                ? Results.Ok(new { status = "ready" })
+                ? Results.Ok(new StatusResponse { Status = "ready" })
                 : Results.StatusCode(503));
     }
 }

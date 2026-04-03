@@ -22,4 +22,32 @@
     <PackageReference Include="Spectre.Console.Cli" />
   </ItemGroup>
 
+  <!-- Native AOT — opt-in via: dotnet publish -p:PublishAot=true -r <rid> -->
+  <PropertyGroup Condition="'$(PublishAot)' == 'true'">
+    <AssemblyName>dotllm</AssemblyName>
+    <StripSymbols>true</StripSymbols>
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- Spectre.Console 0.49.1 is not yet fully AOT-annotated — suppress its trim/AOT warnings.
+         Our own code is clean; types are preserved via TrimmerRoots.xml. -->
+    <NoWarn>$(NoWarn);IL2104;IL3053;IL3000;IL3002</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(PublishAot)' == 'true'">
+    <TrimmerRootDescriptor Include="TrimmerRoots.xml" />
+  </ItemGroup>
+
+  <!-- AOT publish cleanup: remove dependency PDBs, XML docs, and IIS assets that aren't
+       needed in the single-file native binary output. Keeps only dotllm.exe + ptx/ -->
+  <Target Name="CleanAotPublishOutput" AfterTargets="Publish" Condition="'$(PublishAot)' == 'true'">
+    <ItemGroup>
+      <_FilesToRemove Include="$(PublishDir)*.pdb" />
+      <_FilesToRemove Include="$(PublishDir)*.xml" />
+      <_FilesToRemove Include="$(PublishDir)*.runtimeconfig.json" />
+      <_FilesToRemove Include="$(PublishDir)aspnetcorev2_inprocess.dll" />
+    </ItemGroup>
+    <Delete Files="@(_FilesToRemove)" />
+  </Target>
+
 </Project>

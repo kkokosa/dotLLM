@@ -405,47 +405,43 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
             if (settings.Json)
             {
-                var result = new
+                var result = new RunJsonResult
                 {
-                    text = outputText,
-                    prompt = settings.Prompt,
-                    model = Path.GetFileName(resolvedPath),
-                    architecture = config.Architecture.ToString(),
-                    finish_reason = finishReason.ToString().ToLowerInvariant(),
-                    tool_calls = detectedToolCalls?.Select(tc => new
+                    Text = outputText,
+                    Prompt = settings.Prompt,
+                    Model = Path.GetFileName(resolvedPath),
+                    Architecture = config.Architecture.ToString(),
+                    FinishReason = finishReason.ToString().ToLowerInvariant(),
+                    ToolCalls = detectedToolCalls?.Select(tc => new RunToolCallDto
                     {
-                        id = tc.Id,
-                        function_name = tc.FunctionName,
-                        arguments = tc.Arguments,
+                        Id = tc.Id,
+                        FunctionName = tc.FunctionName,
+                        Arguments = tc.Arguments,
                     }).ToArray(),
-                    usage = new
+                    Usage = new RunUsageDto
                     {
-                        prompt_tokens = promptLen,
-                        generated_tokens = generated,
+                        PromptTokens = promptLen,
+                        GeneratedTokens = generated,
                     },
-                    timings = new
+                    Timings = new RunTimingsDto
                     {
-                        load_ms = Math.Round(loadMs, 1),
-                        prefill_ms = Math.Round(promptEvalMs, 1),
-                        decode_ms = Math.Round(evalMs, 1),
-                        sampling_ms = Math.Round(samplerMs, 1),
-                        total_ms = Math.Round(totalMs, 1),
-                        prefill_tok_s = Math.Round(prefillTokPerSec, 2),
-                        decode_tok_s = Math.Round(decodeTokPerSec, 2),
+                        LoadMs = Math.Round(loadMs, 1),
+                        PrefillMs = Math.Round(promptEvalMs, 1),
+                        DecodeMs = Math.Round(evalMs, 1),
+                        SamplingMs = Math.Round(samplerMs, 1),
+                        TotalMs = Math.Round(totalMs, 1),
+                        PrefillTokS = Math.Round(prefillTokPerSec, 2),
+                        DecodeTokS = Math.Round(decodeTokPerSec, 2),
                     },
-                    memory = new
+                    Memory = new RunMemoryDto
                     {
-                        weights_bytes = modelWeightsBytes,
-                        compute_bytes = computeBytes,
-                        kv_cache_bytes = kvCacheBytes,
-                        total_bytes = totalMemory,
+                        WeightsBytes = modelWeightsBytes,
+                        ComputeBytes = computeBytes,
+                        KvCacheBytes = kvCacheBytes,
+                        TotalBytes = totalMemory,
                     },
                 };
-                Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions
-                {
-                    WriteIndented = false,
-                    PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-                }));
+                Console.WriteLine(JsonSerializer.Serialize(result, CliJsonContext.Default.RunJsonResult));
             }
             else
             {

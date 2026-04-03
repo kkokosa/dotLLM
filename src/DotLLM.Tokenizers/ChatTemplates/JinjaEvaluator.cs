@@ -1,6 +1,5 @@
 using System.Collections;
 using System.Text;
-using System.Text.Json;
 
 namespace DotLLM.Tokenizers.ChatTemplates;
 
@@ -618,12 +617,56 @@ internal sealed class JinjaEvaluator
         if (value is double d)
             return d.ToString("G");
         if (value is string s)
-            return JsonSerializer.Serialize(s);
+            return JsonQuoteString(s);
         if (value is Dictionary<string, object?> dict)
             return SerializeDictToJson(dict, indent, 0);
         if (value is IList list)
             return SerializeListToJson(list, indent, 0);
-        return JsonSerializer.Serialize(value);
+        // Fallback for unexpected types — avoid reflection-based JsonSerializer.Serialize(object)
+        // for Native AOT compatibility. All known Jinja value types are handled above.
+        return value.ToString() ?? "null";
+    }
+
+    /// <summary>
+    /// JSON-escapes a string and wraps it in double quotes (RFC 8259 §7).
+    /// Trim/AOT-safe replacement for <c>JsonSerializer.Serialize(string)</c>.
+    /// </summary>
+    private static string JsonQuoteString(string s)
+    {
+        // Fast path: most template strings (dict keys like "role", "content", tool names)
+        // contain no characters requiring JSON escaping. Avoid StringBuilder allocation.
+        var needsEscape = false;
+        foreach (var c in s)
+        {
+            if (c is '"' or '\\' || c < ' ') { needsEscape = true; break; }
+        }
+
+        if (!needsEscape)
+            return string.Concat("\"", s, "\"");
+
+        var sb = new StringBuilder(s.Length + 8);
+        sb.Append('"');
+        foreach (var c in s)
+        {
+            switch (c)
+            {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\b': sb.Append("\\b"); break;
+                case '\f': sb.Append("\\f"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (c < ' ')
+                        sb.Append($"\\u{(int)c:X4}");
+                    else
+                        sb.Append(c);
+                    break;
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
     }
 
     private static string SerializeDictToJson(Dictionary<string, object?> dict, int indent, int depth)
@@ -637,7 +680,7 @@ internal sealed class JinjaEvaluator
             {
                 if (!first) sb.Append(", ");
                 first = false;
-                sb.Append(JsonSerializer.Serialize(kvp.Key));
+                sb.Append(JsonQuoteString(kvp.Key));
                 sb.Append(": ");
                 sb.Append(ToJson(kvp.Value));
             }
@@ -655,7 +698,7 @@ internal sealed class JinjaEvaluator
             if (!ifirst) isb.Append(",\n");
             ifirst = false;
             isb.Append(childIndent);
-            isb.Append(JsonSerializer.Serialize(kvp.Key));
+            isb.Append(JsonQuoteString(kvp.Key));
             isb.Append(": ");
             isb.Append(SerializeValueToJson(kvp.Value, indent, depth + 1));
         }

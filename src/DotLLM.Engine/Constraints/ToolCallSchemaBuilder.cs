@@ -25,7 +25,7 @@ public static class ToolCallSchemaBuilder
         sb.Append("\"type\":\"object\",");
         sb.Append("\"properties\":{");
         sb.Append("\"name\":{\"const\":");
-        sb.Append(JsonSerializer.Serialize(tool.Name));
+        sb.Append(JsonQuote(tool.Name));
         sb.Append("},");
         sb.Append('"');
         sb.Append(argumentsKey);
@@ -33,7 +33,7 @@ public static class ToolCallSchemaBuilder
         sb.Append(NormalizeParametersSchema(tool.ParametersSchema));
         sb.Append("},");
         sb.Append("\"required\":[\"name\",");
-        sb.Append(JsonSerializer.Serialize(argumentsKey));
+        sb.Append(JsonQuote(argumentsKey));
         sb.Append("],");
         sb.Append("\"additionalProperties\":false");
         sb.Append('}');
@@ -66,12 +66,12 @@ public static class ToolCallSchemaBuilder
         for (int i = 0; i < tools.Length; i++)
         {
             if (i > 0) sb.Append(',');
-            sb.Append(JsonSerializer.Serialize(tools[i].Name));
+            sb.Append(JsonQuote(tools[i].Name));
         }
         sb.Append("]},\"");
         sb.Append(argumentsKey);
         sb.Append("\":{\"type\":\"object\"}},\"required\":[\"name\",");
-        sb.Append(JsonSerializer.Serialize(argumentsKey));
+        sb.Append(JsonQuote(argumentsKey));
         sb.Append("],\"additionalProperties\":false}");
         return sb.ToString();
     }
@@ -86,6 +86,44 @@ public static class ToolCallSchemaBuilder
     {
         var itemSchema = BuildForRequired(tools, argumentsKey);
         return $"{{\"type\":\"array\",\"items\":{itemSchema}}}";
+    }
+
+    /// <summary>
+    /// JSON-escapes a string and wraps it in double quotes. Trim/AOT-safe replacement
+    /// for <c>JsonSerializer.Serialize(string)</c>.
+    /// </summary>
+    private static string JsonQuote(string s)
+    {
+        // Tool names and argument keys are typically ASCII identifiers with no special
+        // characters, but we handle the full JSON string grammar for correctness.
+        var needsEscape = false;
+        foreach (var c in s)
+        {
+            if (c is '"' or '\\' || c < ' ') { needsEscape = true; break; }
+        }
+
+        if (!needsEscape)
+            return string.Concat("\"", s, "\"");
+
+        var sb = new StringBuilder(s.Length + 2);
+        sb.Append('"');
+        foreach (var c in s)
+        {
+            switch (c)
+            {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (c < ' ') sb.Append($"\\u{(int)c:X4}");
+                    else sb.Append(c);
+                    break;
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
     }
 
     /// <summary>

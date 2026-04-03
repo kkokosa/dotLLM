@@ -3,7 +3,9 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <!-- DTOs are self-documenting via [JsonPropertyName] attributes -->
-    <NoWarn>CS1591</NoWarn>
+    <!-- IL2026: MapGet/MapPost use reflection at build time but Request Delegate Generator
+         handles them at publish time when PublishAot=true -->
+    <NoWarn>CS1591;IL2026</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

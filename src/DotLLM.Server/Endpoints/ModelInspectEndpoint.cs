@@ -13,7 +13,7 @@ public static class ModelInspectEndpoint
         app.MapGet("/v1/models/inspect", (string path) =>
         {
             if (string.IsNullOrEmpty(path) || !File.Exists(path))
-                return Results.BadRequest(new { error = "File not found" });
+                return Results.BadRequest(new ErrorResponse { Error = "File not found" });
 
             try
             {
@@ -35,7 +35,7 @@ public static class ModelInspectEndpoint
             }
             catch
             {
-                return Results.BadRequest(new { error = "Failed to read GGUF metadata" });
+                return Results.BadRequest(new ErrorResponse { Error = "Failed to read GGUF metadata" });
             }
         });
 }

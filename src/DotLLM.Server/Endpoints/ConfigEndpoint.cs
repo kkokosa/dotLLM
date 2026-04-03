@@ -36,7 +36,7 @@ public static class ConfigEndpoint
         app.MapPost("/v1/cache/clear", (ServerState state) =>
         {
             state.PrefixCache?.Clear();
-            return Results.Ok(new { status = "cleared" });
+            return Results.Ok(new StatusResponse { Status = "cleared" });
         });
     }
 }

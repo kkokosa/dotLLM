@@ -30,7 +30,7 @@ public static class ModelManagementEndpoint
         {
             var resolvedPath = ServerStartup.ResolveModelPath(request.Model, request.Quant);
             if (resolvedPath is null)
-                return Results.BadRequest(new { error = $"Model not found: {request.Model}" });
+                return Results.BadRequest(new ErrorResponse { Error = $"Model not found: {request.Model}" });
 
             try
             {

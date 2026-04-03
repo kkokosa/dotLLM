@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using DotLLM.Cli.Commands;
 #if DEBUG
 using DotLLM.Cli.Commands.Debug;
@@ -10,7 +11,9 @@ app.Configure(config =>
 {
     config.SetApplicationName("dotllm");
     config.SetApplicationVersion("0.1.0");
-    config.ValidateExamples();
+    // Spectre.Console.Cli's example validation uses reflection that doesn't work under Native AOT
+    if (RuntimeFeature.IsDynamicCodeSupported)
+        config.ValidateExamples();
     config.Settings.StrictParsing = true;
 
     config.AddBranch("model", model =>

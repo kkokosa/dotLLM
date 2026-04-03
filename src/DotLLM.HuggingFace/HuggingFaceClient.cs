@@ -1,5 +1,4 @@
 using System.Net.Http.Json;
-using System.Text.Json;
 using System.Web;
 
 namespace DotLLM.HuggingFace;
@@ -14,11 +13,6 @@ public sealed class HuggingFaceClient : IDisposable
 
     private readonly HttpClient _httpClient;
     private readonly bool _ownsClient;
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true
-    };
-
     /// <summary>
     /// Creates a new HuggingFace Hub client.
     /// </summary>
@@ -66,7 +60,7 @@ public sealed class HuggingFaceClient : IDisposable
         var response = await _httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
 
-        return await response.Content.ReadFromJsonAsync<List<HuggingFaceModelInfo>>(JsonOptions, cancellationToken).ConfigureAwait(false)
+        return await response.Content.ReadFromJsonAsync(HuggingFaceJsonContext.Default.ListHuggingFaceModelInfo, cancellationToken).ConfigureAwait(false)
                ?? [];
     }
 
@@ -84,7 +78,7 @@ public sealed class HuggingFaceClient : IDisposable
         var response = await _httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
 
-        return await response.Content.ReadFromJsonAsync<HuggingFaceModelInfo>(JsonOptions, cancellationToken).ConfigureAwait(false)
+        return await response.Content.ReadFromJsonAsync(HuggingFaceJsonContext.Default.HuggingFaceModelInfo, cancellationToken).ConfigureAwait(false)
                ?? throw new InvalidOperationException($"Failed to deserialize model info for '{repoId}'.");
     }
 
@@ -104,7 +98,7 @@ public sealed class HuggingFaceClient : IDisposable
         var response = await _httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
 
-        return await response.Content.ReadFromJsonAsync<List<RepoFileEntry>>(JsonOptions, cancellationToken).ConfigureAwait(false)
+        return await response.Content.ReadFromJsonAsync(HuggingFaceJsonContext.Default.ListRepoFileEntry, cancellationToken).ConfigureAwait(false)
                ?? [];
     }
 

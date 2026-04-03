@@ -165,8 +165,12 @@ public static class ServerStartup
     /// <param name="serveUi">When true, also serves the embedded web chat UI.</param>
     public static WebApplication BuildApp(ServerState state, string[] args, bool serveUi = false)
     {
-        var builder = WebApplication.CreateBuilder(args);
+        var builder = WebApplication.CreateSlimBuilder(args);
         builder.Services.AddSingleton(state);
+
+        // Wire source-generated JSON context for AOT-compatible serialization
+        builder.Services.ConfigureHttpJsonOptions(options =>
+            options.SerializerOptions.TypeInfoResolverChain.Insert(0, ServerJsonContext.Default));
 
         // CORS — permissive for development and Chat UI
         builder.Services.AddCors(o => o.AddDefaultPolicy(p =>

@@ -22,7 +22,11 @@ public static class CompletionEndpoint
         if (!state.IsReady || state.Generator is null)
         {
             httpContext.Response.StatusCode = 503;
-            await httpContext.Response.WriteAsJsonAsync(new { error = "No model loaded" }, httpContext.RequestAborted);
+            await httpContext.Response.WriteAsJsonAsync(
+                new ErrorResponse { Error = "No model loaded" },
+                ServerJsonContext.Default.ErrorResponse,
+                contentType: null,
+                httpContext.RequestAborted);
             return;
         }
 

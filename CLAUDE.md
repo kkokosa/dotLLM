@@ -110,7 +110,7 @@ dotLLM/
 | Tensor memory | `NativeMemory.AlignedAlloc` | Zero GC pressure. Enables mmap loading. |
 | Model loading | Memory-mapped GGUF | OS demand-paging. 7GB loads in ms. |
 | SIMD | TensorPrimitives + Intrinsics | Standard ops via TP; hand-tuned for quantized loops. |
-| Runtime | JIT + Dynamic PGO default | Better steady-state than NativeAOT. AOT opt-in for edge. |
+| Runtime | JIT + Dynamic PGO default | Better steady-state than NativeAOT. AOT opt-in for edge/container deployment. |
 | Model format | GGUF primary | Self-contained, quantization, HF ecosystem. |
 | Attention | `IAttentionMechanism` + `IAttentionStrategy` | Mechanism (GQA/MLA) separate from kernel (naive/flash/paged). |
 | Position encoding | `IPositionEncoding`, optional | RoPE, ALiBi, absolute, none. |
@@ -149,6 +149,7 @@ dotLLM/
 | GPU inference | [docs/GPU.md](docs/GPU.md) | GPU forward pass, weight loading, KV-cache, CLI |
 | CUDA backend | [docs/CUDA.md](docs/CUDA.md) | PTX architecture, P/Invoke, kernel conventions, build |
 | Multi-GPU | [docs/MULTI_GPU.md](docs/MULTI_GPU.md) | Tensor/pipeline parallelism, NCCL |
+| Native AOT deployment | [docs/AOT.md](docs/AOT.md) | AOT publishing, trimming, deployment |
 | Implementation roadmap | [docs/ROADMAP.md](docs/ROADMAP.md) | Planning, task sequencing |
 
 ## Development Workflow
