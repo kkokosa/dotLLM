@@ -22,9 +22,9 @@ V_cache[layer][kv_head][max_seq_len][head_dim]  — FP16
 ```
 Simple indexing: `K_cache[layer][head][pos] = new_K`. Wastes memory for short sequences.
 
-## Paged KV-Cache — PagedAttention
+## Paged KV-Cache
 
-Inspired by OS virtual memory paging.
+Inspired by OS virtual memory paging. This is the **memory management** half of PagedAttention (vLLM): block-based allocation, ref counting, CoW. The **kernel** half (attention reading non-contiguous blocks directly) is a future step — current kernels see contiguous buffers via staging-buffer gather.
 
 ### Design
 - Divide cache into fixed-size **blocks** of B tokens (B = 16 or 32).
