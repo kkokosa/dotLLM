@@ -26,8 +26,19 @@ Simple indexing: `K_cache[layer][head][pos] = new_K`. Wastes memory for short se
 
 Inspired by OS virtual memory paging. This is the **memory management** half of PagedAttention (vLLM): block-based allocation, ref counting, CoW. The **kernel** half (attention reading non-contiguous blocks directly) is a future step — current kernels see contiguous buffers via staging-buffer gather.
 
+### Why
+
+**Batch serving memory efficiency**: `SimpleKvCache` pre-allocates `maxSeqLen × layers` per sequence. With 10 concurrent requests averaging 200 tokens but `maxSeqLen=4096`, that's 40K tokens worth of buffers for 2K tokens of actual data — ~95% waste. A shared block pool allocates on demand and reclaims blocks on completion, keeping waste <4%.
+
+**Foundation for downstream steps**: The ref counting and CoW infrastructure enables:
+- **Step 37 (advanced prefix sharing)** — hard requirement. Cross-sequence block sharing (e.g., shared system prompt) is impossible without block tables and ref counting.
+- **Step 43 (speculative decoding)** — benefits from cheap block-level rollback on draft rejection and CoW fork for draft branching, though `SimpleKvCache.SetCurrentLength()` truncation works as a fallback.
+- **Beam search** (future) — beams share prefix blocks via `Fork`, diverge via CoW.
+
+**When it doesn't help**: Single-sequence CLI inference. One sequence uses most of its allocation, and the staging-buffer gather adds overhead. This is why paged is opt-in for `run`/`chat` and default-on only for `serve`.
+
 ### Design
-- Divide cache into fixed-size **blocks** of B tokens (B = 16 or 32).
+- Divide cache into fixed-size **blocks** of B tokens (B = 16).
 - **Block table** per sequence: maps logical positions to physical blocks (page table).
 - **Free pool**: blocks allocated on demand, returned on completion.
 - Memory waste: <4% (vs ~60% for static pre-allocation).
