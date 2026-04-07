@@ -33,6 +33,8 @@ public sealed class KvBlockTable
     public void EnsureCapacity(int newLength)
     {
         int blocksNeeded = (newLength + _blockSize - 1) / _blockSize;
+        if (blocksNeeded > _blockIds.Capacity)
+            _blockIds.Capacity = blocksNeeded;
         while (_blockIds.Count < blocksNeeded)
             _blockIds.Add(_pool.Allocate());
     }
@@ -75,8 +77,14 @@ public sealed class KvBlockTable
 
     /// <summary>
     /// Ensures the block containing <paramref name="position"/> is writable (ref count = 1).
-    /// If the block is shared (ref count > 1), copies it (copy-on-write).
+    /// If the block is shared (ref count &gt; 1), copies it (copy-on-write).
     /// </summary>
+    /// <remarks>
+    /// Assumes single-writer access: the owning sequence controls this table's progression.
+    /// There is a theoretical TOCTOU race between <see cref="KvBlockPool.RefCount"/> and
+    /// <see cref="KvBlockPool.CopyBlock"/> if another thread releases the block concurrently,
+    /// but sequences do not share table mutation — each sequence owns its block table exclusively.
+    /// </remarks>
     public void EnsureWritable(int position)
     {
         int logicalBlock = position / _blockSize;

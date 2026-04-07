@@ -90,6 +90,11 @@ public sealed unsafe class KvBlockPool : IDisposable
     /// </summary>
     /// <returns>Block ID.</returns>
     /// <exception cref="InvalidOperationException">No free blocks available.</exception>
+    /// <remarks>
+    /// Uses a simple lock for v1. Under high-concurrency serve with many concurrent
+    /// allocations, consider replacing with a lock-free stack (CAS on head pointer)
+    /// or <see cref="System.Collections.Concurrent.ConcurrentStack{T}"/>.
+    /// </remarks>
     public int Allocate()
     {
         lock (_lock)
@@ -190,6 +195,12 @@ public sealed unsafe class KvBlockPool : IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
+        Dispose(disposing: true);
+        GC.SuppressFinalize(this);
+    }
+
+    private void Dispose(bool disposing)
+    {
         if (_disposed) return;
         _disposed = true;
 
@@ -206,10 +217,8 @@ public sealed unsafe class KvBlockPool : IDisposable
                 _valueBuffers[i] = 0;
             }
         }
-
-        GC.SuppressFinalize(this);
     }
 
     /// <summary>Releases unmanaged buffers if <see cref="Dispose()"/> was not called.</summary>
-    ~KvBlockPool() => Dispose();
+    ~KvBlockPool() => Dispose(disposing: false);
 }

@@ -558,18 +558,30 @@ public sealed class TextGenerator
         {
             var (entry, matchedTokens) = _prefixCache.FindMatch(promptIds);
 
-            if (entry != null && matchedTokens > 0 && entry.KvCache is SimpleKvCache simpleCache)
+            if (entry != null && matchedTokens > 0)
             {
                 // Cache hit — reuse existing KV-cache, truncate to matched prefix
-                simpleCache.SetCurrentLength(matchedTokens);
+                switch (entry.KvCache)
+                {
+                    case SimpleKvCache simpleCache:
+                        simpleCache.SetCurrentLength(matchedTokens);
+                        break;
+                    case KvCache.PagedKvCache pagedCache:
+                        pagedCache.SetCurrentLength(matchedTokens);
+                        break;
+                    default:
+                        // Unsupported cache type for prefix reuse — fall through to allocate fresh
+                        goto cacheMiss;
+                }
 
                 // Verify the cache is large enough for the new prompt + generation
                 int requiredSize = promptLen + maxTokens;
-                if (simpleCache.MaxLength >= requiredSize || simpleCache.MaxLength >= promptLen)
+                if (entry.KvCache.MaxLength >= requiredSize || entry.KvCache.MaxLength >= promptLen)
                     return (entry.KvCache, matchedTokens, false);
 
                 // Cache too small — fall through to allocate fresh
             }
+            cacheMiss:
 
             // Cache miss or incompatible — allocate with full model context for future reuse
             int cacheSize = Math.Min(promptLen + maxTokens, _model.Config.MaxSequenceLength);

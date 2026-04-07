@@ -451,10 +451,10 @@ There is no NuGet package yet -- the project is in early development. Follow the
 | **3 — CPU Performance** | Decode dispatch, Q8_1 input, weight repacking, outer-product GEMM, tiled attention, fast exp, fusion, NUMA | In Progress (7/8) |
 | **4 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Done (3/3) |
 | **5 — Constrained Decoding & API** | JSON mode, JSON Schema, regex/CFG, tool calling, OpenAI API server, chat UI, prompt caching | Done (7/7) |
-| **6 — Improved Serving** | Warm-up, NativeAOT, paged KV-cache, advanced prefix sharing, speculative decoding | In Progress (3/5) |
+| **6 — Improved Serving** | Warm-up, NativeAOT, paged KV-cache, speculative decoding | In Progress (3/4) |
 | **7 — Diagnostics & Interpretability** | Hook system, logit lens, logit bias, LoRA adapters, SAE integration | Planned (0/5) |
 | **8 — Model Expansion** | MLA attention, ALiBi, SmolLM3, Gemma 4, Mixture of Experts | Planned (0/5) |
-| **9 — Production Serving** | Continuous batching, advanced scheduling, rate limiting, metrics & tracing | Planned (0/4) |
+| **9 — Production Serving** | Continuous batching, prefix sharing, advanced scheduling, rate limiting, metrics & tracing | Planned (0/5) |
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed steps, dependencies, and milestones.
 

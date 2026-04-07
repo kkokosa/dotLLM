@@ -60,33 +60,54 @@ public sealed unsafe class PagedKvCache : IKvCache
     public void Update(TensorRef keys, TensorRef values, ReadOnlySpan<int> positions, int layerIndex)
     {
         int seqLen = positions.Length;
+        if (seqLen == 0) return;
+
         int maxPos = _blockTable.CurrentLength - 1;
 
         float* kSrc = (float*)keys.DataPointer;
         float* vSrc = (float*)values.DataPointer;
 
         int rowBytes = _kvStride * sizeof(float);
+        int blockSize = _pool.BlockSize;
 
-        for (int i = 0; i < seqLen; i++)
+        // Validate and find max position, ensure capacity upfront
+        for (int v = 0; v < seqLen; v++)
         {
-            int pos = positions[i];
+            int pos = positions[v];
             if ((uint)pos >= (uint)_maxSeqLen)
                 throw new ArgumentOutOfRangeException(nameof(positions),
                     $"Position {pos} exceeds max cache length {_maxSeqLen}.");
-
             if (pos > maxPos) maxPos = pos;
+        }
+        _blockTable.EnsureCapacity(maxPos + 1);
 
-            // Ensure block exists and is writable
-            _blockTable.EnsureCapacity(pos + 1);
+        // Batch contiguous tokens within the same block into a single memcpy.
+        // During prefill, positions are sequential (0,1,2,...N) so most tokens
+        // share a block and can be copied together.
+        int i = 0;
+        while (i < seqLen)
+        {
+            int pos = positions[i];
             _blockTable.EnsureWritable(pos);
-
             var (blockId, offset) = _blockTable.Resolve(pos);
+
+            // Count how many consecutive tokens fit in this same block
+            int runLen = 1;
+            int remaining = blockSize - offset;
+            while (runLen < remaining && i + runLen < seqLen &&
+                   positions[i + runLen] == pos + runLen)
+            {
+                runLen++;
+            }
 
             float* kDst = _pool.GetKeyPtr(blockId, layerIndex) + offset * _kvStride;
             float* vDst = _pool.GetValuePtr(blockId, layerIndex) + offset * _kvStride;
+            long batchBytes = (long)runLen * rowBytes;
 
-            Buffer.MemoryCopy(kSrc + i * _kvStride, kDst, rowBytes, rowBytes);
-            Buffer.MemoryCopy(vSrc + i * _kvStride, vDst, rowBytes, rowBytes);
+            Buffer.MemoryCopy(kSrc + (long)i * _kvStride, kDst, batchBytes, batchBytes);
+            Buffer.MemoryCopy(vSrc + (long)i * _kvStride, vDst, batchBytes, batchBytes);
+
+            i += runLen;
         }
 
         int newLength = maxPos + 1;
@@ -189,21 +210,28 @@ public sealed unsafe class PagedKvCache : IKvCache
     /// <inheritdoc/>
     public void Dispose()
     {
+        Dispose(disposing: true);
+        GC.SuppressFinalize(this);
+    }
+
+    private void Dispose(bool disposing)
+    {
         if (_disposed) return;
         _disposed = true;
 
-        // Return blocks to pool
-        _blockTable.Free();
+        if (disposing)
+        {
+            // Only touch managed objects during explicit Dispose
+            _blockTable.Free();
+        }
 
-        // Free staging buffers
+        // Free unmanaged staging buffers regardless
         if (_keyStagingPtr != 0)
             NativeMemory.AlignedFree((void*)_keyStagingPtr);
         if (_valueStagingPtr != 0)
             NativeMemory.AlignedFree((void*)_valueStagingPtr);
-
-        GC.SuppressFinalize(this);
     }
 
-    /// <summary>Releases unmanaged buffers if <see cref="Dispose()"/> was not called.</summary>
-    ~PagedKvCache() => Dispose();
+    /// <summary>Releases unmanaged staging buffers if <see cref="Dispose()"/> was not called.</summary>
+    ~PagedKvCache() => Dispose(disposing: false);
 }

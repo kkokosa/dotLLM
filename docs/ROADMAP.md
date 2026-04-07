@@ -110,11 +110,10 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 |------|---------|-------------|------------|
 | 46 | **Warm-up** :white_check_mark: | JIT pre-compilation pass at startup. CUDA kernel pre-loading. Configurable `WarmupOptions`. Readiness probe gates on warm-up completion. | 34 |
 | 55 | **Native AOT (experimental)** :white_check_mark: | Trimming-safe deployment via .NET Native AOT. Audit `[DynamicallyAccessedMembers]` annotations, source-generated JSON serialization, replace reflection-based patterns. `rd.xml` for preserved types. Goal: single-file `dotllm` binary with instant startup (~50ms vs ~500ms JIT). Mark experimental — some features (runtime LoRA loading, source generators) may require JIT fallback. | 34 |
-| 36 | **Paged KV-cache** :white_check_mark: | Block-based KV-cache memory management: block pool, block tables, free list, reference counting, copy-on-write. Staging-buffer gather for attention kernel compatibility (not PagedAttention — kernels still operate on contiguous buffers). Foundation for prefix sharing (37, hard requirement) and speculative decoding (43, benefits from cheap rollback/fork but not strictly required). `--paged` (opt-in for CLI), `--no-paged` (opt-out for serve). `--no-ui` for API-only hosting. | 7 |
-| 37 | **Prompt caching (advanced)** | Automatic prefix sharing via trie of computed KV blocks. Reference-counted shared blocks. LRU eviction. Optional explicit `prefix_id` API. Upgrades simple prompt caching (step 54) to work with paged KV-cache. Hard dependency on block-based allocation (36) for cross-sequence block sharing. | 36 |
+| 36 | **Paged KV-cache** :white_check_mark: | Block-based KV-cache memory management: block pool, block tables, free list, reference counting, copy-on-write. Staging-buffer gather for attention kernel compatibility (not PagedAttention — kernels still operate on contiguous buffers). Foundation for prefix sharing (37, Phase 9) and speculative decoding (43, benefits from cheap rollback/fork but not strictly required). `--paged` (opt-in for CLI), `--no-paged` (opt-out for serve). `--no-ui` for API-only hosting. | 7 |
 | 43 | **Speculative decoding** | `ISpeculativeDecoder`. Draft-verify-accept loop with modified rejection sampling. KV-cache rollback. Constraint state rollback via `IDecodingConstraint.Clone()`. Benefits from paged KV (36) for cheap block-level rollback and CoW fork for draft branching, but can fall back to `SimpleKvCache.SetCurrentLength()` truncation. | 36 |
 
-**Milestone**: Sub-100ms startup via warm-up/AOT, paged KV-cache with advanced prompt caching, speculative decoding for 2-3× decode speedup.
+**Milestone**: Sub-100ms startup via warm-up/AOT, paged KV-cache for efficient memory management, speculative decoding for 2-3× decode speedup.
 
 ## Phase 7 — Diagnostics & Interpretability
 
@@ -146,16 +145,17 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 
 ## Phase 9 — Production Serving
 
-**Goal**: Full production-grade serving infrastructure for concurrent multi-user deployments. Continuous batching, rate limiting, observability, and advanced scheduling.
+**Goal**: Full production-grade serving infrastructure for concurrent multi-user deployments. Continuous batching, prefix sharing, rate limiting, observability, and advanced scheduling.
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
 | 35 | **Continuous batching** | `IScheduler` with iteration-level scheduling. Prefill/decode separation. Request admission based on KV-cache capacity. Sequence eviction on completion. | 7, 34 |
+| 37 | **Prompt caching (advanced)** | Automatic cross-request prefix sharing via trie of computed KV blocks. Reference-counted shared blocks. LRU eviction. Optional explicit `prefix_id` API. Upgrades simple prompt caching (step 54) to work with paged KV-cache. Hard dependency on block-based allocation (36) for cross-sequence block sharing. Only benefits multi-user serving (shared system prompts across concurrent requests). | 36 |
 | 59 | **Advanced scheduling** | Prefill/decode disaggregation — separate queues and thread pools for prefill-heavy vs decode-heavy workloads. Priority-based scheduling with preemption (swap lower-priority sequences to CPU when VRAM-constrained). Fairness constraints to prevent starvation. Chunked prefill for long prompts to avoid head-of-line blocking. | 35, 36 |
 | 38 | **Rate limiting** | Per-API-key token-bucket rate limiter via `System.Threading.RateLimiting`. Requests/min, tokens/min, concurrent limits. Priority levels. HTTP 429 responses. | 34 |
 | 45 | **Metrics & tracing** | `System.Diagnostics.Metrics` for throughput/latency/utilization. `System.Diagnostics.Activity` for per-request tracing. OpenTelemetry exporters. | 12, 35 |
 
-**Milestone**: Serve concurrent API requests with continuous batching, advanced scheduling, rate limiting, and full OpenTelemetry observability.
+**Milestone**: Serve concurrent API requests with continuous batching, cross-request prefix sharing, advanced scheduling, rate limiting, and full OpenTelemetry observability.
 
 ## Future Considerations
 
@@ -194,10 +194,10 @@ Not in the current roadmap, but the architecture should not preclude these:
 | `v0.2.5` | Phase 3 complete | CPU performance: outer-product GEMM, tiled attention, operator fusion, NUMA |
 | `v0.3.0` | Phase 4 complete | GPU acceleration: CUDA backend, hybrid CPU/GPU, KV-cache quantization |
 | `v0.3.5` | Phase 5 complete | Constrained decoding: JSON/schema/regex, tool calling, API server, chat UI, simple prompt caching |
-| `v0.4.0` | Phase 6 complete | Improved serving: warm-up, NativeAOT, paged KV-cache, advanced prompt caching, speculative decoding |
+| `v0.4.0` | Phase 6 complete | Improved serving: warm-up, NativeAOT, paged KV-cache, speculative decoding |
 | `v0.5.0` | Phase 7 complete | Diagnostics: hooks, logit lens, LoRA, SAE |
 | `v0.6.0` | Phase 8 complete | Model expansion: MLA, ALiBi, SmolLM3, Gemma 4, MoE |
-| `v0.7.0` | Phase 9 complete | Production serving: continuous batching, scheduling, rate limiting, metrics |
+| `v0.7.0` | Phase 9 complete | Production serving: continuous batching, prefix sharing, scheduling, rate limiting, metrics |
 | `v1.0.0` | Stability | API stability commitment, comprehensive benchmarks, documentation |
 
 ## Testing Checkpoints
@@ -209,7 +209,7 @@ Each phase has a validation checkpoint:
 - **Phase 3**: Outer-product GEMM reaches >800 GFLOPS on AVX2. Prefill throughput exceeds llama.cpp on equivalent hardware. Tiled attention handles 4096+ context without O(n²) memory. All kernels pass numerical accuracy validation against scalar reference. Decode is bandwidth-bound: Q4_K_M faster than Q8_0.
 - **Phase 4**: GPU decode throughput within 2× of llama.cpp for equivalent model/quantization. Hybrid CPU/GPU matches pure-CPU quality. Q8_0 KV-cache produces identical output to FP16 baseline. Q4_0 KV-cache perplexity within +0.3 of baseline.
 - **Phase 5**: JSON schema constraint produces 100% valid outputs over 1000 generations. Pass OpenAI API compatibility test suite. `dotllm serve` launches browser-based chat. Multi-turn TTFT drops >5× with prompt caching enabled.
-- **Phase 6**: Warm-up eliminates first-request latency spike. Paged KV-cache handles long contexts without fragmentation. Speculative decoding achieves ≥1.5× decode speedup with acceptable draft model overhead.
+- **Phase 6**: Warm-up eliminates first-request latency spike. Paged KV-cache handles variable-length sequences with <4% memory waste. Speculative decoding achieves ≥1.5× decode speedup with acceptable draft model overhead.
 - **Phase 7**: Logit lens produces meaningful layer-wise predictions. Logit bias modifies token probabilities correctly. LoRA adapter swaps complete in <100ms. SAE feature steering demonstrably modifies model behavior.
 - **Phase 8**: DeepSeek-V2 MoE produces correct output. SmolLM3 NoPE layers handled correctly. Gemma 4 matches HuggingFace reference output. MoE expert routing matches reference implementation.
-- **Phase 9**: Continuous batching maintains throughput under concurrent load. Paged KV-cache handles concurrent sequences without OOM. Advanced scheduling prevents starvation under mixed workloads.
+- **Phase 9**: Continuous batching maintains throughput under concurrent load. Cross-request prefix sharing eliminates redundant prefill for shared system prompts. Paged KV-cache handles concurrent sequences without OOM. Advanced scheduling prevents starvation under mixed workloads.
