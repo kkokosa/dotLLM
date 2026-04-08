@@ -48,8 +48,12 @@ if all K accepted:
 ```
 ISpeculativeDecoder:
   DraftAndVerify(targetModel, draftModel, kvCacheTarget, kvCacheDraft,
-                 constraint, numCandidates) → AcceptedTokens
+                 pipeline, generatedIds, constraint, position,
+                 targetVocabSize, draftVocabSize, numCandidates,
+                 outputBuffer) → SpeculativeResult { AcceptedCount, DraftTicks, VerifyTicks, DraftedCount }
 ```
+
+All buffers are caller-owned or pool-rented — zero per-call heap allocation on the hot path. The `outputBuffer` is a `Span<int>` (backed by a reusable `ArrayPool` rental in `TextGenerator`).
 
 ## Draft Model Options
 
@@ -59,7 +63,7 @@ ISpeculativeDecoder:
 | Layer subset | First N layers of target model | No extra params. Lower acceptance rate. |
 | Speculative head | Small MLP trained alongside target | Minimal overhead. Model-specific. |
 
-Draft and target **must share vocabulary and tokenizer** — the acceptance scheme requires comparing probabilities over the same token space.
+Draft and target **must share the same base tokenizer** — the acceptance scheme requires comparing probabilities over the same token space. A small vocab size difference (up to 128 tokens) is tolerated; see [Vocabulary Compatibility](#vocabulary-compatibility) below.
 
 ## KV-Cache Rollback
 
@@ -95,6 +99,25 @@ When vocab sizes differ, probability comparison uses the shared range (`Math.Min
 | Exact match | `targetVocab == draftVocab` | Best — no clamping needed |
 | Close match | `abs(diff) <= 128` | Supported — shared range comparison |
 | Incompatible | `abs(diff) > 128` | Rejected — different tokenizer family |
+
+## CLI & Server Usage
+
+```bash
+# CLI: run with speculative decoding
+dotllm run model.gguf --speculative-model draft.gguf --speculative-k 5 -p "Hello"
+
+# Serve: pass at startup
+dotllm serve model.gguf --speculative-model draft.gguf --speculative-k 5
+
+# Serve: select draft model from the web UI's Load Model modal
+```
+
+The serve UI shows three-state compatibility feedback when selecting a draft model:
+- **Green**: exact vocab match
+- **Yellow**: compatible (within 128-token tolerance)
+- **Red**: incompatible (different tokenizer family)
+
+Speculative metrics (`acceptance rate`, `drafted`, `accepted`) appear in the stats bar and the hover card.
 
 ## When NOT to Use
 
