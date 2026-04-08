@@ -45,6 +45,19 @@ internal sealed class ModelInfoCommand : AsyncCommand<ModelInfoCommand.Settings>
             : "-");
         AnsiConsole.Write(infoTable);
 
+        // Check for locally downloaded files
+        var localModels = HuggingFaceDownloader.ListLocalModels()
+            .Where(m => m.RepoId.Equals(settings.RepoId, StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(m => m.Filename, StringComparer.OrdinalIgnoreCase);
+
+        if (localModels.Count > 0)
+        {
+            AnsiConsole.WriteLine();
+            AnsiConsole.Write(new Rule("[bold]Local Path[/]").LeftJustified());
+            var localDir = Path.GetDirectoryName(localModels.Values.First().FullPath)!;
+            AnsiConsole.MarkupLine($"  [dim]{localDir.EscapeMarkup()}[/]");
+        }
+
         if (ggufFiles.Count > 0)
         {
             AnsiConsole.WriteLine();
@@ -54,9 +67,16 @@ internal sealed class ModelInfoCommand : AsyncCommand<ModelInfoCommand.Settings>
             fileTable.Border(TableBorder.Rounded);
             fileTable.AddColumn("Filename");
             fileTable.AddColumn(new TableColumn("Size").RightAligned());
+            fileTable.AddColumn(new TableColumn("Local").Centered());
 
             foreach (var file in ggufFiles.OrderBy(f => f.Path))
-                fileTable.AddRow(file.Path.EscapeMarkup(), FormatHelpers.FormatSize(file.Size));
+            {
+                var isLocal = localModels.ContainsKey(file.Path);
+                fileTable.AddRow(
+                    file.Path.EscapeMarkup(),
+                    FormatHelpers.FormatSize(file.Size),
+                    isLocal ? "[green]yes[/]" : "[dim]-[/]");
+            }
 
             AnsiConsole.Write(fileTable);
         }
