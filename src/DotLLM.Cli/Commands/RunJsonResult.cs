@@ -44,6 +44,10 @@ internal sealed record RunTimingsDto
     public double TotalMs { get; init; }
     public double PrefillTokS { get; init; }
     public double DecodeTokS { get; init; }
+    public int GeneratedTokens { get; init; }
+    public int SpeculativeDraftTokens { get; init; }
+    public int SpeculativeAcceptedTokens { get; init; }
+    public float SpeculativeAcceptanceRate { get; init; }
 }
 
 /// <summary>Memory usage breakdown.</summary>

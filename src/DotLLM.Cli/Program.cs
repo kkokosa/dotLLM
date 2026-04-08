@@ -34,6 +34,10 @@ app.Configure(config =>
         model.AddCommand<ModelInfoCommand>("info")
             .WithDescription("Show details for a HuggingFace model repository.")
             .WithExample("model", "info", "TheBloke/Llama-2-7B-GGUF");
+
+        model.AddCommand<ModelDeleteCommand>("delete")
+            .WithDescription("Delete a locally downloaded model.")
+            .WithExample("model", "delete", "Qwen/Qwen2.5-0.5B-Instruct-GGUF");
     });
 
     config.AddCommand<RunCommand>("run")

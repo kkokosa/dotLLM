@@ -66,6 +66,15 @@ public sealed class ServerState : IDisposable
     /// <summary>Open GGUF file handle (disposed on model swap).</summary>
     public GgufFile? CurrentGguf { get; set; }
 
+    /// <summary>Draft model for speculative decoding (null when disabled).</summary>
+    public IModel? DraftModel { get; set; }
+
+    /// <summary>Path of the loaded draft model GGUF file.</summary>
+    public string DraftModelPath { get; set; } = "";
+
+    /// <summary>Open draft GGUF file handle (disposed on model swap).</summary>
+    public GgufFile? DraftGguf { get; set; }
+
     /// <summary>
     /// Executes a request with sequential access control.
     /// Only one request is processed at a time (Step 35 adds batching).
@@ -91,6 +100,10 @@ public sealed class ServerState : IDisposable
             PrefixCache = null;
             PagedFactory?.Dispose();
             PagedFactory = null;
+            DraftModel?.Dispose();
+            DraftModel = null;
+            DraftGguf?.Dispose();
+            DraftGguf = null;
             Model?.Dispose();
             CurrentGguf?.Dispose();
             CurrentGguf = null;
@@ -106,6 +119,8 @@ public sealed class ServerState : IDisposable
     {
         PrefixCache?.Dispose();
         PagedFactory?.Dispose();
+        DraftModel?.Dispose();
+        DraftGguf?.Dispose();
         Model?.Dispose();
         CurrentGguf?.Dispose();
         _requestGate.Dispose();

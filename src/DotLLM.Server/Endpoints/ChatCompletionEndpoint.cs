@@ -240,6 +240,9 @@ public static class ChatCompletionEndpoint
                 PromptTokens = timings.Value.PrefillTokenCount,
                 GeneratedTokens = timings.Value.DecodeTokenCount,
                 CachedTokens = timings.Value.CachedTokenCount,
+                SpeculativeDraftTokens = timings.Value.SpeculativeDraftTokens,
+                SpeculativeAcceptedTokens = timings.Value.SpeculativeAcceptedTokens,
+                SpeculativeAcceptanceRate = timings.Value.SpeculativeAcceptanceRate,
             } : null,
             Prompt = prompt,
         };

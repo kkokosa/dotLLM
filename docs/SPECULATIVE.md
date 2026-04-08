@@ -84,9 +84,31 @@ When constrained decoding is active:
 - Higher temperature → lower acceptance → less benefit.
 - K (candidates per iteration): diminishing returns past ~5. Optimal K depends on acceptance rate.
 
+## Vocabulary Compatibility
+
+Draft and target models must share the same base tokenizer. A small vocabulary size difference (up to 128 tokens) is tolerated — matching llama.cpp's `SPEC_VOCAB_MAX_SIZE_DIFFERENCE`. The extra tokens are typically padding/reserved IDs that never appear in normal generation.
+
+When vocab sizes differ, probability comparison uses the shared range (`Math.Min(targetVocab, draftVocab)`). Tokens beyond the draft's vocab can only be produced by the target model (as corrected or bonus tokens).
+
+| Compatibility | Condition | Status |
+|---------------|-----------|--------|
+| Exact match | `targetVocab == draftVocab` | Best — no clamping needed |
+| Close match | `abs(diff) <= 128` | Supported — shared range comparison |
+| Incompatible | `abs(diff) > 128` | Rejected — different tokenizer family |
+
 ## When NOT to Use
 
 - Very short generations (overhead of draft exceeds benefit)
 - Very high temperature (low acceptance rate)
 - No suitable draft model available
 - Memory-constrained (draft model requires additional memory)
+
+## Future Considerations
+
+### Universal Assisted Generation (UAG)
+
+HuggingFace Transformers v4.46.0 introduced UAG, which enables speculative decoding across model families with **different tokenizers**. The approach: draft tokens are decoded to text, re-tokenized with the target tokenizer, and aligned via longest common subsequence. This removes the vocabulary matching requirement entirely but adds tokenization overhead per speculation step. Reported speedups: 1.5-2× across model families. See [HuggingFace blog](https://huggingface.co/blog/universal_assisted_generation).
+
+### Layer-Subset Drafting
+
+Use the first N layers of the target model itself as a draft — no separate model needed. Lower acceptance rate than a dedicated draft model, but zero extra memory and guaranteed vocabulary compatibility.

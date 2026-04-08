@@ -154,7 +154,38 @@ public static class ServerStartup
         PrefixCache? prefixCache = options.PromptCacheEnabled
             ? new PrefixCache(options.PromptCacheSize)
             : null;
-        var generator = new TextGenerator(model, tokenizer, kvFactory, prefixCache);
+
+        // Load speculative draft model if configured
+        IModel? draftModel = null;
+        GgufFile? draftGguf = null;
+        string draftModelPath = "";
+        if (!string.IsNullOrEmpty(options.SpeculativeModel))
+        {
+            var draftPath = ResolveModelPath(options.SpeculativeModel, null);
+            if (draftPath is null)
+                throw new InvalidOperationException($"Speculative draft model not found: {options.SpeculativeModel}");
+
+            draftGguf = GgufFile.Open(draftPath);
+            var draftConfig = GgufModelConfigExtractor.Extract(draftGguf.Metadata);
+            if (!SpeculativeConstants.AreVocabsCompatible(config.VocabSize, draftConfig.VocabSize))
+            {
+                draftGguf.Dispose();
+                throw new InvalidOperationException(
+                    $"Draft model vocab size ({draftConfig.VocabSize}) differs from target ({config.VocabSize}) " +
+                    $"by more than {SpeculativeConstants.MaxVocabSizeDifference} tokens. " +
+                    "Models must share the same base tokenizer.");
+            }
+            if (draftConfig.VocabSize != config.VocabSize)
+                Console.WriteLine($"[dotllm] Note: vocab sizes differ slightly ({draftConfig.VocabSize} vs {config.VocabSize}) — using shared range for speculative comparison.");
+
+            var draftThreading = new ThreadingConfig(options.Threads, options.DecodeThreads);
+            draftModel = TransformerModel.LoadFromGguf(draftGguf, draftConfig, draftThreading);
+            draftModelPath = draftPath;
+            Console.WriteLine($"[dotllm] Speculative decoding: draft={Path.GetFileName(draftPath)}, K={options.SpeculativeCandidates}");
+        }
+
+        var generator = new TextGenerator(model, tokenizer, kvFactory, prefixCache,
+            draftModel: draftModel, speculativeCandidates: options.SpeculativeCandidates);
 
         // Warm-up: JIT pre-compilation + CUDA kernel loading
         WarmupRunner.Run(generator, tokenizer, options.Warmup);
@@ -176,6 +207,9 @@ public static class ServerStartup
             Generator = generator,
             LoadedModelPath = resolvedPath,
             CurrentGguf = gguf,
+            DraftModel = draftModel,
+            DraftModelPath = draftModelPath,
+            DraftGguf = draftGguf,
         };
     }
 

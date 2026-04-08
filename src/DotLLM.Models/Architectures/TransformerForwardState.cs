@@ -32,7 +32,7 @@ internal sealed unsafe class TransformerForwardState : IDisposable
             bytes += s * _numHeads * _headDim * 2;           // Q + AttnOutput
             bytes += s * _numKvHeads * _headDim * 2;         // K + V
             bytes += s * _intermediateSize * 3;              // FfnGate + FfnUp + SiluOutput
-            bytes += _vocabSize;                             // Logits (only last token)
+            bytes += s * _vocabSize;                          // Logits (all positions for speculative verify)
             bytes *= sizeof(float);
             // InputQ8Scratch: seqLen × max(Q8_0, Q8_1, Q8_K) row bytes
             int maxInputDim = Math.Max(_hiddenSize, _intermediateSize);
@@ -117,7 +117,7 @@ internal sealed unsafe class TransformerForwardState : IDisposable
         FfnGate = AllocFloats(newCapacity * _intermediateSize);
         FfnUp = AllocFloats(newCapacity * _intermediateSize);
         SiluOutput = AllocFloats(newCapacity * _intermediateSize);
-        Logits = AllocFloats(_vocabSize); // Only last token's logits needed
+        Logits = AllocFloats((long)newCapacity * _vocabSize); // All positions' logits for speculative verify
 
         // InputQ8Scratch: seqLen × max(q8_0RowBytes, q8_1RowBytes, q8_kRowBytes) for pre-quantized GEMM input reuse.
         // Q8_0: 34 bytes per 32-element block. Q8_1: 36 bytes per 32-element block. Q8_K: 292 bytes per 256-element block.

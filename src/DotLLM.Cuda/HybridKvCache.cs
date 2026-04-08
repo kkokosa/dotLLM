@@ -115,6 +115,13 @@ public sealed class HybridKvCache : IKvCache
     }
 
     /// <inheritdoc/>
+    public void Rollback(int length)
+    {
+        GpuCache.Rollback(length);
+        CpuCache.Rollback(length);
+    }
+
+    /// <inheritdoc/>
     public void Dispose()
     {
         GpuCache.Dispose();

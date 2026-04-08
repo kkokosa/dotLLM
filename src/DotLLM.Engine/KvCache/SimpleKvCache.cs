@@ -144,6 +144,14 @@ public sealed unsafe class SimpleKvCache : IKvCache
     }
 
     /// <inheritdoc/>
+    public void Rollback(int length)
+    {
+        if ((uint)length > (uint)_currentLength)
+            throw new ArgumentOutOfRangeException(nameof(length));
+        _currentLength = length;
+    }
+
+    /// <inheritdoc/>
     public void Dispose()
     {
         Dispose(disposing: true);

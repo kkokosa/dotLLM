@@ -126,6 +126,14 @@ public sealed class CudaKvCache : IKvCache
         new(_currentLength, _kvStride, DType.Float16, 0, _values[layerIndex]);
 
     /// <inheritdoc/>
+    public void Rollback(int length)
+    {
+        if ((uint)length > (uint)_currentLength)
+            throw new ArgumentOutOfRangeException(nameof(length));
+        _currentLength = length;
+    }
+
+    /// <inheritdoc/>
     public void Dispose()
     {
         for (int i = 0; i < _numLayers; i++)

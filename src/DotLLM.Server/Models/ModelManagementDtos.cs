@@ -68,6 +68,14 @@ public sealed record ModelLoadRequest
     [JsonPropertyName("decode_threads")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? DecodeThreads { get; init; }
+
+    [JsonPropertyName("speculative_model")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SpeculativeModel { get; init; }
+
+    [JsonPropertyName("speculative_k")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? SpeculativeK { get; init; }
 }
 
 /// <summary>

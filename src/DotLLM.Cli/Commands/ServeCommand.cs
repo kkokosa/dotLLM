@@ -112,6 +112,17 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
         [Description("Disable paged KV-cache. When enabled (default), uses block-based allocation for memory efficiency.")]
         [DefaultValue(false)]
         public bool NoPaged { get; set; }
+
+        /// <summary>Draft model for speculative decoding.</summary>
+        [CommandOption("--speculative-model")]
+        [Description("Path or HuggingFace repo ID for a draft model. Enables speculative decoding for faster generation. Must share vocabulary with the main model.")]
+        public string? SpeculativeModel { get; set; }
+
+        /// <summary>Number of draft candidates per speculative step.</summary>
+        [CommandOption("--speculative-k")]
+        [Description("Number of draft tokens per speculative step (K). Default 5.")]
+        [DefaultValue(5)]
+        public int SpeculativeK { get; set; } = 5;
     }
 
     /// <inheritdoc/>
@@ -137,6 +148,8 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
                 Iterations = settings.WarmupIterations,
             },
             UsePaged = !settings.NoPaged,
+            SpeculativeModel = settings.SpeculativeModel,
+            SpeculativeCandidates = settings.SpeculativeK,
             ModelId = "none",
         };
 

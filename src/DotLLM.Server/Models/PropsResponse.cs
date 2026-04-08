@@ -44,6 +44,10 @@ public sealed record PropsResponse
     [JsonPropertyName("sampling_defaults")]
     public required SamplingDefaultsDto SamplingDefaults { get; init; }
 
+    [JsonPropertyName("draft_model_path")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DraftModelPath { get; init; }
+
     [JsonPropertyName("is_ready")]
     public bool IsReady { get; init; }
 }

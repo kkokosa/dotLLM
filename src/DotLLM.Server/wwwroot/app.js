@@ -124,6 +124,12 @@ const modalDecodeThreads = $('#modal-decode-threads');
 const modalStatus = $('#modal-status');
 const modalCancelBtn = $('#modal-cancel-btn');
 const modalLoadBtn = $('#modal-load-btn');
+const modalSpeculativeSection = $('#modal-speculative-section');
+const modalSpeculativeSelect = $('#modal-speculative-select');
+const modalSpeculativeInfo = $('#modal-speculative-info');
+const modalSpeculativeKSection = $('#modal-speculative-k-section');
+const modalSpeculativeK = $('#modal-speculative-k');
+const modalSpeculativeKVal = $('#modal-speculative-k-val');
 
 // ── API LAYER ──
 
@@ -151,6 +157,8 @@ async function loadModel(model, quant, opts) {
     if (opts?.cacheTypeV && opts.cacheTypeV !== 'f32') body.cache_type_v = opts.cacheTypeV;
     if (opts?.threads) body.threads = opts.threads;
     if (opts?.decodeThreads) body.decode_threads = opts.decodeThreads;
+    if (opts?.speculativeModel) body.speculative_model = opts.speculativeModel;
+    if (opts?.speculativeK) body.speculative_k = opts.speculativeK;
     const res = await fetch('/v1/models/load', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -314,6 +322,14 @@ function buildModelBadgeText(config) {
         parts.push('GPU');
     }
 
+    // Draft model indicator
+    if (config.draft_model_path) {
+        const draftFile = config.draft_model_path.split(/[/\\]/).pop() || '';
+        const draftQuant = extractQuantFromPath(draftFile);
+        const draftName = draftFile.replace(/\.gguf$/i, '').replace(/[.\-](Q|IQ|F|BF)\w+$/i, '');
+        parts.push(`draft: ${draftName}${draftQuant ? ' ' + draftQuant : ''}`);
+    }
+
     return parts.join(' | ');
 }
 
@@ -420,36 +436,137 @@ function createStatsBar(stats) {
     const bar = document.createElement('div');
     bar.className = 'stats-bar';
 
+    // ── Inline text (same as before) ──
     const parts = [];
     if (stats.usage) {
         parts.push(`${stats.usage.prompt_tokens} prompt`);
         parts.push(`${stats.usage.completion_tokens} gen`);
     }
-    if (stats.timings?.cached_tokens > 0) {
+    if (stats.timings?.cached_tokens > 0)
         parts.push(`${stats.timings.cached_tokens} cached`);
-    }
-    if (stats.ttftMs != null) {
+    if (stats.ttftMs != null)
         parts.push(`${stats.ttftMs.toFixed(0)}ms TTFT`);
-    }
     if (stats.timings) {
-        if (stats.timings.prefill_tokens_per_sec > 0) {
+        if (stats.timings.prefill_tokens_per_sec > 0)
             parts.push(`${formatNum(stats.timings.prefill_tokens_per_sec)} pre t/s`);
-        }
-        if (stats.timings.decode_tokens_per_sec > 0) {
+        if (stats.timings.decode_tokens_per_sec > 0)
             parts.push(`${formatNum(stats.timings.decode_tokens_per_sec)} dec t/s`);
-        }
-        if (stats.timings.prefill_time_ms != null) {
+        if (stats.timings.prefill_time_ms != null)
             parts.push(`prefill: ${stats.timings.prefill_time_ms.toFixed(1)}ms`);
-        }
-        if (stats.timings.decode_time_ms != null) {
+        if (stats.timings.decode_time_ms != null)
             parts.push(`decode: ${stats.timings.decode_time_ms.toFixed(0)}ms`);
-        }
-        if (stats.timings.sampling_time_ms != null) {
+        if (stats.timings.sampling_time_ms != null)
             parts.push(`sampling: ${stats.timings.sampling_time_ms.toFixed(1)}ms`);
+        if (stats.timings.speculative_acceptance_rate > 0)
+            parts.push(`spec: ${(stats.timings.speculative_acceptance_rate * 100).toFixed(0)}%`);
+    }
+    if (!parts.length) return bar;
+
+    const textSpan = document.createElement('span');
+    textSpan.textContent = `[${parts.join(' | ')}]`;
+    bar.appendChild(textSpan);
+
+    // ── Hover card ──
+    const hover = document.createElement('div');
+    hover.className = 'stats-hover';
+
+    const t = stats.timings || {};
+    const u = stats.usage || {};
+    const promptTok = u.prompt_tokens || 0;
+    const genTok = u.completion_tokens || 0;
+    const cached = t.cached_tokens || 0;
+    const newPrompt = promptTok - cached;
+    const totalTok = promptTok + genTok;
+
+    if (totalTok > 0) {
+        // Build segments data
+        const segs = [];
+        let num = 1;
+        if (cached > 0)    segs.push({ n: num++, cls: 'sh-seg-cached',  pct: cached / totalTok * 100,    tok: cached,    label: 'Cached tokens',   detail: 'reused from KV-cache',      rate: null });
+        if (newPrompt > 0) segs.push({ n: num++, cls: 'sh-seg-prompt',  pct: newPrompt / totalTok * 100, tok: newPrompt, label: 'Prefill (new prompt)', detail: `${t.prefill_time_ms?.toFixed(0) ?? '?'}ms`, rate: t.prefill_tokens_per_sec > 0 ? `${formatNum(t.prefill_tokens_per_sec)} tok/s` : null });
+        if (genTok > 0)    segs.push({ n: num++, cls: 'sh-seg-decode',  pct: genTok / totalTok * 100,    tok: genTok,    label: 'Generated tokens', detail: `${t.decode_time_ms?.toFixed(0) ?? '?'}ms`, rate: t.decode_tokens_per_sec > 0 ? `${formatNum(t.decode_tokens_per_sec)} tok/s` : null });
+
+        // Segment bar with numbered markers
+        let segHtml = '<div class="sh-seg-bar" style="position:relative">';
+        let cumPct = 0;
+        for (const s of segs) {
+            segHtml += `<div class="sh-seg ${s.cls}" style="width:${s.pct.toFixed(1)}%"></div>`;
+        }
+        // Markers at segment midpoints
+        cumPct = 0;
+        for (const s of segs) {
+            const mid = cumPct + s.pct / 2;
+            segHtml += `<div class="sh-marker" style="left:calc(${mid.toFixed(1)}% - 8px)">${s.n}</div>`;
+            cumPct += s.pct;
+        }
+        segHtml += '</div>';
+
+        // Legend rows below
+        segHtml += '<div class="sh-legend">';
+        for (const s of segs) {
+            const rateHtml = s.rate ? ` <span style="color:#71717a">@ ${s.rate}</span>` : '';
+            segHtml += `<div class="sh-legend-row">` +
+                `<div class="sh-legend-num">${s.n}</div>` +
+                `<div class="sh-legend-color ${s.cls}"></div>` +
+                `<span class="sh-legend-text">${s.label} <span style="color:#52525b">${s.detail}</span>${rateHtml}</span>` +
+                `<span class="sh-legend-val">${s.tok.toLocaleString()}</span>` +
+                `</div>`;
+        }
+        segHtml += '</div>';
+
+        hover.innerHTML = segHtml;
+
+        // TTFT + time row
+        const metrics = [];
+        if (stats.ttftMs != null)
+            metrics.push({ val: `${stats.ttftMs.toFixed(0)}ms`, desc: 'Time to first token' });
+        if (t.prefill_time_ms != null)
+            metrics.push({ val: `${t.prefill_time_ms.toFixed(0)}ms`, desc: 'Prefill time' });
+        if (t.decode_time_ms != null)
+            metrics.push({ val: `${t.decode_time_ms.toFixed(0)}ms`, desc: 'Decode time' });
+        if (t.sampling_time_ms != null && t.sampling_time_ms > 0.05)
+            metrics.push({ val: `${t.sampling_time_ms.toFixed(1)}ms`, desc: 'Sampling time' });
+
+        if (metrics.length) {
+            const divider = document.createElement('div');
+            divider.className = 'sh-divider';
+            hover.appendChild(divider);
+
+            const row = document.createElement('div');
+            row.className = 'sh-row';
+            for (const m of metrics) {
+                row.innerHTML += `<div class="sh-metric"><span class="sh-val">${m.val}</span><span class="sh-desc">${m.desc}</span></div>`;
+            }
+            hover.appendChild(row);
+        }
+
+        // Speculative section
+        if (t.speculative_draft_tokens > 0) {
+            const accepted = t.speculative_accepted_tokens || 0;
+            const drafted = t.speculative_draft_tokens || 0;
+            const pct = ((t.speculative_acceptance_rate || 0) * 100).toFixed(0);
+            const accPct = (accepted / drafted * 100).toFixed(1);
+
+            const divider2 = document.createElement('div');
+            divider2.className = 'sh-divider';
+            hover.appendChild(divider2);
+
+            const specSection = document.createElement('div');
+            specSection.innerHTML =
+                `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">` +
+                `<span>Speculative decoding</span>` +
+                `<span class="sh-val">${pct}% accepted</span></div>` +
+                `<div class="sh-spec-bar">` +
+                `<div class="sh-spec-yes" style="width:${accPct}%"></div>` +
+                `<div class="sh-spec-no" style="width:${(100 - parseFloat(accPct)).toFixed(1)}%"></div></div>` +
+                `<div style="display:flex;justify-content:space-between;margin-top:2px">` +
+                `<span class="sh-desc">${accepted} accepted</span>` +
+                `<span class="sh-desc">${drafted - accepted} rejected</span></div>`;
+            hover.appendChild(specSection);
         }
     }
 
-    bar.textContent = parts.length ? `[${parts.join(' | ')}]` : '';
+    bar.appendChild(hover);
     return bar;
 }
 
@@ -642,6 +759,12 @@ function openModelModal() {
     modalOptions.classList.add('hidden');
     modalGpuSection.classList.add('hidden');
     modalModelInfo.classList.add('hidden');
+    modalSpeculativeSection.classList.add('hidden');
+    modalSpeculativeSelect.innerHTML = '<option value="">None (disabled)</option>';
+    modalSpeculativeInfo.classList.add('hidden');
+    modalSpeculativeInfo.textContent = '';
+    modalSpeculativeK.value = '5';
+    modalSpeculativeKVal.textContent = '5';
     modalLoadBtn.disabled = true;
     modalStatus.innerHTML = '';
     modalCacheK.value = 'f32';
@@ -704,11 +827,40 @@ async function populateModalDropdown() {
     }
 }
 
+function populateSpeculativeDropdown(excludePath) {
+    modalSpeculativeSelect.innerHTML = '<option value="">None (disabled)</option>';
+    if (!modalModels || modalModels.length === 0) return;
+
+    const groups = {};
+    for (const m of modalModels) {
+        if (m.full_path === excludePath) continue;
+        const repo = m.repo_id || 'local';
+        if (!groups[repo]) groups[repo] = [];
+        groups[repo].push(m);
+    }
+
+    for (const [repo, files] of Object.entries(groups)) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = repo;
+        for (const f of files) {
+            const opt = document.createElement('option');
+            opt.value = f.full_path;
+            const size = formatFileSize(f.size_bytes);
+            opt.textContent = `${f.filename} (${size})`;
+            opt.dataset.repo = repo;
+            opt.dataset.filename = f.filename;
+            optgroup.appendChild(opt);
+        }
+        modalSpeculativeSelect.appendChild(optgroup);
+    }
+}
+
 async function onModalModelChange() {
     const fullPath = modalModelSelect.value;
     if (!fullPath) {
         modalOptions.classList.add('hidden');
         modalModelInfo.classList.add('hidden');
+        modalSpeculativeSection.classList.add('hidden');
         modalLoadBtn.disabled = true;
         modalInspect = null;
         modalSelectedFullPath = null;
@@ -737,6 +889,10 @@ async function onModalModelChange() {
 
     modalOptions.classList.remove('hidden');
     updateGpuVisibility();
+
+    // Show speculative section and populate draft model dropdown
+    modalSpeculativeSection.classList.remove('hidden');
+    populateSpeculativeDropdown(fullPath);
 }
 
 function getModalDevice() {
@@ -794,6 +950,10 @@ async function handleModalLoad() {
     modalStatus.innerHTML = '<span class="spinner"></span> <span class="text-yellow-500">Loading and warming up model...</span>';
     setStatus('Loading and warming up model...', 'text-yellow-500');
 
+    // Get speculative model selection
+    const specPath = modalSpeculativeSelect.value || undefined;
+    const specK = parseInt(modalSpeculativeK.value) || 5;
+
     try {
         const res = await loadModel(repo, quant, {
             device,
@@ -802,6 +962,8 @@ async function handleModalLoad() {
             cacheTypeV: modalCacheV.value,
             threads: threads || undefined,
             decodeThreads: decodeThreads || undefined,
+            speculativeModel: specPath,
+            speculativeK: specPath ? specK : undefined,
         });
         if (res.ok) {
             state.config = await fetchProps();
@@ -1197,6 +1359,12 @@ function buildExportMarkdown() {
         lines.push(`| Device | ${state.config.device || 'cpu'} |`);
         if (state.config.gpu_layers) lines.push(`| GPU layers | ${state.config.gpu_layers}/${state.config.num_layers} |`);
         if (state.config.threads) lines.push(`| Threads | ${state.config.threads} |`);
+        if (state.config.draft_model_path) {
+            const draftFile = state.config.draft_model_path.split(/[/\\]/).pop() || '';
+            const draftQuant = extractQuantFromPath(draftFile);
+            const draftName = draftFile.replace(/\.gguf$/i, '');
+            lines.push(`| Draft model | ${draftName} (speculative decoding) |`);
+        }
         lines.push('');
 
         // Sampling defaults
@@ -1252,6 +1420,10 @@ function buildExportMarkdown() {
                 if (t.prefill_time_ms != null) parts.push(`prefill time: ${t.prefill_time_ms.toFixed(1)}ms`);
                 if (t.decode_time_ms != null) parts.push(`decode time: ${t.decode_time_ms.toFixed(0)}ms`);
                 if (t.sampling_time_ms != null) parts.push(`sampling time: ${t.sampling_time_ms.toFixed(1)}ms`);
+                if (t.speculative_draft_tokens > 0) {
+                    const pct = Math.min(100, (t.speculative_acceptance_rate || 0) * 100).toFixed(0);
+                    parts.push(`spec: ${pct}% accepted (${t.speculative_draft_tokens} drafted, ${t.speculative_accepted_tokens} produced)`);
+                }
             }
             if (parts.length) {
                 lines.push(`> *Stats: ${parts.join(' | ')}*`);
@@ -1465,6 +1637,69 @@ document.querySelectorAll('input[name="modal-device"]').forEach(radio => {
 
 // GPU layers slider live update
 modalGpuLayers.addEventListener('input', updateGpuLayersDisplay);
+
+// Speculative draft model selection — inspect & vocab check
+modalSpeculativeSelect.addEventListener('change', async () => {
+    const draftPath = modalSpeculativeSelect.value;
+    if (!draftPath) {
+        modalSpeculativeInfo.classList.add('hidden');
+        modalSpeculativeInfo.textContent = '';
+        modalSpeculativeKSection.classList.add('hidden');
+        return;
+    }
+
+    modalSpeculativeInfo.classList.remove('hidden');
+    modalSpeculativeInfo.textContent = 'Inspecting draft model...';
+
+    const draftInfo = await inspectModel(draftPath);
+    if (!draftInfo) {
+        modalSpeculativeInfo.textContent = 'Could not read draft model metadata';
+        modalSpeculativeInfo.className = 'mt-1.5 text-[10px] text-red-400';
+        modalSpeculativeKSection.classList.add('hidden');
+        return;
+    }
+
+    const size = formatFileSize(draftInfo.file_size_bytes);
+    const mainVocab = modalInspect?.vocab_size;
+    const draftVocab = draftInfo.vocab_size;
+    const maxDiff = 128; // matches SpeculativeConstants.MaxVocabSizeDifference
+    const diff = Math.abs((mainVocab || 0) - (draftVocab || 0));
+    const modelInfo = `${draftInfo.architecture} | ${draftInfo.num_layers} layers | ${size}`;
+
+    if (!mainVocab || !draftVocab) {
+        // Can't compare — show info only
+        modalSpeculativeInfo.innerHTML = modelInfo;
+        modalSpeculativeInfo.className = 'mt-1.5 text-[10px] text-zinc-600';
+        modalSpeculativeKSection.classList.remove('hidden');
+    } else if (mainVocab === draftVocab) {
+        // Exact match — green
+        modalSpeculativeInfo.innerHTML = modelInfo +
+            `<br><span class="text-emerald-400">Exact vocab match (${draftVocab.toLocaleString()} tokens)</span>`;
+        modalSpeculativeInfo.className = 'mt-1.5 text-[10px] text-zinc-600';
+        modalSpeculativeKSection.classList.remove('hidden');
+    } else if (diff <= maxDiff) {
+        // Close match — yellow, will work
+        modalSpeculativeInfo.innerHTML = modelInfo +
+            `<br><span class="text-yellow-400">Compatible — vocab differs by ${diff} tokens ` +
+            `(${draftVocab.toLocaleString()} vs ${mainVocab.toLocaleString()}). ` +
+            `Shared range used for comparison.</span>`;
+        modalSpeculativeInfo.className = 'mt-1.5 text-[10px] text-zinc-600';
+        modalSpeculativeKSection.classList.remove('hidden');
+    } else {
+        // Incompatible — red
+        modalSpeculativeInfo.innerHTML = modelInfo +
+            `<br><span class="text-red-400">Incompatible — vocab differs by ${diff.toLocaleString()} tokens ` +
+            `(${draftVocab.toLocaleString()} vs ${mainVocab.toLocaleString()}). ` +
+            `Max allowed: ${maxDiff}.</span>`;
+        modalSpeculativeInfo.className = 'mt-1.5 text-[10px] text-zinc-600';
+        modalSpeculativeKSection.classList.add('hidden');
+    }
+});
+
+// Speculative K slider live update
+modalSpeculativeK.addEventListener('input', () => {
+    modalSpeculativeKVal.textContent = modalSpeculativeK.value;
+});
 
 // Keyboard shortcut: Escape to close settings or modal
 document.addEventListener('keydown', (e) => {

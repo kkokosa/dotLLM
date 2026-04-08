@@ -64,6 +64,15 @@ public sealed record TimingsDto
 
     [JsonPropertyName("cached_tokens")]
     public int CachedTokens { get; init; }
+
+    [JsonPropertyName("speculative_draft_tokens")]
+    public int SpeculativeDraftTokens { get; init; }
+
+    [JsonPropertyName("speculative_accepted_tokens")]
+    public int SpeculativeAcceptedTokens { get; init; }
+
+    [JsonPropertyName("speculative_acceptance_rate")]
+    public float SpeculativeAcceptanceRate { get; init; }
 }
 
 /// <summary>

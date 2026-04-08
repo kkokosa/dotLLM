@@ -207,6 +207,23 @@
                     <div id="modal-model-info" class="mt-1.5 text-[10px] text-zinc-600 hidden"></div>
                 </div>
 
+                <!-- Speculative Decoding (optional, shown after selecting a main model) -->
+                <div id="modal-speculative-section" class="hidden">
+                    <label class="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">Draft Model (Speculative Decoding)</label>
+                    <p class="text-[10px] text-zinc-600 mb-1.5">Optional: select a smaller model to speed up decoding via speculative decoding. Must share vocabulary with the main model.</p>
+                    <select id="modal-speculative-select" class="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-zinc-500">
+                        <option value="">None (disabled)</option>
+                    </select>
+                    <div id="modal-speculative-info" class="mt-1.5 text-[10px] text-zinc-600 hidden"></div>
+                    <div id="modal-speculative-k-section" class="mt-2 hidden">
+                        <label class="text-[10px] text-zinc-500 block mb-0.5">Draft Candidates (K)</label>
+                        <div class="flex items-center gap-2">
+                            <input id="modal-speculative-k" type="range" min="1" max="10" value="5" class="flex-1 accent-cyan-500">
+                            <span id="modal-speculative-k-val" class="text-[10px] text-accent font-medium w-4">5</span>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Options (shown after selecting a model) -->
                 <div id="modal-options" class="hidden space-y-4 border-t border-zinc-800 pt-4">
 
