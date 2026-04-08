@@ -64,12 +64,15 @@ public sealed class BpeTokenizer : ITokenizer
     /// <param name="tokenTypes">Per-token type flags. Null = all normal.</param>
     /// <param name="bosId">Beginning-of-sequence token ID.</param>
     /// <param name="eosId">End-of-sequence token ID.</param>
+    /// <param name="preTokenizerType">GGUF <c>tokenizer.ggml.pre</c> value (e.g., "llama3", "gpt2"). Null = no pre-tokenization.</param>
     public static BpeTokenizer CreateTiktoken(
-        string[] tokens, string[] merges, int[]? tokenTypes, int bosId, int eosId)
+        string[] tokens, string[] merges, int[]? tokenTypes,
+        int bosId, int eosId, string? preTokenizerType = null)
     {
         var specialTokens = BuildSpecialTokenTable(tokens, tokenTypes);
+        var preRegex = TiktokenPreTokenizer.GetRegex(preTokenizerType);
         return new BpeTokenizer(
-            new Gpt2TiktokenEncoding(tokens, merges, tokenTypes),
+            new Gpt2TiktokenEncoding(tokens, merges, tokenTypes, preRegex),
             specialTokens, bosId, eosId, tokens.Length);
     }
 

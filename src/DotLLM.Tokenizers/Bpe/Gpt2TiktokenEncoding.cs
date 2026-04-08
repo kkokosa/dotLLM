@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace DotLLM.Tokenizers.Bpe;
 
@@ -79,7 +80,13 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
 
     private readonly int _unkId;
 
-    internal Gpt2TiktokenEncoding(string[] tokens, string[] merges, int[]? tokenTypes)
+    /// <summary>
+    /// Compiled pre-tokenization regex that splits input at word/punctuation boundaries
+    /// before BPE merges. Null means no pre-tokenization (whole text = one segment).
+    /// </summary>
+    private readonly Regex? _preRegex;
+
+    internal Gpt2TiktokenEncoding(string[] tokens, string[] merges, int[]? tokenTypes, Regex? preRegex = null)
     {
         _idToToken = tokens;
         _byteToTokenId = BpeCore.BuildByteToTokenId(tokens);
@@ -110,6 +117,7 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
                 mergeRanks[(idA, idB)] = rank;
         }
         _mergeRanks = mergeRanks;
+        _preRegex = preRegex;
     }
 
     public int[] Encode(string text)
@@ -129,26 +137,19 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
                     rentedGpt2[i] = Gpt2ByteToUnicode[rentedUtf8[i]];
                 ReadOnlySpan<char> gpt2Text = rentedGpt2.AsSpan(0, utf8Len);
 
-                // TODO: implement regex pre-tokenization using tokenizer.ggml.pre pattern.
-                // Without it, this path treats the whole GPT-2-encoded text as one segment, which is
-                // incorrect for most tiktoken models (splits should happen at word boundaries first).
-                Symbol[] symbols = ArrayPool<Symbol>.Shared.Rent(utf8Len * 2);
-                int symbolCount;
-                try
-                {
-                    symbolCount = BuildInitialSymbols(gpt2Text, symbols);
+                if (_preRegex is null)
+                    return EncodeSegment(gpt2Text);
 
-                    var queue = new PriorityQueue<BgramEntry, (int, int)>(symbolCount);
-                    for (int i = 0; i < symbolCount - 1; i++)
-                        TryEnqueueBigram(symbols, i, i + 1, queue);
-
-                    RunMergeLoop(symbols, queue);
-                    return BpeCore.CollectTokenIds(symbols, symbolCount);
-                }
-                finally
+                // Pre-tokenize: split at word/punctuation boundaries using the model's regex,
+                // then BPE each segment independently so merges cannot cross boundaries.
+                var result = new List<int>();
+                foreach (var match in _preRegex.EnumerateMatches(gpt2Text))
                 {
-                    ArrayPool<Symbol>.Shared.Return(symbols, clearArray: false);
+                    var segment = gpt2Text.Slice(match.Index, match.Length);
+                    int[] segTokens = EncodeSegment(segment);
+                    result.AddRange(segTokens);
                 }
+                return result.ToArray();
             }
             finally
             {
@@ -158,6 +159,30 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
         finally
         {
             ArrayPool<byte>.Shared.Return(rentedUtf8);
+        }
+    }
+
+    /// <summary>
+    /// Encodes a single pre-tokenized segment using BPE merges.
+    /// </summary>
+    private int[] EncodeSegment(ReadOnlySpan<char> segment)
+    {
+        Symbol[] symbols = ArrayPool<Symbol>.Shared.Rent(segment.Length * 2);
+        int symbolCount;
+        try
+        {
+            symbolCount = BuildInitialSymbols(segment, symbols);
+
+            var queue = new PriorityQueue<BgramEntry, (int, int)>(symbolCount);
+            for (int i = 0; i < symbolCount - 1; i++)
+                TryEnqueueBigram(symbols, i, i + 1, queue);
+
+            RunMergeLoop(symbols, queue);
+            return BpeCore.CollectTokenIds(symbols, symbolCount);
+        }
+        finally
+        {
+            ArrayPool<Symbol>.Shared.Return(symbols, clearArray: false);
         }
     }
 

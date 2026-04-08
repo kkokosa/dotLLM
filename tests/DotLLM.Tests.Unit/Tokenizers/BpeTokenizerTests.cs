@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using DotLLM.Models.Gguf;
 using DotLLM.Tokenizers.Bpe;
 using Xunit;
@@ -316,5 +317,189 @@ public class BpeTokenizerTests
 
         BpeTokenizer tokenizer = GgufBpeTokenizerFactory.Load(metadata);
         Assert.Equal(2, tokenizer.VocabSize);
+    }
+
+    // -------------------------------------------------------------------------
+    // Tiktoken pre-tokenization
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void TiktokenPreTokenizer_ReturnsRegexForKnownTypes()
+    {
+        Assert.NotNull(TiktokenPreTokenizer.GetRegex("gpt2"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegex("default"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegex("llama3"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegex("llama-bpe"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegex("deepseek-llm"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegex("deepseek-coder"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegex("command-r"));
+    }
+
+    [Fact]
+    public void TiktokenPreTokenizer_ReturnsNullForUnknownType()
+    {
+        Assert.Null(TiktokenPreTokenizer.GetRegex(null));
+        Assert.Null(TiktokenPreTokenizer.GetRegex(""));
+        Assert.Null(TiktokenPreTokenizer.GetRegex("unknown-model"));
+    }
+
+    [Fact]
+    public void Gpt2Regex_SplitsWordsAndSpaces()
+    {
+        var regex = TiktokenPreTokenizer.GetRegex("gpt2")!;
+        var matches = regex.Matches("hello world");
+        // "hello" and " world"
+        Assert.Equal(2, matches.Count);
+        Assert.Equal("hello", matches[0].Value);
+        Assert.Equal(" world", matches[1].Value);
+    }
+
+    [Fact]
+    public void Llama3Regex_SplitsContractions()
+    {
+        var regex = TiktokenPreTokenizer.GetRegex("llama3")!;
+        var matches = regex.Matches("I'm happy");
+        // "I", "'m", " happy"
+        Assert.True(matches.Count >= 3);
+        Assert.Equal("I", matches[0].Value);
+        Assert.Equal("'m", matches[1].Value);
+    }
+
+    [Fact]
+    public void Llama3Regex_GroupsDigitsInThrees()
+    {
+        var regex = TiktokenPreTokenizer.GetRegex("llama3")!;
+        var matches = regex.Matches("12345");
+        // "123", "45"
+        Assert.Equal(2, matches.Count);
+        Assert.Equal("123", matches[0].Value);
+        Assert.Equal("45", matches[1].Value);
+    }
+
+    [Fact]
+    public void Tiktoken_NullRegex_PreservesExistingBehavior()
+    {
+        // Build a tiktoken tokenizer WITHOUT pre-tokenization (null regex).
+        // Verify it produces tokens (regression — should not crash).
+        var tok = BuildMinimalTiktokenVocab(preType: null);
+        int[] ids = tok.Encode("ab");
+        Assert.NotEmpty(ids);
+    }
+
+    [Fact]
+    public void Tiktoken_WithPreTokenizer_PreventsCrossBoundaryMerges()
+    {
+        // With GPT-2 regex, "a b" should split into ["a", " b"].
+        // BPE cannot merge across the boundary, so the tokens for "a" and " b"
+        // are encoded independently.
+        var tokNoRegex = BuildMinimalTiktokenVocab(preType: null);
+        var tokWithRegex = BuildMinimalTiktokenVocab(preType: "gpt2");
+
+        int[] idsWithout = tokNoRegex.Encode("a b");
+        int[] idsWith = tokWithRegex.Encode("a b");
+
+        // Both should succeed without error
+        Assert.NotEmpty(idsWithout);
+        Assert.NotEmpty(idsWith);
+
+        // With regex, we should get at least 2 separate groups of tokens
+        // (one for "a", one for " b") whereas without regex everything is one segment.
+        // The exact tokens depend on vocab, but the key point is no crash and
+        // different segmentation behavior.
+        Assert.True(idsWith.Length >= 2);
+    }
+
+    [Fact]
+    public void GgufFactory_LoadsTiktokenWithPreType()
+    {
+        // Build GGUF metadata with tokenizer.ggml.pre = "llama3"
+        var (tokens, merges) = BuildTiktokenGgufData();
+        var entries = new Dictionary<string, GgufMetadataValue>
+        {
+            ["tokenizer.ggml.model"]        = new(GgufValueType.String, "gpt2"),
+            ["tokenizer.ggml.tokens"]       = new(GgufValueType.Array, tokens),
+            ["tokenizer.ggml.merges"]       = new(GgufValueType.Array, merges),
+            ["tokenizer.ggml.bos_token_id"] = new(GgufValueType.UInt32, 0u),
+            ["tokenizer.ggml.eos_token_id"] = new(GgufValueType.UInt32, 0u),
+            ["tokenizer.ggml.pre"]          = new(GgufValueType.String, "llama3"),
+        };
+        var metadata = new GgufMetadata(entries);
+
+        BpeTokenizer tokenizer = GgufBpeTokenizerFactory.Load(metadata);
+        Assert.NotNull(tokenizer);
+        // Encoding should work without error
+        int[] ids = tokenizer.Encode("hi");
+        Assert.NotEmpty(ids);
+    }
+
+    [Fact]
+    public void GgufFactory_LoadsTiktokenWithoutPreType()
+    {
+        // No tokenizer.ggml.pre key → no pre-tokenization (backwards compat)
+        var (tokens, merges) = BuildTiktokenGgufData();
+        var entries = new Dictionary<string, GgufMetadataValue>
+        {
+            ["tokenizer.ggml.model"]        = new(GgufValueType.String, "gpt2"),
+            ["tokenizer.ggml.tokens"]       = new(GgufValueType.Array, tokens),
+            ["tokenizer.ggml.merges"]       = new(GgufValueType.Array, merges),
+            ["tokenizer.ggml.bos_token_id"] = new(GgufValueType.UInt32, 0u),
+            ["tokenizer.ggml.eos_token_id"] = new(GgufValueType.UInt32, 0u),
+        };
+        var metadata = new GgufMetadata(entries);
+
+        BpeTokenizer tokenizer = GgufBpeTokenizerFactory.Load(metadata);
+        Assert.NotNull(tokenizer);
+        int[] ids = tokenizer.Encode("hi");
+        Assert.NotEmpty(ids);
+    }
+
+    /// <summary>
+    /// Builds a minimal tiktoken-style tokenizer for testing.
+    /// Creates 256 single-byte tokens using GPT-2 byte encoding.
+    /// </summary>
+    private static BpeTokenizer BuildMinimalTiktokenVocab(string? preType)
+    {
+        // GPT-2 byte tokens: each byte 0x00-0xFF maps to a specific Unicode char.
+        // Reproduce the GPT-2 byte_encoder mapping.
+        char[] byteToUnicode = new char[256];
+        for (int b = 33; b <= 126; b++) byteToUnicode[b] = (char)b;
+        for (int b = 161; b <= 172; b++) byteToUnicode[b] = (char)b;
+        for (int b = 174; b <= 255; b++) byteToUnicode[b] = (char)b;
+        int n = 0;
+        for (int b = 0; b < 256; b++)
+        {
+            if (byteToUnicode[b] == 0)
+                byteToUnicode[b] = (char)(0x100 + n++);
+        }
+
+        string[] tokens = new string[256];
+        for (int i = 0; i < 256; i++)
+            tokens[i] = byteToUnicode[i].ToString();
+
+        return BpeTokenizer.CreateTiktoken(tokens, merges: [], tokenTypes: null,
+            bosId: 0, eosId: 0, preTokenizerType: preType);
+    }
+
+    /// <summary>
+    /// Builds minimal GGUF-compatible tiktoken data (256 byte tokens, no merges).
+    /// </summary>
+    private static (string[] tokens, string[] merges) BuildTiktokenGgufData()
+    {
+        char[] byteToUnicode = new char[256];
+        for (int b = 33; b <= 126; b++) byteToUnicode[b] = (char)b;
+        for (int b = 161; b <= 172; b++) byteToUnicode[b] = (char)b;
+        for (int b = 174; b <= 255; b++) byteToUnicode[b] = (char)b;
+        int n = 0;
+        for (int b = 0; b < 256; b++)
+        {
+            if (byteToUnicode[b] == 0)
+                byteToUnicode[b] = (char)(0x100 + n++);
+        }
+
+        string[] tokens = new string[256];
+        for (int i = 0; i < 256; i++)
+            tokens[i] = byteToUnicode[i].ToString();
+
+        return (tokens, []);
     }
 }

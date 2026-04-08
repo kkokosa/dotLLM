@@ -75,12 +75,21 @@ public sealed unsafe class CudaKernels : IDisposable
     private readonly nint _quantKvQ8_0Func;
     private readonly nint _quantKvQ4_0Func;
 
+    /// <summary>Max shared memory per block (bytes) for the current device.</summary>
+    private readonly uint _maxSharedMemoryPerBlock;
+
     /// <summary>
     /// Loads all PTX modules from the specified directory.
     /// </summary>
     /// <param name="ptxDir">Directory containing compiled .ptx files.</param>
     public CudaKernels(string ptxDir)
     {
+        // Query max shared memory per block for bounds checking in attention kernels.
+        CudaDriverApi.cuCtxGetDevice(out int device);
+        CudaDriverApi.cuDeviceGetAttribute(out int maxShared,
+            CudaDriverApi.CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, device);
+        _maxSharedMemoryPerBlock = (uint)maxShared;
+
         _rmsnormModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "rmsnorm.ptx"));
         _ropeModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "rope.ptx"));
         _swigluModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "swiglu.ptx"));
@@ -313,6 +322,8 @@ public sealed unsafe class CudaKernels : IDisposable
         // Shared: scores[seqKv] + output_accum[headDim] + 1 scratch float
         uint sharedBytes = (uint)((seqKv + headDim + 1) * sizeof(float));
 
+        ThrowIfSharedMemoryExceeded(sharedBytes, seqKv);
+
         CudaDriverApi.cuLaunchKernel(_attentionF32Func,
                 (uint)numBlocks, 1, 1, BlockSize, 1, 1,
                 sharedBytes, stream, (nint)args, 0).ThrowOnError();
@@ -468,6 +479,8 @@ public sealed unsafe class CudaKernels : IDisposable
         int numBlocks = seqQ * numHeads;
         // Shared memory: scores[seqKv] + output_accum[headDim], all float
         uint sharedBytes = (uint)((seqKv + headDim) * sizeof(float));
+
+        ThrowIfSharedMemoryExceeded(sharedBytes, seqKv);
 
         CudaDriverApi.cuLaunchKernel(_attentionFunc,
                 (uint)numBlocks, 1, 1, BlockSize, 1, 1,
@@ -694,6 +707,19 @@ public sealed unsafe class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(func,
                 gridDim, 1, 1, BlockSize, 1, 1,
                 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>
+    /// Throws if the required shared memory exceeds the device limit.
+    /// Prevents silent kernel launch failure for long context lengths.
+    /// </summary>
+    private void ThrowIfSharedMemoryExceeded(uint sharedBytes, int seqKv)
+    {
+        if (sharedBytes > _maxSharedMemoryPerBlock)
+            throw new InvalidOperationException(
+                $"CUDA attention requires {sharedBytes / 1024} KB shared memory for sequence " +
+                $"length {seqKv}, but device supports max {_maxSharedMemoryPerBlock / 1024} KB per block. " +
+                $"Reduce context length or use CPU backend for long contexts.");
     }
 
     /// <inheritdoc/>

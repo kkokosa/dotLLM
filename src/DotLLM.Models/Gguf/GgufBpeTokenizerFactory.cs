@@ -52,6 +52,9 @@ public static class GgufBpeTokenizerFactory
             ? metadata.GetStringArray("tokenizer.ggml.merges")
             : [];
 
-        return BpeTokenizer.CreateTiktoken(tokens, merges, tokenTypes, bosId, eosId);
+        string preType = metadata.GetStringOrDefault("tokenizer.ggml.pre");
+        string? pre = preType.Length > 0 ? preType : null;
+
+        return BpeTokenizer.CreateTiktoken(tokens, merges, tokenTypes, bosId, eosId, pre);
     }
 }

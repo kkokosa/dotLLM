@@ -54,6 +54,9 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuCtxGetCurrent(out nint ctx);
 
+    [LibraryImport(LibName)]
+    internal static partial int cuCtxGetDevice(out int device);
+
     // ── Module (PTX loading) ────────────────────────────────────────
 
     [LibraryImport(LibName)]

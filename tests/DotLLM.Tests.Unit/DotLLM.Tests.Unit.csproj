@@ -14,6 +14,8 @@
     <ProjectReference Include="..\..\src\DotLLM.Cuda\DotLLM.Cuda.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Diagnostics\DotLLM.Diagnostics.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Telemetry\DotLLM.Telemetry.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Server\DotLLM.Server.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.HuggingFace\DotLLM.HuggingFace.csproj" />
   </ItemGroup>
 
   <ItemGroup>
