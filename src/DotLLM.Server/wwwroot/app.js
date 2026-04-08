@@ -9,6 +9,7 @@ const state = {
     config: null,       // from /props
     isGenerating: false,
     verbose: true,
+    showLogprobs: false,
     systemPrompt: '',
     abortController: null,
     toolsEnabled: false,
@@ -198,6 +199,10 @@ async function* streamChat(messages, params) {
     if (params.tools) {
         body.tools = params.tools;
     }
+    if (params.logprobs) {
+        body.logprobs = true;
+        body.top_logprobs = params.top_logprobs || 5;
+    }
 
     const response = await fetch('/v1/chat/completions', {
         method: 'POST',
@@ -230,7 +235,7 @@ async function* streamChat(messages, params) {
                     const choice = chunk.choices?.[0];
 
                     if (choice?.delta?.content) {
-                        yield { type: 'delta', content: choice.delta.content };
+                        yield { type: 'delta', content: choice.delta.content, logprobs: choice?.logprobs?.content };
                     }
                     if (choice?.delta?.tool_calls) {
                         yield { type: 'tool_calls', toolCalls: choice.delta.tool_calls };
@@ -289,6 +294,114 @@ function renderMarkdown(text) {
     html = html.replace(/(?<!<\/pre>)\n(?!<pre)/g, '<br>');
 
     return `<p>${html}</p>`;
+}
+
+// ── LOGPROBS RENDERING ──
+
+function logprobToColor(logprob) {
+    const p = Math.exp(logprob);
+    if (p > 0.9) return 'rgba(34,197,94,0.2)';   // green
+    if (p > 0.7) return 'rgba(132,204,22,0.2)';   // lime
+    if (p > 0.5) return 'rgba(234,179,8,0.2)';    // yellow
+    if (p > 0.3) return 'rgba(249,115,22,0.2)';   // orange
+    return 'rgba(239,68,68,0.2)';                   // red
+}
+
+function logprobDiagnosticClass(entry) {
+    const classes = [];
+    const p = Math.exp(entry.logprob);
+    if (p < 0.1) classes.push('lp-low-confidence');
+    if (entry.top_logprobs && entry.top_logprobs.length >= 2) {
+        const p1 = Math.exp(entry.top_logprobs[0].logprob);
+        const p2 = Math.exp(entry.top_logprobs[1].logprob);
+        if (p1 - p2 < 0.15) classes.push('lp-ambiguous');
+    }
+    if (entry.top_logprobs && entry.top_logprobs.length > 0 && entry.token !== entry.top_logprobs[0].token) {
+        classes.push('lp-sampling-effect');
+    }
+    return classes.join(' ');
+}
+
+function renderTokensWithLogprobs(tokenEntries) {
+    let html = '';
+    for (const entry of tokenEntries) {
+        const color = logprobToColor(entry.logprob);
+        const p = (Math.exp(entry.logprob) * 100).toFixed(1);
+        const diagClass = logprobDiagnosticClass(entry);
+        const escapedToken = entry.text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+        const displayToken = escapedToken.replace(/\n/g, '<br>');
+        html += `<span class="lp-token ${diagClass}" style="background-color:${color}" data-logprob="${entry.logprob}" data-prob="${p}">${displayToken}</span>`;
+    }
+    return html;
+}
+
+function createLogprobTooltip(entry, spanEl) {
+    const existing = document.querySelector('.lp-tooltip');
+    if (existing) existing.remove();
+
+    const p = (Math.exp(entry.logprob) * 100).toFixed(1);
+    let html = `<div class="lp-tooltip-header">"${escapeHtml(entry.text)}" \u2014 logprob: ${entry.logprob.toFixed(3)} (p=${p}%)</div>`;
+    if (entry.top_logprobs && entry.top_logprobs.length > 0) {
+        html += '<div class="lp-tooltip-divider"></div>';
+        html += '<table class="lp-tooltip-table">';
+        for (let i = 0; i < entry.top_logprobs.length; i++) {
+            const alt = entry.top_logprobs[i];
+            const altP = (Math.exp(alt.logprob) * 100).toFixed(1);
+            const isCurrent = alt.token === entry.token;
+            const cls = isCurrent ? ' class="lp-tooltip-current"' : '';
+            const marker = isCurrent ? '\u25b6' : '';
+            html += `<tr${cls}>`
+                + `<td class="lp-tt-marker">${marker}</td>`
+                + `<td class="lp-tt-rank">${i+1}.</td>`
+                + `<td class="lp-tt-token">${escapeHtml(alt.token)}</td>`
+                + `<td class="lp-tt-logprob">${alt.logprob.toFixed(3)}</td>`
+                + `<td class="lp-tt-prob">${altP}%</td>`
+                + `</tr>`;
+        }
+        html += '</table>';
+    }
+
+    const tooltip = document.createElement('div');
+    tooltip.className = 'lp-tooltip';
+    tooltip.innerHTML = html;
+    document.body.appendChild(tooltip);
+
+    const rect = spanEl.getBoundingClientRect();
+    tooltip.style.left = Math.min(rect.left, window.innerWidth - tooltip.offsetWidth - 10) + 'px';
+    tooltip.style.top = (rect.bottom + 4) + 'px';
+    return tooltip;
+}
+
+function escapeHtml(text) {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function createLogprobsLegend() {
+    const el = document.createElement('div');
+    el.className = 'lp-legend';
+    el.innerHTML = `<span class="lp-legend-label">logprobs</span>`;
+
+    const tooltip = document.createElement('div');
+    tooltip.className = 'lp-legend-tooltip';
+    tooltip.innerHTML =
+        `<div class="lp-legend-title">Token confidence</div>` +
+        `<div class="lp-legend-row"><span class="lp-legend-swatch" style="background:rgba(34,197,94,0.35)"></span> &gt;90% — very confident</div>` +
+        `<div class="lp-legend-row"><span class="lp-legend-swatch" style="background:rgba(132,204,22,0.35)"></span> 70–90% — confident</div>` +
+        `<div class="lp-legend-row"><span class="lp-legend-swatch" style="background:rgba(234,179,8,0.35)"></span> 50–70% — moderate</div>` +
+        `<div class="lp-legend-row"><span class="lp-legend-swatch" style="background:rgba(249,115,22,0.35)"></span> 30–50% — uncertain</div>` +
+        `<div class="lp-legend-row"><span class="lp-legend-swatch" style="background:rgba(239,68,68,0.35)"></span> &lt;30% — low confidence</div>` +
+        `<div class="lp-legend-divider"></div>` +
+        `<div class="lp-legend-title">Diagnostic cues</div>` +
+        `<div class="lp-legend-row"><span class="lp-legend-indicator lp-low-confidence">abc</span> red underline — p&lt;10%</div>` +
+        `<div class="lp-legend-row"><span class="lp-legend-indicator lp-ambiguous">abc</span> dashed underline — top-2 gap&lt;15%</div>` +
+        `<div class="lp-legend-row"><span class="lp-legend-indicator lp-sampling-effect">abc</span> wavy underline — chosen \u2260 argmax</div>` +
+        `<div class="lp-legend-divider"></div>` +
+        `<div class="lp-legend-hint">Hover any token to see top-K alternatives</div>`;
+    el.appendChild(tooltip);
+    return el;
 }
 
 // ── MODEL BADGE ──
@@ -654,6 +767,7 @@ function syncSettingsFromState() {
 }
 
 function getSettingsFromUI() {
+    const logprobs = $('#opt-logprobs')?.checked ?? false;
     return {
         temperature: parseFloat($('#opt-temperature').value),
         top_p: parseFloat($('#opt-top-p').value),
@@ -662,6 +776,8 @@ function getSettingsFromUI() {
         repetition_penalty: parseFloat($('#opt-rep-penalty').value),
         max_tokens: parseInt($('#opt-max-tokens').value) || 2048,
         seed: $('#opt-seed').value ? parseInt($('#opt-seed').value) : null,
+        logprobs: logprobs,
+        top_logprobs: logprobs ? (parseInt($('#opt-top-logprobs')?.value) || 5) : 0,
     };
 }
 
@@ -1064,6 +1180,9 @@ async function runGeneration(round) {
     const tools = getToolsForRequest();
     if (tools) params.tools = tools;
 
+    const logprobEntries = [];
+    const useLogprobs = state.showLogprobs && params.logprobs;
+
     try {
         for await (const event of streamChat(apiMessages, params)) {
             if (event.type === 'delta') {
@@ -1072,7 +1191,14 @@ async function runGeneration(round) {
                 }
                 tokenCount++;
                 fullText += event.content;
-                placeholder.contentEl.innerHTML = renderMarkdown(fullText);
+                if (useLogprobs && event.logprobs) {
+                    for (const lp of event.logprobs) {
+                        logprobEntries.push({ text: event.content, token: lp.token, logprob: lp.logprob, top_logprobs: lp.top_logprobs });
+                    }
+                    placeholder.contentEl.innerHTML = renderTokensWithLogprobs(logprobEntries);
+                } else {
+                    placeholder.contentEl.innerHTML = renderMarkdown(fullText);
+                }
                 scrollToBottom();
             } else if (event.type === 'tool_calls') {
                 detectedToolCalls = event.toolCalls;
@@ -1166,13 +1292,25 @@ async function runGeneration(round) {
     }
 
     // Normal (non-tool-call) completion
-    placeholder.contentEl.innerHTML = renderMarkdown(fullText);
+    if (useLogprobs && logprobEntries.length > 0) {
+        placeholder.contentEl.innerHTML = renderTokensWithLogprobs(logprobEntries);
+        // Insert legend between label and content
+        const label = placeholder.bubble.querySelector('.text-accent\\/60');
+        if (label) label.appendChild(createLogprobsLegend());
+    } else {
+        placeholder.contentEl.innerHTML = renderMarkdown(fullText);
+    }
     placeholder.bubble.appendChild(createStatsBar(statsInfo));
     if (state.verbose) {
         placeholder.bubble.appendChild(createVerboseDiagnostics(rawPrompt, fullText));
     }
 
-    state.messages.push({ role: 'assistant', content: fullText, stats: statsInfo, rawPrompt, rawResponse: fullText });
+    const msgIdx = state.messages.length;
+    placeholder.bubble.setAttribute('data-msg-idx', msgIdx);
+    state.messages.push({
+        role: 'assistant', content: fullText, stats: statsInfo, rawPrompt, rawResponse: fullText,
+        logprobs: useLogprobs ? logprobEntries : null,
+    });
 
     // Reset UI
     state.isGenerating = false;
@@ -1603,6 +1741,38 @@ applyConfigBtn.addEventListener('click', async () => {
 $('#opt-verbose').addEventListener('change', (e) => {
     state.verbose = e.target.checked;
     saveConversation();
+});
+
+$('#opt-logprobs').addEventListener('change', (e) => {
+    state.showLogprobs = e.target.checked;
+    const topkRow = $('#logprobs-topk-row');
+    if (topkRow) topkRow.classList.toggle('hidden', !e.target.checked);
+    saveConversation();
+});
+
+// Logprobs tooltip delegation
+document.addEventListener('mouseover', (e) => {
+    const tokenEl = e.target.closest('.lp-token');
+    if (!tokenEl) return;
+    const msgEl = tokenEl.closest('.msg-content');
+    if (!msgEl) return;
+    // Find the logprob entry index
+    const allTokens = msgEl.querySelectorAll('.lp-token');
+    let idx = -1;
+    allTokens.forEach((el, i) => { if (el === tokenEl) idx = i; });
+    // Find the message in state
+    const bubble = tokenEl.closest('[data-msg-idx]');
+    if (!bubble || idx < 0) return;
+    const msgIdx = parseInt(bubble.dataset.msgIdx);
+    const msg = state.messages[msgIdx];
+    if (!msg || !msg.logprobs || !msg.logprobs[idx]) return;
+    createLogprobTooltip(msg.logprobs[idx], tokenEl);
+});
+document.addEventListener('mouseout', (e) => {
+    if (e.target.closest('.lp-token')) {
+        const tooltip = document.querySelector('.lp-tooltip');
+        if (tooltip) tooltip.remove();
+    }
 });
 
 // System prompt

@@ -44,9 +44,9 @@ public readonly record struct InferenceTimings
     public float SpeculativeAcceptanceRate => SpeculativeDraftTokens > 0
         ? Math.Min(1f, (float)SpeculativeAcceptedTokens / SpeculativeDraftTokens) : 0f;
 
-    /// <summary>Prefill throughput in tokens per second.</summary>
-    public double PrefillTokensPerSec => PrefillTokenCount > 0 && PrefillTimeMs > 0
-        ? PrefillTokenCount / (PrefillTimeMs / 1000.0) : 0;
+    /// <summary>Prefill throughput in tokens per second (excludes cached tokens that were not re-processed).</summary>
+    public double PrefillTokensPerSec => (PrefillTokenCount - CachedTokenCount) > 0 && PrefillTimeMs > 0
+        ? (PrefillTokenCount - CachedTokenCount) / (PrefillTimeMs / 1000.0) : 0;
 
     /// <summary>Decode throughput in tokens per second.</summary>
     public double DecodeTokensPerSec => DecodeTokenCount > 0 && DecodeTimeMs > 0

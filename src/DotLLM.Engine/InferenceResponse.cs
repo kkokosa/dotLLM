@@ -25,6 +25,9 @@ public record InferenceResponse
     /// <summary>Timing measurements from the inference run.</summary>
     public InferenceTimings Timings { get; init; }
 
+    /// <summary>Per-token log-probability info for each generated token. Null when logprobs not requested.</summary>
+    public TokenLogprobInfo[]? Logprobs { get; init; }
+
     /// <summary>Parsed tool calls from the generated text. Null if no tool calls were detected.</summary>
     public ToolCall[]? ToolCalls { get; init; }
 }

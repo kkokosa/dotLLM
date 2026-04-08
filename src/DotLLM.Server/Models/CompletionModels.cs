@@ -43,6 +43,12 @@ public sealed record CompletionRequest
 
     [JsonPropertyName("response_format")]
     public JsonElement? ResponseFormat { get; init; }
+
+    [JsonPropertyName("logprobs")]
+    public bool? Logprobs { get; init; }
+
+    [JsonPropertyName("top_logprobs")]
+    public int? TopLogprobs { get; init; }
 }
 
 /// <summary>
@@ -80,6 +86,10 @@ public sealed record CompletionChoiceDto
     [JsonPropertyName("text")]
     public required string Text { get; init; }
 
+    [JsonPropertyName("logprobs")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public LogprobsDto? Logprobs { get; init; }
+
     [JsonPropertyName("finish_reason")]
     public required string FinishReason { get; init; }
 }
@@ -115,6 +125,10 @@ public sealed record CompletionChunkChoiceDto
 
     [JsonPropertyName("text")]
     public required string Text { get; init; }
+
+    [JsonPropertyName("logprobs")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public LogprobsDto? Logprobs { get; init; }
 
     [JsonPropertyName("finish_reason")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

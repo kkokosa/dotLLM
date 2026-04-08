@@ -306,3 +306,86 @@ Content-Type: application/json
     "temperature": 0.7,
     "stream": true
 }
+
+### ──────────────────────────────────────────────────
+### Logprobs
+### ──────────────────────────────────────────────────
+
+### Chat with logprobs (non-streaming) — per-token log-probabilities + top-5 alternatives
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "What is the capital of France?"}
+    ],
+    "max_tokens": 20,
+    "temperature": 0,
+    "logprobs": true,
+    "top_logprobs": 5
+}
+
+###
+
+### Chat with logprobs (streaming) — each SSE chunk includes logprobs.content
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "Count from 1 to 5."}
+    ],
+    "max_tokens": 30,
+    "temperature": 0,
+    "stream": true,
+    "logprobs": true,
+    "top_logprobs": 3
+}
+
+###
+
+### Logprobs with sampling — chosen token may differ from argmax (sampling effect)
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "Write a haiku about the sea."}
+    ],
+    "max_tokens": 40,
+    "temperature": 0.9,
+    "top_p": 0.95,
+    "logprobs": true,
+    "top_logprobs": 5,
+    "seed": 42
+}
+
+###
+
+### Raw completion with logprobs
+POST {{baseUrl}}/v1/completions
+Content-Type: application/json
+
+{
+    "prompt": "The capital of France is",
+    "max_tokens": 10,
+    "temperature": 0,
+    "logprobs": true,
+    "top_logprobs": 3
+}
+
+###
+
+### Logprobs without top alternatives (just per-token logprob)
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+    "messages": [
+        {"role": "user", "content": "Say hello."}
+    ],
+    "max_tokens": 10,
+    "temperature": 0,
+    "logprobs": true,
+    "top_logprobs": 0
+}

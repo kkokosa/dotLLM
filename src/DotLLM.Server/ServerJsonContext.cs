@@ -24,6 +24,7 @@ namespace DotLLM.Server;
 [JsonSerializable(typeof(ModelLoadRequest))]
 [JsonSerializable(typeof(ModelLoadResponse))]
 [JsonSerializable(typeof(TimingsDto))]
+[JsonSerializable(typeof(LogprobsDto))]
 [JsonSerializable(typeof(ModelInspectResponse))]
 [JsonSerializable(typeof(ErrorResponse))]
 [JsonSerializable(typeof(StatusResponse))]

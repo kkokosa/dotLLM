@@ -172,3 +172,159 @@ body {
     color: #22d3ee;
     opacity: 0.7;
 }
+
+/* ── LOGPROBS VISUALIZATION ── */
+
+.lp-token {
+    cursor: pointer;
+    border-radius: 2px;
+    padding: 0 1px;
+    transition: background-color 0.1s;
+    position: relative;
+}
+.lp-token:hover {
+    filter: brightness(1.5);
+    outline: 1px solid rgba(255,255,255,0.2);
+}
+
+/* Diagnostic underlines */
+.lp-low-confidence {
+    text-decoration: underline;
+    text-decoration-color: #ef4444;
+    text-decoration-style: solid;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1.5px;
+}
+.lp-ambiguous {
+    text-decoration: underline;
+    text-decoration-color: #eab308;
+    text-decoration-style: dashed;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1.5px;
+}
+.lp-sampling-effect {
+    text-decoration: underline;
+    text-decoration-color: #a78bfa;
+    text-decoration-style: wavy;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1.5px;
+}
+
+/* Tooltip */
+.lp-tooltip {
+    position: fixed;
+    background: #18181b;
+    border: 1px solid #3f3f46;
+    border-radius: 6px;
+    padding: 8px 10px;
+    z-index: 200;
+    font-size: 0.65rem;
+    line-height: 1.6;
+    color: #a1a1aa;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    max-width: 420px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+.lp-tooltip-header {
+    color: #e4e4e7;
+    font-weight: 500;
+    margin-bottom: 2px;
+}
+.lp-tooltip-divider {
+    border-top: 1px solid #27272a;
+    margin: 4px 0;
+}
+.lp-tooltip-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-variant-numeric: tabular-nums;
+}
+.lp-tooltip-table td {
+    padding: 1px 0;
+    white-space: nowrap;
+}
+.lp-tooltip-table tr.lp-tooltip-current td {
+    color: #22d3ee;
+    font-weight: 500;
+}
+.lp-tt-marker { width: 12px; text-align: center; color: #22d3ee; }
+.lp-tt-rank   { width: 18px; text-align: right; padding-right: 6px; color: #52525b; }
+.lp-tt-token  { padding-left: 2px; padding-right: 10px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.lp-tt-logprob { text-align: right; padding-right: 8px; }
+.lp-tt-prob    { text-align: right; }
+
+/* Legend badge (inline with "assistant" label) */
+.lp-legend {
+    display: inline-block;
+    position: relative;
+    margin-left: 8px;
+    cursor: default;
+    vertical-align: middle;
+}
+.lp-legend-label {
+    font-size: 0.55rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(34,211,238,0.1);
+    border: 1px solid rgba(34,211,238,0.2);
+    color: #22d3ee;
+}
+.lp-legend-tooltip {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    background: #18181b;
+    border: 1px solid #3f3f46;
+    border-radius: 8px;
+    padding: 10px 14px;
+    z-index: 100;
+    min-width: 260px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    font-size: 0.625rem;
+    color: #a1a1aa;
+    white-space: nowrap;
+}
+.lp-legend:hover .lp-legend-tooltip {
+    display: block;
+}
+.lp-legend-title {
+    color: #d4d4d8;
+    font-weight: 600;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+}
+.lp-legend-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    line-height: 1.8;
+}
+.lp-legend-swatch {
+    display: inline-block;
+    width: 14px;
+    height: 10px;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+.lp-legend-indicator {
+    display: inline-block;
+    font-size: 0.625rem;
+    color: #d4d4d8;
+    flex-shrink: 0;
+    width: 28px;
+    text-align: center;
+}
+.lp-legend-divider {
+    border-top: 1px solid #27272a;
+    margin: 5px 0;
+}
+.lp-legend-hint {
+    color: #52525b;
+    font-style: italic;
+    font-size: 0.5625rem;
+}

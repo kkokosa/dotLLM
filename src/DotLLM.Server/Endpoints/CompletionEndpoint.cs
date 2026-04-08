@@ -58,6 +58,10 @@ public static class CompletionEndpoint
             result = generator.Generate(prompt, options);
         }, ct);
 
+        var logprobsDto = result!.Logprobs is { Length: > 0 }
+            ? RequestConverter.ToLogprobsDto(result.Logprobs)
+            : null;
+
         var response = new CompletionResponse
         {
             Id = requestId,
@@ -65,7 +69,8 @@ public static class CompletionEndpoint
             Choices = [new CompletionChoiceDto
             {
                 Index = 0,
-                Text = result!.Text,
+                Text = result.Text,
+                Logprobs = logprobsDto,
                 FinishReason = RequestConverter.ToFinishReasonString(result.FinishReason),
             }],
             Usage = new UsageDto
@@ -93,6 +98,9 @@ public static class CompletionEndpoint
         {
             await foreach (var token in generator.GenerateStreamingTokensAsync(prompt, options, ct))
             {
+                var tokenLogprobs = token.Logprobs.HasValue
+                    ? RequestConverter.ToLogprobsDto(token.Logprobs.Value)
+                    : null;
                 var chunk = new CompletionChunk
                 {
                     Id = requestId,
@@ -100,6 +108,7 @@ public static class CompletionEndpoint
                     Choices = [new CompletionChunkChoiceDto
                     {
                         Text = token.Text,
+                        Logprobs = tokenLogprobs,
                         FinishReason = token.FinishReason.HasValue
                             ? RequestConverter.ToFinishReasonString(token.FinishReason.Value)
                             : null,

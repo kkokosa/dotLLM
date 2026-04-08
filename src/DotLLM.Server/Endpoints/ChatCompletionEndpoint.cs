@@ -116,6 +116,10 @@ public static class ChatCompletionEndpoint
                 : null,
         };
 
+        var logprobsDto = result.Logprobs is { Length: > 0 }
+            ? RequestConverter.ToLogprobsDto(result.Logprobs)
+            : null;
+
         var response = new ChatCompletionResponse
         {
             Id = requestId,
@@ -124,6 +128,7 @@ public static class ChatCompletionEndpoint
             {
                 Index = 0,
                 Message = message,
+                Logprobs = logprobsDto,
                 FinishReason = RequestConverter.ToFinishReasonString(finishReason),
             }],
             Usage = new UsageDto
@@ -178,6 +183,9 @@ public static class ChatCompletionEndpoint
                 {
                     completionTokens++;
                     sb.Append(token.Text);
+                    var tokenLogprobs = token.Logprobs.HasValue
+                        ? RequestConverter.ToLogprobsDto(token.Logprobs.Value)
+                        : null;
                     var contentChunk = new ChatCompletionChunk
                     {
                         Id = requestId,
@@ -185,6 +193,7 @@ public static class ChatCompletionEndpoint
                         Choices = [new ChatChunkChoiceDto
                         {
                             Delta = new ChatDeltaDto { Content = token.Text },
+                            Logprobs = tokenLogprobs,
                         }],
                     };
                     await WriteSseChunk(httpContext, contentChunk, ct);

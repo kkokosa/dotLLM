@@ -26,6 +26,7 @@
   <Folder Name="/samples/">
     <Project Path="samples/DotLLM.Sample.Console/DotLLM.Sample.Console.csproj" />
     <Project Path="samples/DotLLM.Sample.Interpretability/DotLLM.Sample.Interpretability.csproj" />
+    <Project Path="samples/DotLLM.Sample.Logprobs/DotLLM.Sample.Logprobs.csproj" />
     <Project Path="samples/DotLLM.Sample.Server/DotLLM.Sample.Server.csproj" />
     <Project Path="samples/DotLLM.Sample.ToolCalling/DotLLM.Sample.ToolCalling.csproj" />
   </Folder>

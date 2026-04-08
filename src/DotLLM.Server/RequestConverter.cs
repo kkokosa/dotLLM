@@ -53,6 +53,8 @@ public static class RequestConverter
             Seed = request.Seed,
             StopSequences = allStops,
             ResponseFormat = ParseResponseFormat(request.ResponseFormat),
+            Logprobs = request.Logprobs ?? false,
+            TopLogprobs = Math.Clamp(request.TopLogprobs ?? 0, 0, 20),
             Threading = threading,
         };
     }
@@ -77,6 +79,8 @@ public static class RequestConverter
             Seed = request.Seed,
             StopSequences = stops,
             ResponseFormat = ParseResponseFormat(request.ResponseFormat),
+            Logprobs = request.Logprobs ?? false,
+            TopLogprobs = Math.Clamp(request.TopLogprobs ?? 0, 0, 20),
             Threading = threading,
         };
     }
@@ -164,6 +168,48 @@ public static class RequestConverter
     /// Generates a unique request ID in the OpenAI format.
     /// </summary>
     public static string GenerateRequestId() => $"chatcmpl-{Guid.NewGuid():N}";
+
+    /// <summary>
+    /// Converts a single engine <see cref="TokenLogprobInfo"/> to a DTO for one streaming token.
+    /// </summary>
+    public static LogprobsDto ToLogprobsDto(TokenLogprobInfo info)
+    {
+        return new LogprobsDto
+        {
+            Content = [ToTokenLogprobDto(info)]
+        };
+    }
+
+    /// <summary>
+    /// Converts an array of engine <see cref="TokenLogprobInfo"/> to a DTO for a non-streaming response.
+    /// </summary>
+    public static LogprobsDto ToLogprobsDto(TokenLogprobInfo[] infos)
+    {
+        var content = new TokenLogprobDto[infos.Length];
+        for (int i = 0; i < infos.Length; i++)
+            content[i] = ToTokenLogprobDto(infos[i]);
+        return new LogprobsDto { Content = content };
+    }
+
+    private static TokenLogprobDto ToTokenLogprobDto(TokenLogprobInfo info)
+    {
+        TopLogprobDto[] topLogprobs = info.TopLogprobs is { Length: > 0 }
+            ? info.TopLogprobs.Select(t => new TopLogprobDto
+            {
+                Token = t.Token,
+                Logprob = t.Logprob,
+                Bytes = t.Bytes,
+            }).ToArray()
+            : [];
+
+        return new TokenLogprobDto
+        {
+            Token = info.Token,
+            Logprob = info.Logprob,
+            Bytes = info.Bytes,
+            TopLogprobs = topLogprobs,
+        };
+    }
 
     private static void AddRequestStopSequences(List<string> target, JsonElement? stopElement)
     {

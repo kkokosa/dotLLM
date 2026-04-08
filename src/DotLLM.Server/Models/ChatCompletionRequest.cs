@@ -56,6 +56,12 @@ public sealed record ChatCompletionRequest
     [JsonPropertyName("min_p")]
     public float? MinP { get; init; }
 
+    [JsonPropertyName("logprobs")]
+    public bool? Logprobs { get; init; }
+
+    [JsonPropertyName("top_logprobs")]
+    public int? TopLogprobs { get; init; }
+
     [JsonPropertyName("n")]
     public int N { get; init; } = 1;
 }

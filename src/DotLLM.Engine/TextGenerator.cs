@@ -98,6 +98,11 @@ public sealed class TextGenerator
         // Build sampling pipeline
         var pipeline = new SamplerPipeline(options);
 
+        // Logprobs capture setup
+        bool captureLogprobs = options.Logprobs;
+        int topLogprobs = Math.Clamp(options.TopLogprobs, 0, 20);
+        List<TokenLogprobInfo>? logprobsList = captureLogprobs ? new List<TokenLogprobInfo>(maxTokens) : null;
+
         // Build decoding constraint for structured output
         IDecodingConstraint? constraint = options.ResponseFormat switch
         {
@@ -167,7 +172,13 @@ public sealed class TextGenerator
                             var logitSpan = new Span<float>((void*)(prefillLogits.DataPointer + (long)(prefillLen - 1) * vocabSize * sizeof(float)), vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                            float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
                             firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                            if (lsBuf != null)
+                            {
+                                logprobsList!.Add(LogprobsCapture.BuildInfo(lsBuf.AsSpan(0, vocabSize), vocabSize, firstTokenId, topLogprobs, _tokenizer));
+                                ArrayPool<float>.Shared.Return(lsBuf);
+                            }
                             samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                         }
                     }
@@ -191,7 +202,13 @@ public sealed class TextGenerator
                         var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
                         if (constraint != null)
                             TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                        float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
                         firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                        if (lsBuf != null)
+                        {
+                            logprobsList!.Add(LogprobsCapture.BuildInfo(lsBuf.AsSpan(0, vocabSize), vocabSize, firstTokenId, topLogprobs, _tokenizer));
+                            ArrayPool<float>.Shared.Return(lsBuf);
+                        }
                         samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                     }
                 }
@@ -219,15 +236,16 @@ public sealed class TextGenerator
                 finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
                 StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                 return BuildResponse(promptLen, generatedIds, finishReason,
-                    prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache), cachedTokenCount);
+                    prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache), cachedTokenCount,
+                    logprobs: logprobsList?.ToArray());
             }
 
             onTokenGenerated?.Invoke(firstTokenId);
 
             int specDrafted = 0, specAccepted = 0;
 
-            // Decode loop
-            if (_draftModel != null)
+            // Decode loop (speculative decode disabled when logprobs requested — no per-position logit access)
+            if (_draftModel != null && !captureLogprobs)
             {
                 // ── Speculative decode loop ──
                 var specDecoder = new SpeculativeDecoder(
@@ -320,7 +338,13 @@ public sealed class TextGenerator
                             var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                            float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
                             nextTokenId = pipeline.Sample(logitSpan, generatedIds);
+                            if (lsBuf != null)
+                            {
+                                logprobsList!.Add(LogprobsCapture.BuildInfo(lsBuf.AsSpan(0, vocabSize), vocabSize, nextTokenId, topLogprobs, _tokenizer));
+                                ArrayPool<float>.Shared.Return(lsBuf);
+                            }
                             samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                         }
                     }
@@ -349,7 +373,7 @@ public sealed class TextGenerator
             StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
             return BuildResponse(promptLen, generatedIds, finishReason,
                 prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache), cachedTokenCount,
-                specDrafted, specAccepted);
+                specDrafted, specAccepted, logprobsList?.ToArray());
         }
         finally
         {
@@ -393,6 +417,10 @@ public sealed class TextGenerator
 
         // Build sampling pipeline
         var pipeline = new SamplerPipeline(options);
+
+        // Logprobs capture setup
+        bool captureLogprobs = options.Logprobs;
+        int topLogprobs = Math.Clamp(options.TopLogprobs, 0, 20);
 
         // Build decoding constraint for structured output
         IDecodingConstraint? constraint = options.ResponseFormat switch
@@ -439,6 +467,7 @@ public sealed class TextGenerator
             int prefillLen = promptLen - prefillStart;
 
             int firstTokenId;
+            float[]? firstLogSoftmax = null;
             long ts0 = Stopwatch.GetTimestamp();
 
             if (prefillLen > 0)
@@ -463,6 +492,7 @@ public sealed class TextGenerator
                             var logitSpan = new Span<float>((void*)(prefillLogits.DataPointer + (long)(prefillLen - 1) * vocabSize * sizeof(float)), vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                            firstLogSoftmax = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
                             firstTokenId = pipeline.Sample(logitSpan, generatedIds);
                             samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                         }
@@ -487,6 +517,7 @@ public sealed class TextGenerator
                         var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
                         if (constraint != null)
                             TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                        firstLogSoftmax = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
                         firstTokenId = pipeline.Sample(logitSpan, generatedIds);
                         samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                     }
@@ -499,6 +530,15 @@ public sealed class TextGenerator
             }
 
             constraint?.Advance(firstTokenId);
+
+            // Build logprob info for first token
+            TokenLogprobInfo? firstLogprobInfo = null;
+            if (firstLogSoftmax != null)
+            {
+                firstLogprobInfo = LogprobsCapture.BuildInfo(firstLogSoftmax.AsSpan(0, vocabSize), vocabSize, firstTokenId, topLogprobs, _tokenizer);
+                ArrayPool<float>.Shared.Return(firstLogSoftmax);
+                firstLogSoftmax = null;
+            }
 
             // Check stop conditions for first token
             generatedIds.Add(firstTokenId);
@@ -514,14 +554,14 @@ public sealed class TextGenerator
                     generatedIds.RemoveAt(generatedIds.Count - 1);
                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                    yield return new GenerationToken(firstTokenId, string.Empty, fr, timings);
+                    yield return new GenerationToken(firstTokenId, string.Empty, fr, timings, firstLogprobInfo);
                 }
                 else
                 {
                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
                     string text = decodedText[previousDecodeLength..];
-                    yield return new GenerationToken(firstTokenId, text, fr, timings);
+                    yield return new GenerationToken(firstTokenId, text, fr, timings, firstLogprobInfo);
                 }
                 yield break;
             }
@@ -534,16 +574,17 @@ public sealed class TextGenerator
                 {
                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                    yield return new GenerationToken(firstTokenId, text, FinishReason.Length, timings);
+                    yield return new GenerationToken(firstTokenId, text, FinishReason.Length, timings, firstLogprobInfo);
                     yield break;
                 }
                 previousDecodeLength = decodedText.Length;
-                yield return new GenerationToken(firstTokenId, text, null);
+                yield return new GenerationToken(firstTokenId, text, null, Logprobs: firstLogprobInfo);
             }
 
             int specDrafted = 0, specAccepted = 0;
 
-            if (_draftModel != null)
+            // Speculative decode disabled when logprobs requested — no per-position logit access
+            if (_draftModel != null && !captureLogprobs)
             {
                 // ── Speculative decode loop ──
                 var specDecoder = new SpeculativeDecoder(
@@ -650,6 +691,7 @@ public sealed class TextGenerator
 
                     int lastToken = generatedIds[^1];
                     int nextTokenId;
+                    TokenLogprobInfo? tokenLogprob = null;
 
                     long fwdStart = Stopwatch.GetTimestamp();
                     using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
@@ -662,7 +704,13 @@ public sealed class TextGenerator
                             var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                            float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
                             nextTokenId = pipeline.Sample(logitSpan, generatedIds);
+                            if (lsBuf != null)
+                            {
+                                tokenLogprob = LogprobsCapture.BuildInfo(lsBuf.AsSpan(0, vocabSize), vocabSize, nextTokenId, topLogprobs, _tokenizer);
+                                ArrayPool<float>.Shared.Return(lsBuf);
+                            }
                             samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                         }
                     }
@@ -682,14 +730,14 @@ public sealed class TextGenerator
                             generatedIds.RemoveAt(generatedIds.Count - 1);
                             StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                             var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                            yield return new GenerationToken(nextTokenId, string.Empty, fr, timings);
+                            yield return new GenerationToken(nextTokenId, string.Empty, fr, timings, tokenLogprob);
                         }
                         else
                         {
                             StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                             var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
                             string text = decodedText[previousDecodeLength..];
-                            yield return new GenerationToken(nextTokenId, text, fr, timings);
+                            yield return new GenerationToken(nextTokenId, text, fr, timings, tokenLogprob);
                         }
                         yield break;
                     }
@@ -702,11 +750,11 @@ public sealed class TextGenerator
                         {
                             StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                             var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                            yield return new GenerationToken(nextTokenId, text, FinishReason.Length, timings);
+                            yield return new GenerationToken(nextTokenId, text, FinishReason.Length, timings, tokenLogprob);
                             yield break;
                         }
                         previousDecodeLength = decodedText.Length;
-                        yield return new GenerationToken(nextTokenId, text, null);
+                        yield return new GenerationToken(nextTokenId, text, null, Logprobs: tokenLogprob);
                     }
                 }
             }
@@ -870,7 +918,8 @@ public sealed class TextGenerator
     private InferenceResponse BuildResponse(int promptLen, List<int> generatedIds,
         FinishReason finishReason, long prefillTicks, long decodeTicks, long samplerTicks,
         long kvCacheBytes = 0, int cachedTokenCount = 0,
-        int specDrafted = 0, int specAccepted = 0)
+        int specDrafted = 0, int specAccepted = 0,
+        TokenLogprobInfo[]? logprobs = null)
     {
         string text = generatedIds.Count > 0
             ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false)
@@ -883,7 +932,8 @@ public sealed class TextGenerator
             FinishReason = finishReason,
             PromptTokenCount = promptLen,
             GeneratedTokenCount = generatedIds.Count,
-            Timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvCacheBytes, cachedTokenCount, specDrafted, specAccepted)
+            Timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvCacheBytes, cachedTokenCount, specDrafted, specAccepted),
+            Logprobs = logprobs,
         };
     }
 

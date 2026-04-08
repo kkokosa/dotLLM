@@ -37,6 +37,10 @@ public sealed record ChatChoiceDto
     [JsonPropertyName("message")]
     public required ChatMessageDto Message { get; init; }
 
+    [JsonPropertyName("logprobs")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public LogprobsDto? Logprobs { get; init; }
+
     [JsonPropertyName("finish_reason")]
     public required string FinishReason { get; init; }
 }

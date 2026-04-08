@@ -146,10 +146,20 @@
             <!-- Display section -->
             <section class="mb-6">
                 <h3 class="text-[10px] uppercase tracking-wider text-zinc-500 mb-3">Display</h3>
-                <label class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+                <label class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer mb-2">
                     <input id="opt-verbose" type="checkbox" class="accent-cyan-500" checked>
                     <span>Verbose diagnostics (show full prompt)</span>
                 </label>
+                <label class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer mb-2">
+                    <input id="opt-logprobs" type="checkbox" class="accent-cyan-500">
+                    <span>Show logprobs (color-coded token confidence)</span>
+                </label>
+                <div id="logprobs-topk-row" class="ml-6 hidden">
+                    <label class="flex items-center gap-2 text-xs text-zinc-500">
+                        <span>Top alternatives:</span>
+                        <input id="opt-top-logprobs" type="number" min="0" max="20" value="5" class="w-14 bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-300 focus:outline-none focus:border-zinc-500">
+                    </label>
+                </div>
             </section>
         </div>
     </aside>

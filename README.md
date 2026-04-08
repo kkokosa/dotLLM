@@ -407,6 +407,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 
 ## News
 
+- **2026-04** — **Phase 7 begins**: Logprobs — OpenAI-compatible `logprobs: true` + `top_logprobs: N` (0-20) on `/v1/chat/completions` and `/v1/completions`. Per-token log-softmax captured before sampling, returned in both streaming SSE chunks and non-streaming responses. Chat UI gains opt-in logprobs visualization: color-coded token confidence (green/lime/yellow/orange/red), hover tooltips with top-K alternatives and probabilities, diagnostic cues for low confidence, ambiguity, and sampling effect. `DotLLM.Sample.Logprobs` console sample with ANSI-colored output ([#101](https://github.com/kkokosa/dotLLM/issues/101))
 - **2026-04** — **Phase 6 complete**: Speculative decoding — draft-verify-accept loop with modified rejection sampling. A small draft model proposes K candidate tokens; the target model verifies in one batched forward pass. Greedy fast-path for temperature=0. `IKvCache.Rollback()` for KV-cache truncation on rejection. `IDecodingConstraint.Clone()` for constraint rollback. Serve UI gains draft model selector and K slider. `--speculative-model` and `--speculative-k` CLI options. Speculative acceptance rate in response timings ([#98](https://github.com/kkokosa/dotLLM/issues/98))
 - **2026-04** — Paged KV-cache — block-based KV-cache memory management (the allocation half of PagedAttention): shared block pool, block tables, ref counting, copy-on-write. Foundation for advanced prefix sharing (step 37, hard requirement) and speculative decoding (step 43, cheap rollback/fork). Attention kernels still operate on contiguous buffers via staging-buffer gather — true paged attention kernels are a future step. `--paged` (opt-in for CLI), on by default for `serve`. `--no-ui` flag for API-only hosting. See [docs/KV_CACHE.md](docs/KV_CACHE.md) ([#96](https://github.com/kkokosa/dotLLM/issues/96))
 - **2026-04** — Native AOT (experimental) — opt-in `dotnet publish -p:PublishAot=true` produces a single-file `dotllm` binary with ~50ms startup (vs ~500ms JIT). Source-generated JSON serialization across all projects, `CreateSlimBuilder` for ASP.NET, `TrimmerRoots.xml` for Spectre.Console.Cli type preservation. JIT remains default for best throughput (Dynamic PGO). See [docs/AOT.md](docs/AOT.md) ([#94](https://github.com/kkokosa/dotLLM/issues/94))
@@ -453,7 +454,7 @@ There is no NuGet package yet -- the project is in early development. Follow the
 | **4 — GPU Acceleration** | CUDA backend, CPU/GPU hybrid, KV-cache quantization | Done (3/3) |
 | **5 — Constrained Decoding & API** | JSON mode, JSON Schema, regex/CFG, tool calling, OpenAI API server, chat UI, prompt caching | Done (7/7) |
 | **6 — Improved Serving** | Warm-up, NativeAOT, paged KV-cache, speculative decoding | Done (4/4) |
-| **7 — Diagnostics & Interpretability** | Logprobs, hook system, logit lens, SAE integration, LoRA adapters | Planned (0/5) |
+| **7 — Diagnostics & Interpretability** | Logprobs, hook system, logit lens, SAE integration, LoRA adapters | In Progress (1/5) |
 | **8 — Model Expansion** | MLA attention, ALiBi, SmolLM3, Gemma 4, Mixture of Experts | Planned (0/5) |
 | **9 — Production Serving** | Continuous batching, prefix sharing, advanced scheduling, rate limiting, metrics & tracing | Planned (0/5) |
 

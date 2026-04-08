@@ -86,6 +86,10 @@ public sealed record ChatChunkChoiceDto
     [JsonPropertyName("delta")]
     public required ChatDeltaDto Delta { get; init; }
 
+    [JsonPropertyName("logprobs")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public LogprobsDto? Logprobs { get; init; }
+
     [JsonPropertyName("finish_reason")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FinishReason { get; init; }

@@ -60,6 +60,12 @@ public record InferenceOptions
     /// </summary>
     public ResponseFormat? ResponseFormat { get; init; }
 
+    /// <summary>Whether to return log-probabilities for each generated token.</summary>
+    public bool Logprobs { get; init; }
+
+    /// <summary>Number of top alternative tokens to include per position (0-20). Only used when <see cref="Logprobs"/> is true.</summary>
+    public int TopLogprobs { get; init; }
+
     /// <summary>CPU threading configuration for parallel inference. Default: auto (all cores).</summary>
     public ThreadingConfig Threading { get; init; } = ThreadingConfig.Auto;
 }
