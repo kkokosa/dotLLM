@@ -94,6 +94,13 @@ internal static class BpeCore
         return result;
     }
 
+    /// <summary>Appends non-deleted symbol token IDs to an existing list (zero intermediate allocation).</summary>
+    internal static void CollectTokenIds(Symbol[] symbols, int symbolCount, List<int> dest)
+    {
+        for (int i = 0; i < symbolCount; i++)
+            if (!symbols[i].Deleted) dest.Add(symbols[i].TokenId);
+    }
+
     /// <summary>Appends buffered bytes as UTF-8 to <paramref name="sb"/> and resets the count.</summary>
     internal static void FlushByteBuffer(StringBuilder sb, byte[]? buffer, ref int count)
     {

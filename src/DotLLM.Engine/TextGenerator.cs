@@ -186,9 +186,9 @@ public sealed class TextGenerator
                             long samplerStart = Stopwatch.GetTimestamp();
                             // GPU/hybrid models return [1, vocabSize] (last token only);
                             // CPU model returns [seqLen, vocabSize]. Use actual shape to index.
+                            float* logitPtr = (float*)prefillLogits.DataPointer;
                             int logitRows = prefillLogits.Shape[0];
-                            long lastRowOffset = (long)(logitRows - 1) * vocabSize * sizeof(float);
-                            var logitSpan = new Span<float>((void*)(prefillLogits.DataPointer + lastRowOffset), vocabSize);
+                            var logitSpan = new Span<float>(logitPtr + (long)(logitRows - 1) * vocabSize, vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
                             var (tid, lp) = SampleWithLogprobs(logitSpan);
@@ -513,9 +513,9 @@ public sealed class TextGenerator
                             long samplerStart = Stopwatch.GetTimestamp();
                             // GPU/hybrid models return [1, vocabSize] (last token only);
                             // CPU model returns [seqLen, vocabSize]. Use actual shape to index.
+                            float* logitPtr = (float*)prefillLogits.DataPointer;
                             int logitRows = prefillLogits.Shape[0];
-                            long lastRowOffset = (long)(logitRows - 1) * vocabSize * sizeof(float);
-                            var logitSpan = new Span<float>((void*)(prefillLogits.DataPointer + lastRowOffset), vocabSize);
+                            var logitSpan = new Span<float>(logitPtr + (long)(logitRows - 1) * vocabSize, vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
                             (firstTokenId, firstLogprobInfo) = SampleWithLogprobs(logitSpan);

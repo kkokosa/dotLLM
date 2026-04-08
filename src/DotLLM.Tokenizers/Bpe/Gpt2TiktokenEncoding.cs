@@ -142,12 +142,12 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
 
                 // Pre-tokenize: split at word/punctuation boundaries using the model's regex,
                 // then BPE each segment independently so merges cannot cross boundaries.
-                var result = new List<int>();
+                // Tokens are collected directly into the list — no intermediate int[] per segment.
+                var result = new List<int>(gpt2Text.Length);
                 foreach (var match in _preRegex.EnumerateMatches(gpt2Text))
                 {
                     var segment = gpt2Text.Slice(match.Index, match.Length);
-                    int[] segTokens = EncodeSegment(segment);
-                    result.AddRange(segTokens);
+                    EncodeSegmentInto(segment, result);
                 }
                 return result.ToArray();
             }
@@ -179,6 +179,30 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
 
             RunMergeLoop(symbols, queue);
             return BpeCore.CollectTokenIds(symbols, symbolCount);
+        }
+        finally
+        {
+            ArrayPool<Symbol>.Shared.Return(symbols, clearArray: false);
+        }
+    }
+
+    /// <summary>
+    /// Encodes a segment and appends token IDs directly to <paramref name="dest"/>,
+    /// avoiding intermediate <c>int[]</c> allocation per segment.
+    /// </summary>
+    private void EncodeSegmentInto(ReadOnlySpan<char> segment, List<int> dest)
+    {
+        Symbol[] symbols = ArrayPool<Symbol>.Shared.Rent(segment.Length * 2);
+        try
+        {
+            int symbolCount = BuildInitialSymbols(segment, symbols);
+
+            var queue = new PriorityQueue<BgramEntry, (int, int)>(symbolCount);
+            for (int i = 0; i < symbolCount - 1; i++)
+                TryEnqueueBigram(symbols, i, i + 1, queue);
+
+            RunMergeLoop(symbols, queue);
+            BpeCore.CollectTokenIds(symbols, symbolCount, dest);
         }
         finally
         {
