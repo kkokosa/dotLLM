@@ -46,6 +46,8 @@ public static class ModelManagementEndpoint
                         CacheTypeV = request.CacheTypeV ?? state.Options.CacheTypeV,
                         Threads = request.Threads ?? state.Options.Threads,
                         DecodeThreads = request.DecodeThreads ?? state.Options.DecodeThreads,
+                        SpeculativeModel = request.SpeculativeModel,
+                        SpeculativeCandidates = request.SpeculativeK ?? state.Options.SpeculativeCandidates,
                         ModelId = Path.GetFileNameWithoutExtension(resolvedPath),
                     };
                     var newState = await Task.Run(() => ServerStartup.LoadModel(resolvedPath, newOptions), ct);
@@ -63,6 +65,9 @@ public static class ModelManagementEndpoint
                     state.PrefixCache = newState.PrefixCache;
                     state.LoadedModelPath = resolvedPath;
                     state.CurrentGguf = newState.CurrentGguf;
+                    state.DraftModel = newState.DraftModel;
+                    state.DraftModelPath = newState.DraftModelPath;
+                    state.DraftGguf = newState.DraftGguf;
 
                     await Task.CompletedTask;
                 }, ct);
@@ -73,9 +78,9 @@ public static class ModelManagementEndpoint
                     Model = request.Model,
                 });
             }
-            catch
+            catch (Exception ex)
             {
-                return Results.StatusCode(500);
+                return Results.BadRequest(new ErrorResponse { Error = ex.Message });
             }
         });
     }

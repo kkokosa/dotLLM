@@ -25,6 +25,7 @@ public static class PropsEndpoint
                 GpuLayers = state.Options.GpuLayers,
                 Threads = threading.EffectiveThreadCount,
                 SamplingDefaults = ToDto(state.SamplingDefaults),
+                DraftModelPath = string.IsNullOrEmpty(state.DraftModelPath) ? null : state.DraftModelPath,
                 IsReady = state.IsReady,
             };
         });

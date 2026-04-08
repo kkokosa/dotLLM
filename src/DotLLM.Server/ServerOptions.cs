@@ -49,6 +49,12 @@ public sealed record ServerOptions
     /// <summary>Warm-up configuration for JIT pre-compilation and CUDA kernel loading.</summary>
     public WarmupOptions Warmup { get; init; } = WarmupOptions.Default;
 
+    /// <summary>Draft model for speculative decoding. Null = disabled.</summary>
+    public string? SpeculativeModel { get; init; }
+
+    /// <summary>Number of draft candidates per speculative step (K).</summary>
+    public int SpeculativeCandidates { get; init; } = 5;
+
     /// <summary>Model display name (derived from file path).</summary>
     public string ModelId { get; init; } = "default";
 

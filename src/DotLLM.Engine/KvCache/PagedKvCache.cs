@@ -166,6 +166,14 @@ public sealed unsafe class PagedKvCache : IKvCache
         _blockTable.SetCurrentLength(length);
     }
 
+    /// <inheritdoc/>
+    public void Rollback(int length)
+    {
+        if ((uint)length > (uint)_blockTable.CurrentLength)
+            throw new ArgumentOutOfRangeException(nameof(length));
+        _blockTable.SetCurrentLength(length);
+    }
+
     /// <summary>
     /// Gathers block data into a contiguous staging buffer for attention kernel consumption.
     /// Copies block-by-block in logical order.

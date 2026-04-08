@@ -48,4 +48,12 @@ public interface IKvCache : IDisposable
     /// <summary>Gets cached values as a zero-allocation <see cref="TensorRef"/>.</summary>
     /// <param name="layerIndex">Transformer layer index.</param>
     TensorRef GetValuesRef(int layerIndex);
+
+    /// <summary>
+    /// Rolls back the cache to the given length, discarding entries beyond that position.
+    /// Used by speculative decoding to discard rejected draft tokens.
+    /// Allocated memory is retained and overwritten on subsequent Update calls.
+    /// </summary>
+    /// <param name="length">The new current length (must be &lt;= <see cref="CurrentLength"/>).</param>
+    void Rollback(int length);
 }

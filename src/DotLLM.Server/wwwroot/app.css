@@ -61,7 +61,7 @@ body {
 .msg-content li { margin: 0.125rem 0; }
 .msg-content a { color: #22d3ee; text-decoration: underline; }
 
-/* Stats bar */
+/* Stats bar (inline text) */
 .stats-bar {
     font-size: 0.65rem;
     line-height: 1.4;
@@ -70,8 +70,70 @@ body {
     padding-top: 0.375rem;
     margin-top: 0.5rem;
     font-variant-numeric: tabular-nums;
+    position: relative;
+    cursor: default;
 }
 .stats-bar .stat-label { color: #52525b; }
+
+/* Stats hover card */
+.stats-hover {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    background: #18181b;
+    border: 1px solid #3f3f46;
+    border-radius: 8px;
+    padding: 10px 14px;
+    z-index: 50;
+    min-width: 320px;
+    max-width: 420px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    font-size: 0.625rem;
+    color: #a1a1aa;
+    font-variant-numeric: tabular-nums;
+}
+.stats-bar:hover .stats-hover { display: block; }
+
+.stats-hover .sh-seg-bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: #27272a; margin-bottom: 2px; }
+.stats-hover .sh-seg { height: 100%; position: relative; }
+.stats-hover .sh-seg-cached  { background: #22d3ee; }
+.stats-hover .sh-seg-prompt  { background: #a78bfa; }
+.stats-hover .sh-seg-decode  { background: #34d399; }
+
+/* Numbered markers on bar */
+.stats-hover .sh-marker {
+    position: absolute; top: -3px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #27272a; border: 1.5px solid #52525b;
+    color: #d4d4d8; font-size: 0.5rem; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1; pointer-events: none;
+}
+
+/* Legend table below bar */
+.stats-hover .sh-legend { font-size: 0.5625rem; margin-top: 10px; display: flex; flex-direction: column; gap: 3px; }
+.stats-hover .sh-legend-row { display: flex; align-items: center; gap: 6px; }
+.stats-hover .sh-legend-num {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #27272a; border: 1.5px solid #52525b;
+    color: #d4d4d8; font-size: 0.5rem; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.stats-hover .sh-legend-color { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.stats-hover .sh-legend-text { color: #a1a1aa; }
+.stats-hover .sh-legend-val { color: #d4d4d8; font-weight: 500; margin-left: auto; padding-left: 8px; white-space: nowrap; }
+
+.stats-hover .sh-divider { border-top: 1px solid #27272a; margin: 6px 0; }
+
+.stats-hover .sh-row { display: flex; justify-content: space-between; gap: 1rem; }
+.stats-hover .sh-metric { display: flex; flex-direction: column; align-items: center; }
+.stats-hover .sh-val { color: #d4d4d8; font-weight: 500; font-size: 0.6875rem; }
+.stats-hover .sh-desc { color: #52525b; font-size: 0.5625rem; }
+
+.stats-hover .sh-spec-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #27272a; margin-top: 4px; }
+.stats-hover .sh-spec-yes { background: #34d399; }
+.stats-hover .sh-spec-no  { background: #f87171; }
 
 /* Settings / Tools panel slide transition */
 #settings-panel.open,

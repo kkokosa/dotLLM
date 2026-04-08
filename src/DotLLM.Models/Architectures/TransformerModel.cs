@@ -130,7 +130,7 @@ public sealed unsafe class TransformerModel : IModel
     /// <param name="positions">Position indices for each token.</param>
     /// <param name="deviceId">Target device for computation.</param>
     /// <param name="kvCache">Optional KV-cache. When null, behaves identically to the uncached forward pass.</param>
-    /// <returns>Logits tensor of shape [1, vocab_size] for the last token.</returns>
+    /// <returns>Logits tensor of shape [seqLen, vocab_size] for all input positions.</returns>
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
                            int deviceId, IKvCache? kvCache)
     {
@@ -407,19 +407,19 @@ public sealed unsafe class TransformerModel : IModel
             new Span<float>(normOutT, hiddenSize).CopyTo(new Span<float>(hiddenT, hiddenSize));
         }
 
-        // 4. LM HEAD — only last token
-        float* lastHidden = hidden + (seqLen - 1) * hiddenSize;
+        // 4. LM HEAD — all positions (enables batched speculative decoding verification)
         {
             var rwOutput = _weights.RepackedOutput ?? default;
-            GemvInterleaved(_weights.OutputWeight, _weights.OutputQuantType,
-                lastHidden, logits, _weights.OutputOutputDim, _weights.OutputInputDim, in rwOutput);
+            GemmInterleaved(_weights.OutputWeight, _weights.OutputQuantType,
+                hidden, logits, _weights.OutputOutputDim, _weights.OutputInputDim, seqLen,
+                null, in rwOutput);
         }
 
-        // 5. RETURN [1, vocabSize] — copy logits to new tensor (caller owns disposal)
-        var shape = new TensorShape(1, vocabSize);
+        // 5. RETURN [seqLen, vocabSize]
+        var shape = new TensorShape(seqLen, vocabSize);
         var result = UnmanagedTensor.Allocate(shape, DType.Float32, deviceId);
-        new Span<float>(logits, vocabSize).CopyTo(
-            new Span<float>((void*)result.DataPointer, vocabSize));
+        new Span<float>(logits, seqLen * vocabSize).CopyTo(
+            new Span<float>((void*)result.DataPointer, seqLen * vocabSize));
 
         return result;
     }

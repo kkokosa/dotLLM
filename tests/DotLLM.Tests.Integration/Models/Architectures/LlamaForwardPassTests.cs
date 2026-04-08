@@ -141,11 +141,11 @@ public class LlamaForwardPassTests
         {
             using ITensor logits = model.Forward(currentIds, currentPositions, deviceId: -1);
 
-            // Take argmax of logits (already last-token-only: [1, vocabSize])
+            // Take argmax of last position's logits: [seqLen, vocabSize] → last row
             int nextTokenId;
             unsafe
             {
-                float* logitPtr = (float*)logits.DataPointer;
+                float* logitPtr = (float*)(logits.DataPointer + (long)(currentIds.Length - 1) * vocabSize * sizeof(float));
                 nextTokenId = ArgMax(new ReadOnlySpan<float>(logitPtr, vocabSize));
             }
 
@@ -194,7 +194,7 @@ public class LlamaForwardPassTests
         int nextTokenId;
         unsafe
         {
-            float* logitPtr = (float*)logits.DataPointer;
+            float* logitPtr = (float*)(logits.DataPointer + (long)(tokenIds.Length - 1) * vocabSize * sizeof(float));
             nextTokenId = ArgMax(new ReadOnlySpan<float>(logitPtr, vocabSize));
         }
 
@@ -260,7 +260,8 @@ public class LlamaForwardPassTests
             int nextId;
             unsafe
             {
-                nextId = ArgMax(new ReadOnlySpan<float>((void*)logits.DataPointer, vocabSize));
+                float* ptr = (float*)(logits.DataPointer + (long)(currentIds.Length - 1) * vocabSize * sizeof(float));
+                nextId = ArgMax(new ReadOnlySpan<float>(ptr, vocabSize));
             }
             uncachedTokens.Add(nextId);
 
@@ -284,14 +285,15 @@ public class LlamaForwardPassTests
         for (int i = 0; i < cacheSize; i++)
             positions[i] = i;
 
-        // Prefill
+        // Prefill — read last position's logits from [seqLen, vocabSize] output
         using (ITensor prefillLogits = model.Forward(
             promptIds, positions.AsSpan(0, promptIds.Length), -1, kvCache))
         {
             int firstToken;
             unsafe
             {
-                firstToken = ArgMax(new ReadOnlySpan<float>((void*)prefillLogits.DataPointer, vocabSize));
+                float* ptr = (float*)(prefillLogits.DataPointer + (long)(promptIds.Length - 1) * vocabSize * sizeof(float));
+                firstToken = ArgMax(new ReadOnlySpan<float>(ptr, vocabSize));
             }
             cachedTokens.Add(firstToken);
         }
@@ -342,7 +344,8 @@ public class LlamaForwardPassTests
         int nextTokenId;
         unsafe
         {
-            nextTokenId = ArgMax(new ReadOnlySpan<float>((void*)prefillLogits.DataPointer, vocabSize));
+            float* ptr = (float*)(prefillLogits.DataPointer + (long)(promptIds.Length - 1) * vocabSize * sizeof(float));
+            nextTokenId = ArgMax(new ReadOnlySpan<float>(ptr, vocabSize));
         }
 
         string predicted = tokenizer.DecodeToken(nextTokenId).Trim();

@@ -26,6 +26,9 @@ public sealed class TextGenerator
     private readonly ITokenizer _tokenizer;
     private readonly Func<ModelConfig, int, Core.Attention.IKvCache>? _kvCacheFactory;
     private readonly PrefixCache? _prefixCache;
+    private readonly IModel? _draftModel;
+    private readonly Func<ModelConfig, int, Core.Attention.IKvCache>? _draftKvCacheFactory;
+    private readonly int _speculativeCandidates;
 
     /// <summary>
     /// Creates a new text generator.
@@ -36,14 +39,23 @@ public sealed class TextGenerator
     /// Parameters: (config, maxSeqLen).</param>
     /// <param name="prefixCache">Optional prefix cache for reusing KV-cache state across calls.
     /// When provided, the KV-cache is kept alive between calls and only new suffix tokens are prefilled.</param>
+    /// <param name="draftModel">Optional draft model for speculative decoding.</param>
+    /// <param name="draftKvCacheFactory">Optional factory for creating the draft model's KV-cache.</param>
+    /// <param name="speculativeCandidates">Number of draft tokens per speculative step (K). Default 5.</param>
     public TextGenerator(IModel model, ITokenizer tokenizer,
                           Func<ModelConfig, int, Core.Attention.IKvCache>? kvCacheFactory = null,
-                          PrefixCache? prefixCache = null)
+                          PrefixCache? prefixCache = null,
+                          IModel? draftModel = null,
+                          Func<ModelConfig, int, Core.Attention.IKvCache>? draftKvCacheFactory = null,
+                          int speculativeCandidates = 5)
     {
         _model = model;
         _tokenizer = tokenizer;
         _kvCacheFactory = kvCacheFactory;
         _prefixCache = prefixCache;
+        _draftModel = draftModel;
+        _draftKvCacheFactory = draftKvCacheFactory;
+        _speculativeCandidates = speculativeCandidates;
     }
 
     /// <summary>
@@ -152,7 +164,7 @@ public sealed class TextGenerator
                         unsafe
                         {
                             long samplerStart = Stopwatch.GetTimestamp();
-                            var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
+                            var logitSpan = new Span<float>((void*)(prefillLogits.DataPointer + (long)(prefillLen - 1) * vocabSize * sizeof(float)), vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
                             firstTokenId = pipeline.Sample(logitSpan, generatedIds);
@@ -212,55 +224,132 @@ public sealed class TextGenerator
 
             onTokenGenerated?.Invoke(firstTokenId);
 
-            // Decode loop: one token at a time
-            for (int step = 1; step < maxTokens; step++)
+            int specDrafted = 0, specAccepted = 0;
+
+            // Decode loop
+            if (_draftModel != null)
             {
-                int pos = promptLen + step - 1;
-                if (pos >= cacheSize)
-                    break;
-
-                int lastToken = generatedIds[^1];
-                int nextTokenId;
-
-                long fwdStart = Stopwatch.GetTimestamp();
-                using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
+                // ── Speculative decode loop ──
+                var specDecoder = new SpeculativeDecoder(
+                    greedy: options.Temperature <= 0f, seed: options.Seed);
+                Core.Attention.IKvCache draftKvCache = AllocateDraftKvCache(cacheSize);
+                int[] specBuffer = ArrayPool<int>.Shared.Rent(_speculativeCandidates + 1);
+                try
                 {
-                    decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
+                    // Prefill draft model with prompt
+                    PrefillDraftModel(promptIds, draftKvCache);
 
-                    unsafe
+                    int step = 1;
+                    while (step < maxTokens)
                     {
-                        long samplerStart = Stopwatch.GetTimestamp();
-                        var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
-                        if (constraint != null)
-                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                        nextTokenId = pipeline.Sample(logitSpan, generatedIds);
-                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                        int pos = promptLen + step - 1;
+                        if (pos >= cacheSize) break;
+
+                        int remaining = maxTokens - step;
+                        int k = Math.Min(_speculativeCandidates, remaining);
+
+                        var result = specDecoder.DraftAndVerify(
+                            _model, _draftModel, kvCache, draftKvCache,
+                            pipeline, generatedIds, constraint,
+                            pos, vocabSize, _draftModel.Config.VocabSize, k, specBuffer);
+
+                        if (result.AcceptedCount == 0) break;
+
+                        decodeTicks += result.DraftTicks + result.VerifyTicks;
+                        specDrafted += result.DraftedCount;
+
+                        // Constraint is already advanced inside DraftAndVerify — do NOT advance again here.
+                        // Only count tokens that actually make it into output (stop conditions may discard some).
+                        bool shouldBreak = false;
+                        for (int i = 0; i < result.AcceptedCount; i++)
+                        {
+                            int tokenId = specBuffer[i];
+                            generatedIds.Add(tokenId);
+                            decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
+
+                            stopResult = CheckStopConditions(stopConditions, tokenId, generatedIds, decodedText);
+                            if (stopResult != StopResult.Continue)
+                            {
+                                if (stopResult == StopResult.Stop)
+                                    generatedIds.RemoveAt(generatedIds.Count - 1);
+                                else
+                                {
+                                    specAccepted++;
+                                    onTokenGenerated?.Invoke(tokenId);
+                                }
+
+                                finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+                                shouldBreak = true;
+                                break;
+                            }
+
+                            specAccepted++;
+                            onTokenGenerated?.Invoke(tokenId);
+                            step++;
+                        }
+
+                        if (shouldBreak) break;
                     }
                 }
-
-                constraint?.Advance(nextTokenId);
-
-                generatedIds.Add(nextTokenId);
-                decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
-
-                stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
-                if (stopResult != StopResult.Continue)
+                finally
                 {
-                    if (stopResult == StopResult.Stop)
-                        generatedIds.RemoveAt(generatedIds.Count - 1);
-                    else
-                        onTokenGenerated?.Invoke(nextTokenId);
-
-                    finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
-                    break;
+                    draftKvCache.Dispose();
+                    ArrayPool<int>.Shared.Return(specBuffer);
                 }
+            }
+            else
+            {
+                // ── Standard decode loop: one token at a time ──
+                for (int step = 1; step < maxTokens; step++)
+                {
+                    int pos = promptLen + step - 1;
+                    if (pos >= cacheSize)
+                        break;
 
-                onTokenGenerated?.Invoke(nextTokenId);
+                    int lastToken = generatedIds[^1];
+                    int nextTokenId;
+
+                    long fwdStart = Stopwatch.GetTimestamp();
+                    using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
+                    {
+                        decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
+
+                        unsafe
+                        {
+                            long samplerStart = Stopwatch.GetTimestamp();
+                            var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
+                            if (constraint != null)
+                                TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                            nextTokenId = pipeline.Sample(logitSpan, generatedIds);
+                            samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                        }
+                    }
+
+                    constraint?.Advance(nextTokenId);
+
+                    generatedIds.Add(nextTokenId);
+                    decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
+
+                    stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
+                    if (stopResult != StopResult.Continue)
+                    {
+                        if (stopResult == StopResult.Stop)
+                            generatedIds.RemoveAt(generatedIds.Count - 1);
+                        else
+                            onTokenGenerated?.Invoke(nextTokenId);
+
+                        finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+                        break;
+                    }
+
+                    onTokenGenerated?.Invoke(nextTokenId);
+                }
             }
 
             StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
             return BuildResponse(promptLen, generatedIds, finishReason,
-                prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache), cachedTokenCount);
+                prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache), cachedTokenCount,
+                specDrafted, specAccepted);
         }
         finally
         {
@@ -371,7 +460,7 @@ public sealed class TextGenerator
                         unsafe
                         {
                             long samplerStart = Stopwatch.GetTimestamp();
-                            var logitSpan = new Span<float>((void*)prefillLogits.DataPointer, vocabSize);
+                            var logitSpan = new Span<float>((void*)(prefillLogits.DataPointer + (long)(prefillLen - 1) * vocabSize * sizeof(float)), vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
                             firstTokenId = pipeline.Sample(logitSpan, generatedIds);
@@ -452,74 +541,173 @@ public sealed class TextGenerator
                 yield return new GenerationToken(firstTokenId, text, null);
             }
 
-            // Decode loop: one token at a time
-            for (int step = 1; step < maxTokens; step++)
+            int specDrafted = 0, specAccepted = 0;
+
+            if (_draftModel != null)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                int pos = promptLen + step - 1;
-                if (pos >= cacheSize)
-                    break;
-
-                int lastToken = generatedIds[^1];
-                int nextTokenId;
-
-                long fwdStart = Stopwatch.GetTimestamp();
-                using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
+                // ── Speculative decode loop ──
+                var specDecoder = new SpeculativeDecoder(
+                    greedy: options.Temperature <= 0f, seed: options.Seed);
+                Core.Attention.IKvCache draftKvCache = AllocateDraftKvCache(cacheSize);
+                int[] specBuffer = ArrayPool<int>.Shared.Rent(_speculativeCandidates + 1);
+                try
                 {
-                    decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
+                    PrefillDraftModel(promptIds, draftKvCache);
 
-                    unsafe
+                    int step = 1;
+                    while (step < maxTokens)
                     {
-                        long samplerStart = Stopwatch.GetTimestamp();
-                        var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
-                        if (constraint != null)
-                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                        nextTokenId = pipeline.Sample(logitSpan, generatedIds);
-                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        int pos = promptLen + step - 1;
+                        if (pos >= cacheSize) break;
+
+                        int remaining = maxTokens - step;
+                        int kk = Math.Min(_speculativeCandidates, remaining);
+
+                        var result = specDecoder.DraftAndVerify(
+                            _model, _draftModel, kvCache, draftKvCache,
+                            pipeline, generatedIds, constraint,
+                            pos, vocabSize, _draftModel.Config.VocabSize, kk, specBuffer);
+
+                        if (result.AcceptedCount == 0) break;
+
+                        decodeTicks += result.DraftTicks + result.VerifyTicks;
+                        specDrafted += result.DraftedCount;
+
+                        // Constraint is already advanced inside DraftAndVerify — do NOT advance again here.
+                        // Only count tokens that actually make it into output.
+                        bool shouldBreak = false;
+                        for (int i = 0; i < result.AcceptedCount; i++)
+                        {
+                            int tokenId = specBuffer[i];
+                            generatedIds.Add(tokenId);
+                            decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
+
+                            stopResult = CheckStopConditions(stopConditions, tokenId, generatedIds, decodedText);
+                            if (stopResult != StopResult.Continue)
+                            {
+                                var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+                                if (stopResult == StopResult.Stop)
+                                {
+                                    generatedIds.RemoveAt(generatedIds.Count - 1);
+                                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
+                                    yield return new GenerationToken(tokenId, string.Empty, fr, timings);
+                                }
+                                else
+                                {
+                                    specAccepted++;
+                                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
+                                    string text = decodedText[previousDecodeLength..];
+                                    yield return new GenerationToken(tokenId, text, fr, timings);
+                                }
+                                shouldBreak = true;
+                                yield break;
+                            }
+
+                            specAccepted++;
+
+                            // Yield each accepted token
+                            {
+                                bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
+                                string text = decodedText[previousDecodeLength..];
+                                if (isLastStep && i == result.AcceptedCount - 1)
+                                {
+                                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
+                                    yield return new GenerationToken(tokenId, text, FinishReason.Length, timings);
+                                    shouldBreak = true;
+                                    break;
+                                }
+                                previousDecodeLength = decodedText.Length;
+                                yield return new GenerationToken(tokenId, text, null);
+                            }
+
+                            step++;
+                        }
+
+                        if (shouldBreak) yield break;
                     }
                 }
-
-                constraint?.Advance(nextTokenId);
-
-                generatedIds.Add(nextTokenId);
-                decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
-
-                stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
-                if (stopResult != StopResult.Continue)
+                finally
                 {
-                    var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
-
-                    if (stopResult == StopResult.Stop)
-                    {
-                        generatedIds.RemoveAt(generatedIds.Count - 1);
-                        StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
-                        var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                        yield return new GenerationToken(nextTokenId, string.Empty, fr, timings);
-                    }
-                    else
-                    {
-                        StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
-                        var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                        string text = decodedText[previousDecodeLength..];
-                        yield return new GenerationToken(nextTokenId, text, fr, timings);
-                    }
-                    yield break;
+                    draftKvCache.Dispose();
+                    ArrayPool<int>.Shared.Return(specBuffer);
                 }
-
-                // Yield token — attach finish reason if this is the last iteration
+            }
+            else
+            {
+                // ── Standard decode loop: one token at a time ──
+                for (int step = 1; step < maxTokens; step++)
                 {
-                    bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
-                    string text = decodedText[previousDecodeLength..];
-                    if (isLastStep)
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    int pos = promptLen + step - 1;
+                    if (pos >= cacheSize)
+                        break;
+
+                    int lastToken = generatedIds[^1];
+                    int nextTokenId;
+
+                    long fwdStart = Stopwatch.GetTimestamp();
+                    using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
                     {
-                        StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
-                        var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                        yield return new GenerationToken(nextTokenId, text, FinishReason.Length, timings);
+                        decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
+
+                        unsafe
+                        {
+                            long samplerStart = Stopwatch.GetTimestamp();
+                            var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
+                            if (constraint != null)
+                                TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                            nextTokenId = pipeline.Sample(logitSpan, generatedIds);
+                            samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                        }
+                    }
+
+                    constraint?.Advance(nextTokenId);
+
+                    generatedIds.Add(nextTokenId);
+                    decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
+
+                    stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds, decodedText);
+                    if (stopResult != StopResult.Continue)
+                    {
+                        var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+
+                        if (stopResult == StopResult.Stop)
+                        {
+                            generatedIds.RemoveAt(generatedIds.Count - 1);
+                            StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                            var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
+                            yield return new GenerationToken(nextTokenId, string.Empty, fr, timings);
+                        }
+                        else
+                        {
+                            StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                            var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
+                            string text = decodedText[previousDecodeLength..];
+                            yield return new GenerationToken(nextTokenId, text, fr, timings);
+                        }
                         yield break;
                     }
-                    previousDecodeLength = decodedText.Length;
-                    yield return new GenerationToken(nextTokenId, text, null);
+
+                    // Yield token — attach finish reason if this is the last iteration
+                    {
+                        bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
+                        string text = decodedText[previousDecodeLength..];
+                        if (isLastStep)
+                        {
+                            StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                            var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
+                            yield return new GenerationToken(nextTokenId, text, FinishReason.Length, timings);
+                            yield break;
+                        }
+                        previousDecodeLength = decodedText.Length;
+                        yield return new GenerationToken(nextTokenId, text, null);
+                    }
                 }
             }
         }
@@ -643,9 +831,46 @@ public sealed class TextGenerator
         return StopResult.Continue;
     }
 
+    /// <summary>
+    /// Prefills the draft model with the full prompt.
+    /// </summary>
+    private void PrefillDraftModel(int[] promptIds, Core.Attention.IKvCache draftKvCache)
+    {
+        int promptLen = promptIds.Length;
+        int[] positions = ArrayPool<int>.Shared.Rent(promptLen);
+        try
+        {
+            for (int i = 0; i < promptLen; i++)
+                positions[i] = i;
+
+            using ITensor _ = _draftModel!.Forward(promptIds, positions.AsSpan(0, promptLen),
+                deviceId: -1, draftKvCache);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(positions);
+        }
+    }
+
+    /// <summary>
+    /// Allocates a KV-cache for the draft model.
+    /// </summary>
+    private Core.Attention.IKvCache AllocateDraftKvCache(int cacheSize)
+    {
+        if (_draftKvCacheFactory != null)
+            return _draftKvCacheFactory(_draftModel!.Config, cacheSize);
+
+        return new SimpleKvCache(
+            _draftModel!.Config.NumLayers,
+            _draftModel.Config.NumKvHeads,
+            _draftModel.Config.HeadDim,
+            cacheSize);
+    }
+
     private InferenceResponse BuildResponse(int promptLen, List<int> generatedIds,
         FinishReason finishReason, long prefillTicks, long decodeTicks, long samplerTicks,
-        long kvCacheBytes = 0, int cachedTokenCount = 0)
+        long kvCacheBytes = 0, int cachedTokenCount = 0,
+        int specDrafted = 0, int specAccepted = 0)
     {
         string text = generatedIds.Count > 0
             ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false)
@@ -658,13 +883,13 @@ public sealed class TextGenerator
             FinishReason = finishReason,
             PromptTokenCount = promptLen,
             GeneratedTokenCount = generatedIds.Count,
-            Timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvCacheBytes, cachedTokenCount)
+            Timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvCacheBytes, cachedTokenCount, specDrafted, specAccepted)
         };
     }
 
     private static InferenceTimings BuildTimings(int promptLen, int generatedCount,
         long prefillTicks, long decodeTicks, long samplerTicks, long kvCacheBytes = 0,
-        int cachedTokenCount = 0)
+        int cachedTokenCount = 0, int specDrafted = 0, int specAccepted = 0)
     {
         double tickFreq = Stopwatch.Frequency;
         int decodeSteps = generatedCount > 1 ? generatedCount - 1 : 0;
@@ -677,7 +902,9 @@ public sealed class TextGenerator
             PrefillTokenCount = promptLen,
             DecodeTokenCount = decodeSteps,
             KvCacheBytes = kvCacheBytes,
-            CachedTokenCount = cachedTokenCount
+            CachedTokenCount = cachedTokenCount,
+            SpeculativeDraftTokens = specDrafted,
+            SpeculativeAcceptedTokens = specAccepted
         };
     }
 

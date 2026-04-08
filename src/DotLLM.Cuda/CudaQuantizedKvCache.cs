@@ -294,6 +294,16 @@ public sealed class CudaQuantizedKvCache : IQuantizedKvCache
                _valuesWindow != null ? _valuesWindow[layerIndex] : 0);
 
     /// <inheritdoc/>
+    public void Rollback(int length)
+    {
+        if ((uint)length > (uint)_currentLength)
+            throw new ArgumentOutOfRangeException(nameof(length));
+        _currentLength = length;
+        if (_quantizedLength > length)
+            _quantizedLength = length;
+    }
+
+    /// <inheritdoc/>
     public void Dispose()
     {
         for (int i = 0; i < _numLayers; i++)

@@ -157,6 +157,17 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [Description("Tool definitions: JSON array string or file path (prefixed with @). " +
                      "When provided, the prompt is formatted via the model's chat template with tool definitions.")]
         public string? Tools { get; set; }
+
+        /// <summary>Draft model for speculative decoding.</summary>
+        [CommandOption("--speculative-model")]
+        [Description("Path or HuggingFace repo ID for a draft model. Enables speculative decoding for faster generation. Must share vocabulary with the main model.")]
+        public string? SpeculativeModel { get; set; }
+
+        /// <summary>Number of draft candidates per speculative step.</summary>
+        [CommandOption("--speculative-k")]
+        [Description("Number of draft tokens per speculative step (K). Default 5.")]
+        [DefaultValue(5)]
+        public int SpeculativeK { get; set; } = 5;
     }
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
@@ -352,7 +363,42 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                     kvConfig.KeyDType, kvConfig.ValueDType, kvConfig.MixedPrecisionWindowSize);
             }
 
-            var generator = new TextGenerator(model, tokenizer, kvFactory);
+            // Load speculative draft model if requested
+            IModel? draftModel = null;
+            GgufFile? draftGguf = null;
+            if (!string.IsNullOrEmpty(settings.SpeculativeModel))
+            {
+                var draftPath = GgufFileResolver.Resolve(settings.SpeculativeModel, null);
+                if (draftPath is null)
+                {
+                    if (!settings.Json)
+                        AnsiConsole.MarkupLine("[red]Speculative draft model not found.[/]");
+                    else
+                        Console.Error.WriteLine("Error: Speculative draft model not found.");
+                    return 1;
+                }
+
+                draftGguf = GgufFile.Open(draftPath);
+                var draftConfig = GgufModelConfigExtractor.Extract(draftGguf.Metadata);
+                if (!DotLLM.Engine.SpeculativeConstants.AreVocabsCompatible(config.VocabSize, draftConfig.VocabSize))
+                {
+                    var msg = $"Draft model vocab size ({draftConfig.VocabSize}) differs from target ({config.VocabSize}) by more than {DotLLM.Engine.SpeculativeConstants.MaxVocabSizeDifference} tokens.";
+                    if (!settings.Json)
+                        AnsiConsole.MarkupLine($"[red]{Markup.Escape(msg)}[/]");
+                    else
+                        Console.Error.WriteLine($"Error: {msg}");
+                    return 1;
+                }
+
+                draftModel = TransformerModel.LoadFromGguf(draftGguf, draftConfig,
+                    new ThreadingConfig(settings.Threads, settings.DecodeThreads));
+
+                if (!settings.Json)
+                    AnsiConsole.MarkupLine($"[dim]Speculative decoding: K={settings.SpeculativeK}, draft={System.IO.Path.GetFileName(draftPath)}[/]");
+            }
+
+            var generator = new TextGenerator(model, tokenizer, kvFactory,
+                draftModel: draftModel, speculativeCandidates: settings.SpeculativeK);
             var totalSw = Stopwatch.StartNew();
             int generated = 0;
             InferenceTimings timings = default;
@@ -458,6 +504,10 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                         TotalMs = Math.Round(totalMs, 1),
                         PrefillTokS = Math.Round(prefillTokPerSec, 2),
                         DecodeTokS = Math.Round(decodeTokPerSec, 2),
+                        GeneratedTokens = generated,
+                        SpeculativeDraftTokens = timings.SpeculativeDraftTokens,
+                        SpeculativeAcceptedTokens = timings.SpeculativeAcceptedTokens,
+                        SpeculativeAcceptanceRate = timings.SpeculativeAcceptanceRate,
                     },
                     Memory = new RunMemoryDto
                     {

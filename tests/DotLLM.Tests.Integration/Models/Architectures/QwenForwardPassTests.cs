@@ -187,7 +187,7 @@ public class QwenForwardPassTests
             int nextTokenId;
             unsafe
             {
-                float* logitPtr = (float*)logits.DataPointer;
+                float* logitPtr = (float*)(logits.DataPointer + (long)(tokenIds.Length - 1) * vocabSize * sizeof(float));
                 nextTokenId = ArgMax(new ReadOnlySpan<float>(logitPtr, vocabSize));
             }
 

@@ -261,6 +261,16 @@ public sealed unsafe class QuantizedKvCache : IQuantizedKvCache
     }
 
     /// <inheritdoc/>
+    public void Rollback(int length)
+    {
+        if ((uint)length > (uint)_currentLength)
+            throw new ArgumentOutOfRangeException(nameof(length));
+        _currentLength = length;
+        if (_quantizedLength > length)
+            _quantizedLength = length;
+    }
+
+    /// <inheritdoc/>
     public ITensor GetKeys(int layerIndex) =>
         throw new NotSupportedException("Use IQuantizedKvCache methods for quantized cache access.");
 
