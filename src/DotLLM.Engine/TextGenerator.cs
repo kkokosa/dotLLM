@@ -233,6 +233,7 @@ public sealed class TextGenerator
                 var specDecoder = new SpeculativeDecoder(
                     greedy: options.Temperature <= 0f, seed: options.Seed);
                 Core.Attention.IKvCache draftKvCache = AllocateDraftKvCache(cacheSize);
+                int[] specBuffer = ArrayPool<int>.Shared.Rent(_speculativeCandidates + 1);
                 try
                 {
                     // Prefill draft model with prompt
@@ -250,7 +251,7 @@ public sealed class TextGenerator
                         var result = specDecoder.DraftAndVerify(
                             _model, _draftModel, kvCache, draftKvCache,
                             pipeline, generatedIds, constraint,
-                            pos, vocabSize, _draftModel.Config.VocabSize, k);
+                            pos, vocabSize, _draftModel.Config.VocabSize, k, specBuffer);
 
                         if (result.AcceptedCount == 0) break;
 
@@ -262,7 +263,7 @@ public sealed class TextGenerator
                         bool shouldBreak = false;
                         for (int i = 0; i < result.AcceptedCount; i++)
                         {
-                            int tokenId = result.AcceptedTokenIds[i];
+                            int tokenId = specBuffer[i];
                             generatedIds.Add(tokenId);
                             decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
 
@@ -293,6 +294,7 @@ public sealed class TextGenerator
                 finally
                 {
                     draftKvCache.Dispose();
+                    ArrayPool<int>.Shared.Return(specBuffer);
                 }
             }
             else
@@ -547,6 +549,7 @@ public sealed class TextGenerator
                 var specDecoder = new SpeculativeDecoder(
                     greedy: options.Temperature <= 0f, seed: options.Seed);
                 Core.Attention.IKvCache draftKvCache = AllocateDraftKvCache(cacheSize);
+                int[] specBuffer = ArrayPool<int>.Shared.Rent(_speculativeCandidates + 1);
                 try
                 {
                     PrefillDraftModel(promptIds, draftKvCache);
@@ -565,7 +568,7 @@ public sealed class TextGenerator
                         var result = specDecoder.DraftAndVerify(
                             _model, _draftModel, kvCache, draftKvCache,
                             pipeline, generatedIds, constraint,
-                            pos, vocabSize, _draftModel.Config.VocabSize, kk);
+                            pos, vocabSize, _draftModel.Config.VocabSize, kk, specBuffer);
 
                         if (result.AcceptedCount == 0) break;
 
@@ -577,7 +580,7 @@ public sealed class TextGenerator
                         bool shouldBreak = false;
                         for (int i = 0; i < result.AcceptedCount; i++)
                         {
-                            int tokenId = result.AcceptedTokenIds[i];
+                            int tokenId = specBuffer[i];
                             generatedIds.Add(tokenId);
                             decodedText = _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false);
 
@@ -631,6 +634,7 @@ public sealed class TextGenerator
                 finally
                 {
                     draftKvCache.Dispose();
+                    ArrayPool<int>.Shared.Return(specBuffer);
                 }
             }
             else

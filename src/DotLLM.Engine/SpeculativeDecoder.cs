@@ -21,6 +21,7 @@ namespace DotLLM.Engine;
 /// Supports draft models with slightly different vocab sizes (up to 128 token difference,
 /// matching llama.cpp's tolerance). Probability comparison uses the shared vocab range;
 /// tokens beyond the draft's vocab can only be produced by the target (as corrected/bonus tokens).
+/// Zero-allocation on the hot path: all buffers are caller-owned or pool-rented, no per-call arrays.
 /// </remarks>
 public sealed class SpeculativeDecoder : ISpeculativeDecoder
 {
@@ -50,7 +51,8 @@ public sealed class SpeculativeDecoder : ISpeculativeDecoder
         int position,
         int targetVocabSize,
         int draftVocabSize,
-        int numCandidates)
+        int numCandidates,
+        Span<int> outputBuffer)
     {
         // Clamp K to remaining cache capacity
         int maxPos = Math.Min(kvCacheTarget.MaxLength, kvCacheDraft.MaxLength);
@@ -63,11 +65,9 @@ public sealed class SpeculativeDecoder : ISpeculativeDecoder
 
         int lastToken = generatedIds[^1];
 
-        // Allocate storage for draft tokens and their probability distributions
+        // Flat buffer for draft probabilities: k rows × sharedVocab columns
         int[] draftTokens = ArrayPool<int>.Shared.Rent(k);
-        float[][] draftProbs = new float[k][];
-        for (int i = 0; i < k; i++)
-            draftProbs[i] = ArrayPool<float>.Shared.Rent(sharedVocab);
+        float[] draftProbsFlat = ArrayPool<float>.Shared.Rent(k * sharedVocab);
 
         // Clone constraint for draft phase
         IDecodingConstraint? draftConstraint = constraint?.Clone();
@@ -78,181 +78,178 @@ public sealed class SpeculativeDecoder : ISpeculativeDecoder
         try
         {
             // ── Draft Phase ──
-            // Run draft model K times autoregressively
+            // Guard generatedIds against exceptions during draft forwards
+            int originalGenCount = generatedIds.Count;
             int draftToken = lastToken;
-            for (int i = 0; i < k; i++)
+            try
             {
-                int pos = position + i;
-
-                long fwdStart = Stopwatch.GetTimestamp();
-                using ITensor draftLogits = draftModel.Forward([draftToken], [pos], deviceId: -1, kvCacheDraft);
-                draftTicks += Stopwatch.GetTimestamp() - fwdStart;
-
-                unsafe
+                for (int i = 0; i < k; i++)
                 {
-                    var logitSpan = new Span<float>((void*)draftLogits.DataPointer, draftVocabSize);
+                    int pos = position + i;
 
-                    // Apply constraint mask to draft
-                    if (draftConstraint != null)
-                        TokenMaskApplier.Apply(logitSpan, draftConstraint.GetAllowedTokens());
+                    long fwdStart = Stopwatch.GetTimestamp();
+                    using ITensor draftLogits = draftModel.Forward([draftToken], [pos], deviceId: -1, kvCacheDraft);
+                    draftTicks += Stopwatch.GetTimestamp() - fwdStart;
 
-                    // Store draft probabilities over shared range only
-                    TensorPrimitives.SoftMax(logitSpan.Slice(0, sharedVocab),
-                        draftProbs[i].AsSpan(0, sharedVocab));
+                    unsafe
+                    {
+                        var logitSpan = new Span<float>((void*)draftLogits.DataPointer, draftVocabSize);
 
-                    // Sample draft token (from full draft vocab)
-                    draftToken = pipeline.Sample(logitSpan, generatedIds);
+                        if (draftConstraint != null)
+                            TokenMaskApplier.Apply(logitSpan, draftConstraint.GetAllowedTokens());
+
+                        // Store draft probabilities in flat buffer (shared range only)
+                        var probSlice = draftProbsFlat.AsSpan(i * sharedVocab, sharedVocab);
+                        TensorPrimitives.SoftMax(logitSpan.Slice(0, sharedVocab), probSlice);
+
+                        draftToken = pipeline.Sample(logitSpan, generatedIds);
+                    }
+
+                    draftTokens[i] = draftToken;
+                    draftConstraint?.Advance(draftToken);
+
+                    // Temporarily add to generatedIds for repetition penalty context
+                    generatedIds.Add(draftToken);
                 }
-
-                draftTokens[i] = draftToken;
-                draftConstraint?.Advance(draftToken);
-
-                // Temporarily add to generatedIds for repetition penalty context
-                generatedIds.Add(draftToken);
             }
-
-            // Remove the draft tokens from generatedIds (they were temporary)
-            generatedIds.RemoveRange(generatedIds.Count - k, k);
+            finally
+            {
+                // Restore generatedIds even if Forward threw mid-loop
+                if (generatedIds.Count > originalGenCount)
+                    generatedIds.RemoveRange(originalGenCount, generatedIds.Count - originalGenCount);
+            }
 
             // ── Verify Phase (single batched forward pass) ──
             int verifyLen = k + 1;
-            int[] verifyTokens = ArrayPool<int>.Shared.Rent(verifyLen);
-            int[] verifyPositions = ArrayPool<int>.Shared.Rent(verifyLen);
 
-            try
+            // Stackalloc for small buffers (K is typically 3-10)
+            Span<int> verifyTokens = verifyLen <= 16 ? stackalloc int[verifyLen] : new int[verifyLen];
+            Span<int> verifyPositions = verifyLen <= 16 ? stackalloc int[verifyLen] : new int[verifyLen];
+
+            verifyTokens[0] = lastToken;
+            verifyPositions[0] = position;
+            for (int i = 0; i < k; i++)
             {
-                verifyTokens[0] = lastToken;
-                verifyPositions[0] = position;
-                for (int i = 0; i < k; i++)
+                verifyTokens[i + 1] = draftTokens[i];
+                verifyPositions[i + 1] = position + i + 1;
+            }
+
+            int actualVerifyLen = Math.Min(verifyLen, maxPos - position);
+            if (actualVerifyLen < 1)
+                return default;
+
+            long verifyStart = Stopwatch.GetTimestamp();
+            using ITensor targetLogits = targetModel.Forward(
+                verifyTokens.Slice(0, actualVerifyLen),
+                verifyPositions.Slice(0, actualVerifyLen),
+                deviceId: -1, kvCacheTarget);
+            verifyTicks = Stopwatch.GetTimestamp() - verifyStart;
+
+            // ── Accept/Reject Phase ──
+            int acceptedCount = 0;
+
+            unsafe
+            {
+                nint basePtr = targetLogits.DataPointer;
+
+                for (int i = 0; i < Math.Min(k, actualVerifyLen); i++)
                 {
-                    verifyTokens[i + 1] = draftTokens[i];
-                    verifyPositions[i + 1] = position + i + 1;
-                }
+                    int draftTok = draftTokens[i];
+                    var targetLogitSpan = new Span<float>(
+                        (void*)(basePtr + (long)i * targetVocabSize * sizeof(float)), targetVocabSize);
 
-                int actualVerifyLen = Math.Min(verifyLen, maxPos - position);
-                if (actualVerifyLen < 1)
-                    return default;
+                    if (constraint != null)
+                        TokenMaskApplier.Apply(targetLogitSpan, constraint.GetAllowedTokens());
 
-                long verifyStart = Stopwatch.GetTimestamp();
-                using ITensor targetLogits = targetModel.Forward(
-                    verifyTokens.AsSpan(0, actualVerifyLen),
-                    verifyPositions.AsSpan(0, actualVerifyLen),
-                    deviceId: -1, kvCacheTarget);
-                verifyTicks = Stopwatch.GetTimestamp() - verifyStart;
-
-                // ── Accept/Reject Phase ──
-                int[] accepted = new int[k + 1];
-                int acceptedCount = 0;
-
-                unsafe
-                {
-                    nint basePtr = targetLogits.DataPointer;
-
-                    for (int i = 0; i < Math.Min(k, actualVerifyLen); i++)
+                    // If draft token is beyond shared range, auto-reject
+                    if (draftTok >= sharedVocab)
                     {
-                        int draftTok = draftTokens[i];
-                        var targetLogitSpan = new Span<float>(
-                            (void*)(basePtr + (long)i * targetVocabSize * sizeof(float)), targetVocabSize);
+                        int corrected = _greedy
+                            ? TensorPrimitives.IndexOfMax(targetLogitSpan)
+                            : SampleFromLogits(targetLogitSpan);
+                        outputBuffer[acceptedCount++] = corrected;
+                        constraint?.Advance(corrected);
+                        RollbackCaches(kvCacheTarget, kvCacheDraft, position + acceptedCount, k);
+                        return new SpeculativeResult(acceptedCount, draftTicks, verifyTicks, k);
+                    }
 
-                        if (constraint != null)
-                            TokenMaskApplier.Apply(targetLogitSpan, constraint.GetAllowedTokens());
+                    var draftProbSlice = draftProbsFlat.AsSpan(i * sharedVocab, sharedVocab);
 
-                        // If draft token is beyond shared range, it can't match — auto-reject
-                        if (draftTok >= sharedVocab)
+                    if (_greedy)
+                    {
+                        int targetArgmax = TensorPrimitives.IndexOfMax(targetLogitSpan);
+                        if (draftTok == targetArgmax)
                         {
-                            int corrected = _greedy
-                                ? TensorPrimitives.IndexOfMax(targetLogitSpan)
-                                : SampleFromLogits(targetLogitSpan);
-                            accepted[acceptedCount++] = corrected;
-                            constraint?.Advance(corrected);
-                            RollbackCaches(kvCacheTarget, kvCacheDraft, position + acceptedCount, k);
-                            return BuildResult(accepted, acceptedCount, draftTicks, verifyTicks, k);
+                            outputBuffer[acceptedCount++] = draftTok;
+                            constraint?.Advance(draftTok);
                         }
-
-                        if (_greedy)
+                        else
                         {
-                            int targetArgmax = TensorPrimitives.IndexOfMax(targetLogitSpan);
-                            if (draftTok == targetArgmax)
+                            outputBuffer[acceptedCount++] = targetArgmax;
+                            constraint?.Advance(targetArgmax);
+                            RollbackCaches(kvCacheTarget, kvCacheDraft, position + acceptedCount, k);
+                            return new SpeculativeResult(acceptedCount, draftTicks, verifyTicks, k);
+                        }
+                    }
+                    else
+                    {
+                        float[] targetProbs = ArrayPool<float>.Shared.Rent(targetVocabSize);
+                        try
+                        {
+                            TensorPrimitives.SoftMax(targetLogitSpan, targetProbs.AsSpan(0, targetVocabSize));
+
+                            float p = targetProbs[draftTok];
+                            float q = draftProbSlice[draftTok];
+                            float acceptanceProb = q > 0 ? Math.Min(1.0f, p / q) : 0f;
+
+                            if ((float)_rng.NextDouble() < acceptanceProb)
                             {
-                                accepted[acceptedCount++] = draftTok;
+                                outputBuffer[acceptedCount++] = draftTok;
                                 constraint?.Advance(draftTok);
                             }
                             else
                             {
-                                accepted[acceptedCount++] = targetArgmax;
-                                constraint?.Advance(targetArgmax);
+                                int corrected = SampleCorrected(
+                                    targetProbs.AsSpan(0, targetVocabSize),
+                                    draftProbSlice,
+                                    targetVocabSize, sharedVocab);
+                                outputBuffer[acceptedCount++] = corrected;
+                                constraint?.Advance(corrected);
                                 RollbackCaches(kvCacheTarget, kvCacheDraft, position + acceptedCount, k);
-                                return BuildResult(accepted, acceptedCount, draftTicks, verifyTicks, k);
+                                return new SpeculativeResult(acceptedCount, draftTicks, verifyTicks, k);
                             }
                         }
-                        else
+                        finally
                         {
-                            // Probabilistic acceptance over shared vocab range
-                            float[] targetProbs = ArrayPool<float>.Shared.Rent(targetVocabSize);
-                            try
-                            {
-                                TensorPrimitives.SoftMax(targetLogitSpan, targetProbs.AsSpan(0, targetVocabSize));
-
-                                float p = targetProbs[draftTok];
-                                float q = draftProbs[i][draftTok]; // draft probs are over sharedVocab
-                                float acceptanceProb = q > 0 ? Math.Min(1.0f, p / q) : 0f;
-
-                                if ((float)_rng.NextDouble() < acceptanceProb)
-                                {
-                                    accepted[acceptedCount++] = draftTok;
-                                    constraint?.Advance(draftTok);
-                                }
-                                else
-                                {
-                                    // Sample corrected token from full target vocab
-                                    int corrected = SampleCorrected(
-                                        targetProbs.AsSpan(0, targetVocabSize),
-                                        draftProbs[i].AsSpan(0, sharedVocab),
-                                        targetVocabSize, sharedVocab);
-                                    accepted[acceptedCount++] = corrected;
-                                    constraint?.Advance(corrected);
-                                    RollbackCaches(kvCacheTarget, kvCacheDraft, position + acceptedCount, k);
-                                    return BuildResult(accepted, acceptedCount, draftTicks, verifyTicks, k);
-                                }
-                            }
-                            finally
-                            {
-                                ArrayPool<float>.Shared.Return(targetProbs);
-                            }
+                            ArrayPool<float>.Shared.Return(targetProbs);
                         }
-                    }
-
-                    // All K accepted — sample bonus token from full target vocab
-                    if (actualVerifyLen > k)
-                    {
-                        var bonusLogitSpan = new Span<float>(
-                            (void*)(basePtr + (long)k * targetVocabSize * sizeof(float)), targetVocabSize);
-
-                        if (constraint != null)
-                            TokenMaskApplier.Apply(bonusLogitSpan, constraint.GetAllowedTokens());
-
-                        int bonusToken = _greedy
-                            ? TensorPrimitives.IndexOfMax(bonusLogitSpan)
-                            : SampleFromLogits(bonusLogitSpan);
-
-                        accepted[acceptedCount++] = bonusToken;
                     }
                 }
 
-                RollbackCaches(kvCacheTarget, kvCacheDraft, position + acceptedCount, k);
-                return BuildResult(accepted, acceptedCount, draftTicks, verifyTicks, k);
+                // All K accepted — sample bonus token from full target vocab
+                if (actualVerifyLen > k)
+                {
+                    var bonusLogitSpan = new Span<float>(
+                        (void*)(basePtr + (long)k * targetVocabSize * sizeof(float)), targetVocabSize);
+
+                    if (constraint != null)
+                        TokenMaskApplier.Apply(bonusLogitSpan, constraint.GetAllowedTokens());
+
+                    int bonusToken = _greedy
+                        ? TensorPrimitives.IndexOfMax(bonusLogitSpan)
+                        : SampleFromLogits(bonusLogitSpan);
+
+                    outputBuffer[acceptedCount++] = bonusToken;
+                }
             }
-            finally
-            {
-                ArrayPool<int>.Shared.Return(verifyTokens);
-                ArrayPool<int>.Shared.Return(verifyPositions);
-            }
+
+            RollbackCaches(kvCacheTarget, kvCacheDraft, position + acceptedCount, k);
+            return new SpeculativeResult(acceptedCount, draftTicks, verifyTicks, k);
         }
         finally
         {
             ArrayPool<int>.Shared.Return(draftTokens);
-            for (int i = 0; i < k; i++)
-                ArrayPool<float>.Shared.Return(draftProbs[i]);
+            ArrayPool<float>.Shared.Return(draftProbsFlat);
         }
     }
 
@@ -268,13 +265,11 @@ public sealed class SpeculativeDecoder : ISpeculativeDecoder
         try
         {
             float sum = 0;
-            // Shared range: max(0, p - q)
             for (int i = 0; i < sharedVocab; i++)
             {
                 corrected[i] = Math.Max(0, targetProbs[i] - draftProbs[i]);
                 sum += corrected[i];
             }
-            // Target-only range: p passes through (q = 0)
             for (int i = sharedVocab; i < targetVocabSize; i++)
             {
                 corrected[i] = Math.Max(0, targetProbs[i]);
@@ -359,8 +354,4 @@ public sealed class SpeculativeDecoder : ISpeculativeDecoder
         if (draftEnd <= draft.CurrentLength)
             draft.Rollback(draftEnd);
     }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static SpeculativeResult BuildResult(int[] accepted, int count, long draftTicks, long verifyTicks, int k) =>
-        new(accepted[..count], count, draftTicks, verifyTicks, k);
 }

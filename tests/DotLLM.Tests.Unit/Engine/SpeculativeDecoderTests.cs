@@ -46,13 +46,16 @@ public sealed class SpeculativeDecoderTests
         PrefillCache(targetCache, target);
         PrefillCache(draftCache, draft);
 
+        Span<int> outputBuffer = stackalloc int[k + 1];
         var result = decoder.DraftAndVerify(
             target, draft, targetCache, draftCache,
             pipeline, generatedIds, constraint: null,
-            position: 1, targetVocabSize: VocabSize, draftVocabSize: VocabSize, numCandidates: k);
+            position: 1, targetVocabSize: VocabSize, draftVocabSize: VocabSize, numCandidates: k,
+            outputBuffer: outputBuffer);
 
         Assert.Equal(k + 1, result.AcceptedCount);
-        Assert.All(result.AcceptedTokenIds, id => Assert.Equal(3, id));
+        for (int i = 0; i < result.AcceptedCount; i++)
+            Assert.Equal(3, outputBuffer[i]);
         Assert.Equal(k, result.DraftedCount);
     }
 
@@ -80,14 +83,16 @@ public sealed class SpeculativeDecoderTests
         PrefillCache(targetCache, target);
         PrefillCache(draftCache, draft);
 
+        Span<int> outputBuffer = stackalloc int[k + 1];
         var result = decoder.DraftAndVerify(
             target, draft, targetCache, draftCache,
             pipeline, generatedIds, constraint: null,
-            position: 1, targetVocabSize: VocabSize, draftVocabSize: VocabSize, numCandidates: k);
+            position: 1, targetVocabSize: VocabSize, draftVocabSize: VocabSize, numCandidates: k,
+            outputBuffer: outputBuffer);
 
         // First draft token is rejected, corrected with target argmax
         Assert.Equal(1, result.AcceptedCount);
-        Assert.Equal(5, result.AcceptedTokenIds[0]);
+        Assert.Equal(5, outputBuffer[0]);
         Assert.Equal(k, result.DraftedCount);
     }
 
@@ -113,10 +118,12 @@ public sealed class SpeculativeDecoderTests
         PrefillCache(draftCache, draft);
 
         int positionBefore = 1;
+        Span<int> outputBuffer = stackalloc int[k + 1];
         var result = decoder.DraftAndVerify(
             target, draft, targetCache, draftCache,
             pipeline, generatedIds, constraint: null,
-            position: positionBefore, targetVocabSize: VocabSize, draftVocabSize: VocabSize, numCandidates: k);
+            position: positionBefore, targetVocabSize: VocabSize, draftVocabSize: VocabSize, numCandidates: k,
+            outputBuffer: outputBuffer);
 
         // After rejection with 1 accepted token, caches should be at position + 1
         Assert.Equal(positionBefore + result.AcceptedCount, targetCache.CurrentLength);
@@ -142,10 +149,12 @@ public sealed class SpeculativeDecoderTests
         PrefillCache(targetCache, target);
         PrefillCache(draftCache, draft);
 
+        Span<int> outputBuffer = stackalloc int[4];
         var result = decoder.DraftAndVerify(
             target, draft, targetCache, draftCache,
             pipeline, generatedIds, constraint: null,
-            position: 1, targetVocabSize: VocabSize, draftVocabSize: VocabSize, numCandidates: 3);
+            position: 1, targetVocabSize: VocabSize, draftVocabSize: VocabSize, numCandidates: 3,
+            outputBuffer: outputBuffer);
 
         Assert.True(result.DraftTicks > 0);
         Assert.True(result.VerifyTicks > 0);
@@ -170,10 +179,12 @@ public sealed class SpeculativeDecoderTests
         PrefillCache(targetCache, target);
         PrefillCache(draftCache, draft);
 
+        Span<int> outputBuffer = stackalloc int[1];
         var result = decoder.DraftAndVerify(
             target, draft, targetCache, draftCache,
             pipeline, generatedIds, constraint: null,
-            position: 1, targetVocabSize: VocabSize, draftVocabSize: VocabSize, numCandidates: 0);
+            position: 1, targetVocabSize: VocabSize, draftVocabSize: VocabSize, numCandidates: 0,
+            outputBuffer: outputBuffer);
 
         Assert.Equal(0, result.AcceptedCount);
     }

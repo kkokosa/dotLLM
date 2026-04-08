@@ -27,7 +27,9 @@ public interface ISpeculativeDecoder
     /// <param name="targetVocabSize">Vocabulary size of the target model.</param>
     /// <param name="draftVocabSize">Vocabulary size of the draft model (may differ by up to 128 tokens).</param>
     /// <param name="numCandidates">Number of draft tokens to propose (K).</param>
-    /// <returns>Result containing accepted token IDs, count, and timing information.</returns>
+    /// <param name="outputBuffer">Caller-owned buffer for accepted token IDs (must be at least K+1 elements).
+    /// Avoids per-call allocation — the caller reuses this buffer across speculation rounds.</param>
+    /// <returns>Result containing accepted count and timing information. Accepted tokens are in <paramref name="outputBuffer"/>.</returns>
     SpeculativeResult DraftAndVerify(
         IModel targetModel,
         IModel draftModel,
@@ -39,7 +41,8 @@ public interface ISpeculativeDecoder
         int position,
         int targetVocabSize,
         int draftVocabSize,
-        int numCandidates);
+        int numCandidates,
+        Span<int> outputBuffer);
 }
 
 /// <summary>
@@ -61,15 +64,14 @@ public static class SpeculativeConstants
 }
 
 /// <summary>
-/// Result of a single speculative decoding step.
+/// Result of a single speculative decoding step. Accepted token IDs are written
+/// to the caller-provided output buffer passed to <see cref="ISpeculativeDecoder.DraftAndVerify"/>.
 /// </summary>
-/// <param name="AcceptedTokenIds">Token IDs that were accepted (1..K+1 tokens).</param>
-/// <param name="AcceptedCount">Number of accepted tokens.</param>
+/// <param name="AcceptedCount">Number of accepted tokens written to the output buffer.</param>
 /// <param name="DraftTicks">Stopwatch ticks spent on draft model forward passes.</param>
 /// <param name="VerifyTicks">Stopwatch ticks spent on target model verification forward pass.</param>
 /// <param name="DraftedCount">Total number of draft tokens proposed (K).</param>
 public readonly record struct SpeculativeResult(
-    int[] AcceptedTokenIds,
     int AcceptedCount,
     long DraftTicks,
     long VerifyTicks,
