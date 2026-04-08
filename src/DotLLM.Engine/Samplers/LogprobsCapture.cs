@@ -27,16 +27,12 @@ public static class LogprobsCapture
 
         // Numerically stable log-softmax: x_i - max - log(sum(exp(x_j - max)))
         float max = TensorPrimitives.Max(logits);
+        TensorPrimitives.Subtract(logits, max, output); // vectorized x_i - max
         float sumExp = 0f;
         for (int i = 0; i < vocabSize; i++)
-        {
-            float shifted = logits[i] - max;
-            sumExp += MathF.Exp(shifted);
-            output[i] = shifted; // Store x_i - max temporarily
-        }
+            sumExp += MathF.Exp(output[i]);
         float logSumExp = MathF.Log(sumExp);
-        for (int i = 0; i < vocabSize; i++)
-            output[i] -= logSumExp; // x_i - max - log(sum(exp(x_j - max)))
+        TensorPrimitives.Subtract((ReadOnlySpan<float>)output, logSumExp, output); // vectorized final subtract
 
         return buffer;
     }
@@ -74,63 +70,54 @@ public static class LogprobsCapture
     private static TopLogprobEntry[] ExtractTopK(
         ReadOnlySpan<float> logSoftmax, int vocabSize, int topK, ITokenizer tokenizer)
     {
-        // Track top-K token IDs and their logprobs using parallel arrays
-        int[] topIds = ArrayPool<int>.Shared.Rent(topK);
-        float[] topLogprobs = ArrayPool<float>.Shared.Rent(topK);
+        // Track top-K token IDs and their logprobs — stackalloc is safe since topK <= 20
+        Span<int> topIds = stackalloc int[topK];
+        Span<float> topLogprobs = stackalloc float[topK];
+        int count = 0;
 
-        try
+        for (int i = 0; i < vocabSize; i++)
         {
-            int count = 0;
+            float lp = logSoftmax[i];
+            if (float.IsNegativeInfinity(lp))
+                continue;
 
-            for (int i = 0; i < vocabSize; i++)
+            if (count < topK)
             {
-                float lp = logSoftmax[i];
-                if (float.IsNegativeInfinity(lp))
-                    continue;
-
-                if (count < topK)
+                // Fill initial slots, maintaining sorted order (descending)
+                int insertAt = count;
+                while (insertAt > 0 && lp > topLogprobs[insertAt - 1])
                 {
-                    // Fill initial slots, maintaining sorted order (descending)
-                    int insertAt = count;
-                    while (insertAt > 0 && lp > topLogprobs[insertAt - 1])
-                    {
-                        topIds[insertAt] = topIds[insertAt - 1];
-                        topLogprobs[insertAt] = topLogprobs[insertAt - 1];
-                        insertAt--;
-                    }
-                    topIds[insertAt] = i;
-                    topLogprobs[insertAt] = lp;
-                    count++;
+                    topIds[insertAt] = topIds[insertAt - 1];
+                    topLogprobs[insertAt] = topLogprobs[insertAt - 1];
+                    insertAt--;
                 }
-                else if (lp > topLogprobs[count - 1])
-                {
-                    // Replace the smallest in our top-K and re-sort
-                    int insertAt = count - 1;
-                    while (insertAt > 0 && lp > topLogprobs[insertAt - 1])
-                    {
-                        topIds[insertAt] = topIds[insertAt - 1];
-                        topLogprobs[insertAt] = topLogprobs[insertAt - 1];
-                        insertAt--;
-                    }
-                    topIds[insertAt] = i;
-                    topLogprobs[insertAt] = lp;
-                }
+                topIds[insertAt] = i;
+                topLogprobs[insertAt] = lp;
+                count++;
             }
-
-            var entries = new TopLogprobEntry[count];
-            for (int i = 0; i < count; i++)
+            else if (lp > topLogprobs[count - 1])
             {
-                string token = tokenizer.Decode([topIds[i]], stripBosSpace: false);
-                entries[i] = new TopLogprobEntry(
-                    topIds[i], token, topLogprobs[i], Encoding.UTF8.GetBytes(token));
+                // Replace the smallest in our top-K and re-sort
+                int insertAt = count - 1;
+                while (insertAt > 0 && lp > topLogprobs[insertAt - 1])
+                {
+                    topIds[insertAt] = topIds[insertAt - 1];
+                    topLogprobs[insertAt] = topLogprobs[insertAt - 1];
+                    insertAt--;
+                }
+                topIds[insertAt] = i;
+                topLogprobs[insertAt] = lp;
             }
-
-            return entries;
         }
-        finally
+
+        var entries = new TopLogprobEntry[count];
+        for (int i = 0; i < count; i++)
         {
-            ArrayPool<int>.Shared.Return(topIds);
-            ArrayPool<float>.Shared.Return(topLogprobs);
+            string token = tokenizer.Decode([topIds[i]], stripBosSpace: false);
+            entries[i] = new TopLogprobEntry(
+                topIds[i], token, topLogprobs[i], Encoding.UTF8.GetBytes(token));
         }
+
+        return entries;
     }
 }

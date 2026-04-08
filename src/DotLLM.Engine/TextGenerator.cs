@@ -143,6 +143,21 @@ public sealed class TextGenerator
             long samplerTicks = 0;
             int cacheSize = kvCache.MaxLength;
 
+            // Local helper: snapshot log-softmax before sampling (which modifies logits in-place),
+            // sample a token, then build logprob info.
+            (int tokenId, TokenLogprobInfo? logprob) SampleWithLogprobs(Span<float> logitSpan)
+            {
+                float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
+                int tokenId = pipeline.Sample(logitSpan, generatedIds);
+                TokenLogprobInfo? info = null;
+                if (lsBuf != null)
+                {
+                    info = LogprobsCapture.BuildInfo(lsBuf.AsSpan(0, vocabSize), vocabSize, tokenId, topLogprobs, _tokenizer);
+                    ArrayPool<float>.Shared.Return(lsBuf);
+                }
+                return (tokenId, info);
+            }
+
             // Prefill: run only new suffix tokens through the model
             int prefillStart = cachedTokenCount;
             int prefillLen = promptLen - prefillStart;
@@ -172,13 +187,9 @@ public sealed class TextGenerator
                             var logitSpan = new Span<float>((void*)(prefillLogits.DataPointer + (long)(prefillLen - 1) * vocabSize * sizeof(float)), vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                            float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
-                            firstTokenId = pipeline.Sample(logitSpan, generatedIds);
-                            if (lsBuf != null)
-                            {
-                                logprobsList!.Add(LogprobsCapture.BuildInfo(lsBuf.AsSpan(0, vocabSize), vocabSize, firstTokenId, topLogprobs, _tokenizer));
-                                ArrayPool<float>.Shared.Return(lsBuf);
-                            }
+                            var (tid, lp) = SampleWithLogprobs(logitSpan);
+                            firstTokenId = tid;
+                            if (lp.HasValue) logprobsList!.Add(lp.Value);
                             samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                         }
                     }
@@ -202,13 +213,9 @@ public sealed class TextGenerator
                         var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
                         if (constraint != null)
                             TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                        float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
-                        firstTokenId = pipeline.Sample(logitSpan, generatedIds);
-                        if (lsBuf != null)
-                        {
-                            logprobsList!.Add(LogprobsCapture.BuildInfo(lsBuf.AsSpan(0, vocabSize), vocabSize, firstTokenId, topLogprobs, _tokenizer));
-                            ArrayPool<float>.Shared.Return(lsBuf);
-                        }
+                        var (tid, lp) = SampleWithLogprobs(logitSpan);
+                        firstTokenId = tid;
+                        if (lp.HasValue) logprobsList!.Add(lp.Value);
                         samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                     }
                 }
@@ -338,13 +345,9 @@ public sealed class TextGenerator
                             var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                            float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
-                            nextTokenId = pipeline.Sample(logitSpan, generatedIds);
-                            if (lsBuf != null)
-                            {
-                                logprobsList!.Add(LogprobsCapture.BuildInfo(lsBuf.AsSpan(0, vocabSize), vocabSize, nextTokenId, topLogprobs, _tokenizer));
-                                ArrayPool<float>.Shared.Return(lsBuf);
-                            }
+                            var (tid, lp) = SampleWithLogprobs(logitSpan);
+                            nextTokenId = tid;
+                            if (lp.HasValue) logprobsList!.Add(lp.Value);
                             samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                         }
                     }
@@ -462,12 +465,27 @@ public sealed class TextGenerator
             int previousDecodeLength = 0;
             int cacheSize = kvCache.MaxLength;
 
+            // Local helper: snapshot log-softmax before sampling (which modifies logits in-place),
+            // sample a token, then build logprob info.
+            (int tokenId, TokenLogprobInfo? logprob) SampleWithLogprobs(Span<float> logitSpan)
+            {
+                float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
+                int tokenId = pipeline.Sample(logitSpan, generatedIds);
+                TokenLogprobInfo? info = null;
+                if (lsBuf != null)
+                {
+                    info = LogprobsCapture.BuildInfo(lsBuf.AsSpan(0, vocabSize), vocabSize, tokenId, topLogprobs, _tokenizer);
+                    ArrayPool<float>.Shared.Return(lsBuf);
+                }
+                return (tokenId, info);
+            }
+
             // Prefill: run only new suffix tokens through the model
             int prefillStart = cachedTokenCount;
             int prefillLen = promptLen - prefillStart;
 
             int firstTokenId;
-            float[]? firstLogSoftmax = null;
+            TokenLogprobInfo? firstLogprobInfo = null;
             long ts0 = Stopwatch.GetTimestamp();
 
             if (prefillLen > 0)
@@ -492,8 +510,7 @@ public sealed class TextGenerator
                             var logitSpan = new Span<float>((void*)(prefillLogits.DataPointer + (long)(prefillLen - 1) * vocabSize * sizeof(float)), vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                            firstLogSoftmax = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
-                            firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                            (firstTokenId, firstLogprobInfo) = SampleWithLogprobs(logitSpan);
                             samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                         }
                     }
@@ -517,8 +534,7 @@ public sealed class TextGenerator
                         var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
                         if (constraint != null)
                             TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                        firstLogSoftmax = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
-                        firstTokenId = pipeline.Sample(logitSpan, generatedIds);
+                        (firstTokenId, firstLogprobInfo) = SampleWithLogprobs(logitSpan);
                         samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                     }
                 }
@@ -530,15 +546,6 @@ public sealed class TextGenerator
             }
 
             constraint?.Advance(firstTokenId);
-
-            // Build logprob info for first token
-            TokenLogprobInfo? firstLogprobInfo = null;
-            if (firstLogSoftmax != null)
-            {
-                firstLogprobInfo = LogprobsCapture.BuildInfo(firstLogSoftmax.AsSpan(0, vocabSize), vocabSize, firstTokenId, topLogprobs, _tokenizer);
-                ArrayPool<float>.Shared.Return(firstLogSoftmax);
-                firstLogSoftmax = null;
-            }
 
             // Check stop conditions for first token
             generatedIds.Add(firstTokenId);
@@ -691,7 +698,7 @@ public sealed class TextGenerator
 
                     int lastToken = generatedIds[^1];
                     int nextTokenId;
-                    TokenLogprobInfo? tokenLogprob = null;
+                    TokenLogprobInfo? tokenLogprob;
 
                     long fwdStart = Stopwatch.GetTimestamp();
                     using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
@@ -704,13 +711,7 @@ public sealed class TextGenerator
                             var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                            float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
-                            nextTokenId = pipeline.Sample(logitSpan, generatedIds);
-                            if (lsBuf != null)
-                            {
-                                tokenLogprob = LogprobsCapture.BuildInfo(lsBuf.AsSpan(0, vocabSize), vocabSize, nextTokenId, topLogprobs, _tokenizer);
-                                ArrayPool<float>.Shared.Return(lsBuf);
-                            }
+                            (nextTokenId, tokenLogprob) = SampleWithLogprobs(logitSpan);
                             samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
                         }
                     }
