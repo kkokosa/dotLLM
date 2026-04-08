@@ -121,13 +121,13 @@ Step 22 (done) ──────► Step 30 (NUMA + Spin-wait)
 
 | Step | Feature | Description | Depends On |
 |------|---------|-------------|------------|
+| 60 | **Logprobs** | OpenAI-compatible `logprobs: bool` + `top_logprobs: int` on `/v1/chat/completions`. After LM head produces logits, capture log-softmax top-k before sampling. Return per-token `logprob` + `top_logprobs[]` in response and SSE stream. Opt-in logprobs visualization in Chat UI: color-coded token confidence (green >90%, lime >70%, yellow >50%, orange >30%, red <30%), hover shows top-k alternatives, three diagnostic cues — low confidence (p < 10%), ambiguity (top-2 gap < 0.15), sampling effect (chosen ≠ argmax). Sample project: `DotLLM.Sample.Logprobs`. | 8, 34 |
 | 18 | **Hook system** | `IInferenceHook` interface, `HookPoint` enum, hook registry on `InferenceEngine`. Fire at 8 pipeline locations. Zero-cost when no hooks registered. | 6 |
-| 19 | **Logit lens** | Built on hook system. Capture `PostLayer(i)` hidden states, project through LM head, produce per-layer token probabilities. | 18 |
-| 21 | **Logit bias** | Per-request `logit_bias` map applied as `ISamplerStep` at the start of the sampling pipeline. | 8 |
+| 19 | **Logit lens** | Built on hook system. Capture `PostLayer(i)` hidden states, project through LM head, produce per-layer token probabilities. Opt-in UX in serve: layer-by-layer prediction heatmap, click a token to see how prediction evolved through layers, per-layer confidence visualization. Sample project: `DotLLM.Sample.LogitLens`. | 18 |
+| 50 | **SAE integration** | Sparse autoencoder hooks. Load pre-trained SAEs from SafeTensors (`cfg.json` SAELens convention). Feature analysis, steering, ablation. Opt-in UX in serve: SAE configuration panel (load SAE for specific layer, browse active features), feature visualization in generated text (highlight tokens by active feature magnitudes), feature steering controls (amplify/suppress features from UI). SAE discovery: manual path specification primary, curated JSON registry mapping base models to known SAE repos (EleutherAI, Goodfire, Llama Scope). Neuronpedia integration (`neuronpedia.org`) for feature labels — public API returns auto-interp explanations per feature, bulk S3 export for offline label cache. Sample project: `DotLLM.Sample.Interpretability`. | 18 |
 | 47 | **LoRA adapters** | `IAdapterManager`. Runtime adapter loading from SafeTensors. Per-request `lora_adapter` parameter. No weight merging. | Phase 1 |
-| 50 | **SAE integration** | Sparse autoencoder hooks. Load pre-trained SAEs from SafeTensors. Feature analysis, steering, ablation. Sample project: `DotLLM.Sample.Interpretability`. | 18 |
 
-**Milestone**: Diagnostic hooks, logit lens, logit bias, LoRA adapter serving, and mechanistic interpretability workflows in .NET.
+**Milestone**: Logprobs API with Chat UI visualization, diagnostic hooks, logit lens with layer heatmap, SAE interpretability workflows with Neuronpedia feature labels, and LoRA adapter serving in .NET.
 
 ## Phase 8 — Model Expansion
 
@@ -184,6 +184,7 @@ Not in the current roadmap, but the architecture should not preclude these:
 | **xLAM tool call format** | Salesforce xLAM-2-1b/3b-fc-r — best-performing sub-4B tool-calling models (65.74% BFCL v3). Output is a bare JSON array `[{"name": "...", "arguments": {...}}]` after the assistant turn, terminated by EOS. No XML wrapper, no prefix token. vLLM uses `--tool-call-parser=xlam` with custom `xlam_qwen.jinja` template. | New `XlamToolCallParser`. Custom Jinja template preset for xLAM system prompt format. The 1B model (53.97% BFCL) is the smallest competitive tool-caller. |
 | **Pythonic tool call format** | Emerging convention: model generates Python-style function invocations (`get_weather(city="Copenhagen")`) instead of JSON. Used by SmolLM3 `python_tools` mode (wrapped in `<code>` tags), Gorilla OpenFunctions (raw Python calls), NexusRaven (`Call: func(args)`), and increasingly by Llama 4 and OLMo 3. Avoids JSON escaping issues, more natural for code-trained models. | New `PythonicToolCallParser` with Python AST-style parsing (regex for function name + kwargs). Supports `<code>` wrapper (SmolLM3) and bare invocation variants. |
 | **Granite tool call format** | IBM Granite 4.0 Micro (3B dense, Apache 2.0) — enterprise-grade tool calling. Tools in `<tools></tools>` XML, calls as `<tool_call>{"name": "...", "arguments": {...}}</tool_call>`, results via `<tool_response>`. Role markers use `<\|start_of_role\|>` tokens (not ChatML). Also Granite-4.0-H-Micro (3B hybrid Mamba-2) and Granite-4.0-H-Tiny (7B MoE, ~1B active). vLLM uses `--tool-call-parser=granite`. Granite-4.0-1b scores 54.8 on BFCL v3 (best in 1B class). | `GraniteToolCallParser` (close to Hermes but different role markers). Granite-specific Jinja template preset. Granite architecture may need Mamba-2/MoE support for hybrid variants. |
+| **Logit bias** | Per-request `logit_bias` map applied as `ISamplerStep` at the start of the sampling pipeline. Simple token probability adjustment. | Requires sampling pipeline (8). Minimal — single `ISamplerStep` implementation. |
 
 ## Version Milestones
 
@@ -195,7 +196,7 @@ Not in the current roadmap, but the architecture should not preclude these:
 | `v0.3.0` | Phase 4 complete | GPU acceleration: CUDA backend, hybrid CPU/GPU, KV-cache quantization |
 | `v0.3.5` | Phase 5 complete | Constrained decoding: JSON/schema/regex, tool calling, API server, chat UI, simple prompt caching |
 | `v0.4.0` | Phase 6 complete | Improved serving: warm-up, NativeAOT, paged KV-cache, speculative decoding |
-| `v0.5.0` | Phase 7 complete | Diagnostics: hooks, logit lens, LoRA, SAE |
+| `v0.5.0` | Phase 7 complete | Diagnostics: logprobs, hooks, logit lens, SAE, LoRA |
 | `v0.6.0` | Phase 8 complete | Model expansion: MLA, ALiBi, SmolLM3, Gemma 4, MoE |
 | `v0.7.0` | Phase 9 complete | Production serving: continuous batching, prefix sharing, scheduling, rate limiting, metrics |
 | `v1.0.0` | Stability | API stability commitment, comprehensive benchmarks, documentation |
@@ -210,6 +211,6 @@ Each phase has a validation checkpoint:
 - **Phase 4**: GPU decode throughput within 2× of llama.cpp for equivalent model/quantization. Hybrid CPU/GPU matches pure-CPU quality. Q8_0 KV-cache produces identical output to FP16 baseline. Q4_0 KV-cache perplexity within +0.3 of baseline.
 - **Phase 5**: JSON schema constraint produces 100% valid outputs over 1000 generations. Pass OpenAI API compatibility test suite. `dotllm serve` launches browser-based chat. Multi-turn TTFT drops >5× with prompt caching enabled.
 - **Phase 6**: Warm-up eliminates first-request latency spike. Paged KV-cache handles variable-length sequences with <4% memory waste. Speculative decoding achieves ≥1.5× decode speedup with acceptable draft model overhead.
-- **Phase 7**: Logit lens produces meaningful layer-wise predictions. Logit bias modifies token probabilities correctly. LoRA adapter swaps complete in <100ms. SAE feature steering demonstrably modifies model behavior.
+- **Phase 7**: Logprobs API returns valid per-token probabilities matching softmax of raw logits. Logit lens produces meaningful layer-wise predictions. LoRA adapter swaps complete in <100ms. SAE feature steering demonstrably modifies model behavior.
 - **Phase 8**: DeepSeek-V2 MoE produces correct output. SmolLM3 NoPE layers handled correctly. Gemma 4 matches HuggingFace reference output. MoE expert routing matches reference implementation.
 - **Phase 9**: Continuous batching maintains throughput under concurrent load. Cross-request prefix sharing eliminates redundant prefill for shared system prompts. Paged KV-cache handles concurrent sequences without OOM. Advanced scheduling prevents starvation under mixed workloads.
