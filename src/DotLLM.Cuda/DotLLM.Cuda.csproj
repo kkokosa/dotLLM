@@ -38,7 +38,7 @@
       <FastMathFlag></FastMathFlag>
     </CudaKernel>
     <!-- Element-wise kernels: safe for fast_math (no expf/rsqrtf/sinf/cosf accumulation) -->
-    <CudaKernel Update="$(CudaKernelDir)\add.cu;$(CudaKernelDir)\add_f32.cu;$(CudaKernelDir)\swiglu.cu;$(CudaKernelDir)\swiglu_f32.cu;$(CudaKernelDir)\convert.cu;$(CudaKernelDir)\bias_add.cu;$(CudaKernelDir)\bias_add_f32.cu;$(CudaKernelDir)\embedding.cu;$(CudaKernelDir)\embedding_f32out.cu;$(CudaKernelDir)\dequant.cu;$(CudaKernelDir)\quant_kv.cu;$(CudaKernelDir)\quantized_gemv.cu;$(CudaKernelDir)\quantized_gemv_f32in.cu">
+    <CudaKernel Update="$(CudaKernelDir)\add.cu;$(CudaKernelDir)\add_f32.cu;$(CudaKernelDir)\swiglu.cu;$(CudaKernelDir)\swiglu_f32.cu;$(CudaKernelDir)\convert.cu;$(CudaKernelDir)\bias_add.cu;$(CudaKernelDir)\bias_add_f32.cu;$(CudaKernelDir)\embedding.cu;$(CudaKernelDir)\embedding_f32out.cu;$(CudaKernelDir)\dequant.cu;$(CudaKernelDir)\quant_kv.cu">
       <FastMathFlag>--use_fast_math</FastMathFlag>
     </CudaKernel>
   </ItemGroup>
