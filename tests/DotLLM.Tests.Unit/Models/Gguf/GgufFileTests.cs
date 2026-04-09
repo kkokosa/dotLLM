@@ -42,9 +42,10 @@ public class GgufFileTests : IDisposable
     [Fact]
     public void Open_WithTensors_ProvidesDataPointer()
     {
-        byte[] tensorData = new byte[64];
+        // F32 tensor with shape [8, 8] = 64 elements = 256 bytes
+        byte[] tensorData = new byte[256];
         for (int i = 0; i < tensorData.Length; i++)
-            tensorData[i] = (byte)(i + 1);
+            tensorData[i] = (byte)((i % 255) + 1);
 
         var data = new GgufTestData(version: 3)
             .AddString("general.architecture", "llama")
@@ -62,7 +63,7 @@ public class GgufFileTests : IDisposable
         {
             byte* ptr = (byte*)file.DataBasePointer;
             Assert.Equal(1, ptr[0]); // First byte of our tensor data
-            Assert.Equal(64, ptr[63]); // Last byte
+            Assert.Equal(1, ptr[255]); // Last byte (256 % 255 + 1 = 2, but wraps)
         }
     }
 
@@ -144,21 +145,38 @@ public class GgufFileTests : IDisposable
     [Fact]
     public void Open_TensorOffsetBeyondFile_Throws()
     {
-        // Build a GGUF with two tensors. The second tensor's offset
-        // is computed from the first blob size. Then truncate the file
-        // so the second tensor's data section offset is past the end.
+        // Build a GGUF with two F32 tensors. First: [4] = 16 bytes at offset 0.
+        // Second: [4] = 16 bytes at offset 16. Total data = 32 bytes.
+        // Truncate just enough so second tensor's data doesn't fit but first still does.
         var data = new GgufTestData(version: 3)
             .AddTensor("first", [4], 0, new byte[16])
             .AddTensor("second", [4], 0, new byte[16]);
         string path = WriteTempGguf(data);
 
-        // Truncate the file to remove the second tensor's data entirely.
-        // The second tensor has DataOffset=16 but the data section will be < 16 bytes.
+        // Remove 4 bytes: first tensor (offset 0, 16 bytes) still fits,
+        // but second tensor (offset 16, needs 16 bytes) extends past EOF.
         byte[] bytes = File.ReadAllBytes(path);
-        File.WriteAllBytes(path, bytes[..(bytes.Length - 20)]);
+        File.WriteAllBytes(path, bytes[..(bytes.Length - 4)]);
 
         var ex = Assert.Throws<InvalidDataException>(() => GgufFile.Open(path));
         Assert.Contains("second", ex.Message);
+    }
+
+    [Fact]
+    public void Open_TensorDataExtendsPastEof_Throws()
+    {
+        // Tensor offset is valid (0) but file is truncated so data doesn't fully fit.
+        var data = new GgufTestData(version: 3)
+            .AddTensor("partial", [8], 0, new byte[32]); // F32, 8 elements = 32 bytes
+        string path = WriteTempGguf(data);
+
+        // Remove just a few bytes from the end — offset 0 is valid but 32 bytes don't fit.
+        byte[] bytes = File.ReadAllBytes(path);
+        File.WriteAllBytes(path, bytes[..(bytes.Length - 4)]);
+
+        var ex = Assert.Throws<InvalidDataException>(() => GgufFile.Open(path));
+        Assert.Contains("partial", ex.Message);
+        Assert.Contains("extends beyond", ex.Message);
     }
 
     [Fact]

@@ -1,6 +1,7 @@
 using System.IO.MemoryMappedFiles;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using DotLLM.Core.Configuration;
 
 namespace DotLLM.Models.Gguf;
 
@@ -97,14 +98,17 @@ public sealed unsafe class GgufFile : IDisposable
 
         long dataSectionOffset = AlignUp(streamPositionAfterInfos, alignment);
 
-        // Validate tensor data offsets are within the file.
+        // Validate tensor data fits within the file.
         long dataSectionLength = fileLength - dataSectionOffset;
         foreach (var tensor in tensors)
         {
-            if ((long)tensor.DataOffset >= dataSectionLength)
+            long tensorBytes = tensor.QuantizationType.ComputeByteCount(tensor.Shape.ElementCount);
+            long endOffset = (long)tensor.DataOffset + tensorBytes;
+            if (endOffset > dataSectionLength)
                 throw new InvalidDataException(
-                    $"Tensor '{tensor.Name}' offset ({tensor.DataOffset}) " +
-                    $"exceeds data section size ({dataSectionLength}).");
+                    $"Tensor '{tensor.Name}' data extends beyond file boundary " +
+                    $"(offset {tensor.DataOffset}, size {tensorBytes}, " +
+                    $"data section size {dataSectionLength}).");
         }
 
         var tensorsByName = new Dictionary<string, GgufTensorDescriptor>(tensors.Count);

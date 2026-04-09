@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 
 namespace DotLLM.Core.Tensors;
@@ -54,8 +55,12 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// Handles both quantized (block-based) and non-quantized (per-element) types correctly.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public long ComputeByteCount(long elementCount) =>
-        IsQuantized ? elementCount / BlockElementCount * BlockByteSize : elementCount * SizeInBytes;
+    public long ComputeByteCount(long elementCount)
+    {
+        Debug.Assert(!IsQuantized || elementCount % BlockElementCount == 0,
+            $"Quantized element count {elementCount} is not a multiple of block size {BlockElementCount}.");
+        return IsQuantized ? elementCount / BlockElementCount * BlockByteSize : elementCount * SizeInBytes;
+    }
 
     /// <inheritdoc/>
     public override string ToString() => Name;
