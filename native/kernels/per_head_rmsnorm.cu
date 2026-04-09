@@ -3,7 +3,7 @@
 
 #include <cuda_fp16.h>
 
-extern "C" __global__ void per_head_rmsnorm_f16(
+extern "C" __global__ void __launch_bounds__(256) per_head_rmsnorm_f16(
     half* __restrict__ qk,
     const half* __restrict__ weight,
     const float eps,

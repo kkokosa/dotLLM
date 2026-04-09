@@ -1,6 +1,6 @@
 // Full FP32 RMS Normalization: FP32 input, FP32 weight, FP32 output.
 
-extern "C" __global__ void rmsnorm_f32(
+extern "C" __global__ void __launch_bounds__(256) rmsnorm_f32(
     const float* __restrict__ input,
     const float* __restrict__ weight,
     float* __restrict__ output,

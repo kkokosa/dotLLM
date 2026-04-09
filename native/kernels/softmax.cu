@@ -1,11 +1,13 @@
 // Softmax kernel for dotLLM.
 // Numerically stable: subtract max, exp, normalize.
 // One block per row, warp reduction. FP16 in/out, FP32 accumulation.
+// Optimized: 2 passes over global input (not 3). Exp results stored in output
+// buffer during pass 2, then normalized in-place in pass 3.
 
 #include <cuda_fp16.h>
 #include <float.h>
 
-extern "C" __global__ void softmax_f16(
+extern "C" __global__ void __launch_bounds__(256) softmax_f16(
     const half* __restrict__ input,
     half* __restrict__ output,
     const int rows,
@@ -17,7 +19,7 @@ extern "C" __global__ void softmax_f16(
     const half* x = input + (size_t)row * cols;
     half* y = output + (size_t)row * cols;
 
-    // Step 1: find max
+    // Pass 1: find max
     float max_val = -FLT_MAX;
     for (int i = threadIdx.x; i < cols; i += blockDim.x)
     {
@@ -54,12 +56,14 @@ extern "C" __global__ void softmax_f16(
     __syncthreads();
     max_val = shared_max;
 
-    // Step 2: sum of exp(x - max)
+    // Pass 2: compute exp(x - max), store to output, accumulate sum
     float sum_exp = 0.0f;
     for (int i = threadIdx.x; i < cols; i += blockDim.x)
     {
         float v = __half2float(x[i]);
-        sum_exp += expf(v - max_val);
+        float e = expf(v - max_val);
+        sum_exp += e;
+        y[i] = __float2half(e);
     }
 
     // Warp reduction for sum
@@ -81,10 +85,7 @@ extern "C" __global__ void softmax_f16(
     if (threadIdx.x == 0) shared_sum_inv = 1.0f / sum_exp;
     __syncthreads();
 
-    // Step 3: normalize
+    // Pass 3: normalize from stored exp values (no re-read of input, no re-compute of exp)
     for (int i = threadIdx.x; i < cols; i += blockDim.x)
-    {
-        float v = __half2float(x[i]);
-        y[i] = __float2half(expf(v - max_val) * shared_sum_inv);
-    }
+        y[i] = __float2half(__half2float(y[i]) * shared_sum_inv);
 }
