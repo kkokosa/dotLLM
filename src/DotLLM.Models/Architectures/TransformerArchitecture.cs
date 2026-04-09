@@ -29,6 +29,11 @@ public sealed class TransformerArchitecture : IModelArchitecture
     /// <inheritdoc/>
     public IModel CreateModel(ModelConfig config, IBackend backend)
     {
+        if (config.Architecture is Architecture.DeepSeek)
+            throw new NotSupportedException(
+                "DeepSeek models require Multi-Latent Attention (MLA) which is not yet implemented. " +
+                "See roadmap Step 48.");
+
         if (config.Architecture is not (Architecture.Llama or Architecture.Mistral
                                     or Architecture.Phi or Architecture.Qwen))
             throw new ArgumentException(

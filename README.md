@@ -30,7 +30,7 @@ dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around lla
 
 ### Architecture Support
 - **Transformer models** — Llama, Mistral, Phi, Qwen, DeepSeek via parameterized `TransformerBlock` and `ModelConfig`
-- **Attention mechanisms** — MHA, MQA, GQA, MLA through `IAttentionMechanism` + `IAttentionStrategy` separation
+- **Attention mechanisms** — MHA, MQA, GQA via parameterized `ModelConfig`, with `IAttentionStrategy` for kernel selection
 - **Position encoding** — RoPE, ALiBi, absolute, none — pluggable via `IPositionEncoding`
 - **Composable sampling** — `ISamplerStep` chain: repetition penalty → temperature → top-k → top-p → min-p → categorical sample
 

@@ -108,6 +108,6 @@ var config = new ModelConfig
 
 1. Check if the architecture fits the standard pattern (Norm → Attention → Residual → Norm → FFN → Residual).
 2. If yes: add a new `Architecture` enum value, map GGUF metadata keys to ModelConfig, done.
-3. If the attention mechanism is different (like MLA): implement `IAttentionMechanism`, register it.
+3. If the attention mechanism is different (like MLA): implement a dedicated attention path in the forward pass.
 4. If the FFN structure is different: parameterize or add a new FFN variant.
 5. Verify numerical output against HuggingFace transformers reference for the new architecture.

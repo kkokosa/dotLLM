@@ -67,7 +67,7 @@ The output binary is in `src/DotLLM.Cli/bin/Release/net10.0/<rid>/publish/`.
 
 **Why JIT is faster at steady-state on CPU**: .NET's Dynamic PGO (Profile-Guided Optimization) observes runtime behavior during Tier-0 execution and applies:
 
-- **Guarded Devirtualization (GDV)**: Speculatively inlines the most common `IBackend`, `IAttentionMechanism`, `ISamplerStep` implementations with a type-check guard. In dotLLM this matters because the entire inference pipeline dispatches through interfaces.
+- **Guarded Devirtualization (GDV)**: Speculatively inlines the most common `IBackend`, `IModel`, `ISamplerStep` implementations with a type-check guard. In dotLLM this matters because the entire inference pipeline dispatches through interfaces.
 - **Hot/cold code layout**: Reorders basic blocks based on observed branch frequencies in compute kernels.
 - **Loop cloning**: Creates optimized loop variants for common iteration patterns in SIMD kernels.
 

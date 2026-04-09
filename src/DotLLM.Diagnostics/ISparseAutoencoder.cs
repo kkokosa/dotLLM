@@ -1,3 +1,6 @@
+// Planned: This module is a placeholder for Phase 7 diagnostics (hooks, logit lens, SAE, Neuronpedia).
+// See docs/DIAGNOSTICS.md and roadmap Step 50.
+
 namespace DotLLM.Diagnostics;
 
 /// <summary>

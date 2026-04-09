@@ -49,7 +49,7 @@ Both `TransformerModel` (CPU) and `CudaTransformerModel` (GPU) implement `IModel
 The CPU and GPU forward passes are **separate implementations** because:
 - CPU uses fused ops, R4-interleaved weight repacking, pre-quantized input reuse, `ComputeThreadPool` dispatch
 - GPU uses cuBLAS FP16 GEMM, PTX kernel launches, device memory, CUDA streams
-- Abstracting both behind `IKernelRunner` would lose CPU-specific optimizations
+- A shared kernel abstraction would lose CPU-specific optimizations
 
 ## Weight Loading Pipeline
 

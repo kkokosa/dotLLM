@@ -35,8 +35,8 @@
 ├─────────────────────────────────────────────────────────────────┤
 │  DotLLM.Core (Interfaces & Abstractions)                        │
 │  ├── ITensor, TensorShape, DType                                │
-│  ├── IBackend, IKernelRunner, DevicePlacement                   │
-│  ├── IAttentionMechanism, IAttentionStrategy                    │
+│  ├── IBackend, DevicePlacement                                  │
+│  ├── IAttentionStrategy                                         │
 │  ├── IPositionEncoding                                           │
 │  ├── ISamplerStep, ILogitProcessor, IStopCondition              │
 │  ├── IDecodingConstraint, TokenMask                             │

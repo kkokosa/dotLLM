@@ -1,12 +1,8 @@
 # Attention Mechanisms — dotLLM
 
-## IAttentionMechanism Interface
+## Attention in dotLLM
 
-```
-IAttentionMechanism:
-  Forward(Q, K, V, positionEncoding, kvCache, mask, hooks) → output
-  CreateKvCache(config) → IKvCache
-```
+Attention is called directly in each backend's forward pass (CPU and GPU have separate implementations optimized for their respective hardware). There is no shared `IAttentionMechanism` interface — this is intentional, as abstracting across backends would lose CPU-specific optimizations (fused ops, weight repacking) and GPU-specific optimizations (cuBLAS GEMM, PTX kernels).
 
 ## Grouped-Query Attention (GQA)
 
@@ -43,7 +39,7 @@ DeepSeek-V2/V3. Compresses KV into low-rank latent space.
 4. Separate RoPE handling for rope and non-rope dimensions
 5. Standard attention computation
 
-Requires its own `IAttentionMechanism` impl with `LatentKvCache`.
+Requires its own attention implementation with `LatentKvCache`.
 
 ## IAttentionStrategy — Kernel Selection
 

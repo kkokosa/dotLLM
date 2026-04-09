@@ -10,7 +10,6 @@
     <ProjectReference Include="..\..\src\DotLLM.Tokenizers\DotLLM.Tokenizers.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Engine\DotLLM.Engine.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Server\DotLLM.Server.csproj" />
-    <ProjectReference Include="..\..\src\DotLLM.Telemetry\DotLLM.Telemetry.csproj" />
   </ItemGroup>
 
 </Project>

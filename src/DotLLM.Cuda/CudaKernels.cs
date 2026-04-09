@@ -426,6 +426,10 @@ public sealed unsafe class CudaKernels : IDisposable
     }
 
     /// <summary>Softmax over last dimension. One block per row.</summary>
+    /// <remarks>
+    /// Not used in the GPU forward pass — softmax is fused into <c>attention.cu</c>.
+    /// Available for standalone use and testing.
+    /// </remarks>
     public void LaunchSoftmax(nint input, nint output, int rows, int cols, nint stream)
     {
         nint inputArg = input, outputArg = output;

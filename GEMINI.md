@@ -23,7 +23,7 @@ This file defines the foundational mandates for Gemini CLI's operation within th
 *   **Language:** C# 13 / .NET 10.
 *   **Style:** File-scoped namespaces, `readonly record struct` for value types, `Span<T>` for signatures.
 *   **Interop:** `[LibraryImport]` and `[SuppressGCTransition]` for C/CUDA native calls.
-*   **Abstractions:** Favor `IAttentionMechanism`, `IBackend`, and `IModel` interfaces for pluggability.
+*   **Abstractions:** Favor `IBackend`, `IModel`, and `IAttentionStrategy` interfaces for pluggability.
 *   **Telemetry:** Use `System.Diagnostics.Metrics` and `Activity` with zero-overhead patterns.
 
 ## Documentation Reference

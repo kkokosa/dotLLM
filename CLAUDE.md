@@ -28,9 +28,9 @@ dotLLM/
 ├── src/
 │   ├── DotLLM.Core/                   # Interfaces, abstractions, tensor types, config
 │   │   ├── Tensors/                   # ITensor, TensorShape, DType
-│   │   ├── Backends/                  # IBackend, IKernelRunner, DevicePlacement
+│   │   ├── Backends/                  # IBackend, DevicePlacement
 │   │   ├── Models/                    # IModel, IModelArchitecture, ModelConfig
-│   │   ├── Attention/                 # IAttentionMechanism, IAttentionStrategy
+│   │   ├── Attention/                 # IAttentionStrategy
 │   │   ├── PositionEncoding/          # IPositionEncoding
 │   │   ├── Sampling/                  # ISamplerStep, ILogitProcessor, IStopCondition
 │   │   ├── Constraints/              # IDecodingConstraint, TokenMask
@@ -112,7 +112,7 @@ dotLLM/
 | SIMD | TensorPrimitives + Intrinsics | Standard ops via TP; hand-tuned for quantized loops. |
 | Runtime | JIT + Dynamic PGO default | Better steady-state than NativeAOT. AOT opt-in for edge/container deployment. |
 | Model format | GGUF primary | Self-contained, quantization, HF ecosystem. |
-| Attention | `IAttentionMechanism` + `IAttentionStrategy` | Mechanism (GQA/MLA) separate from kernel (naive/flash/paged). |
+| Attention | `IAttentionStrategy` | Kernel strategy (naive/flash/paged) separate from forward pass. Attention called directly in each backend. |
 | Position encoding | `IPositionEncoding`, optional | RoPE, ALiBi, absolute, none. |
 | Sampler | Composable `ISamplerStep` chain | Independent, reorderable, extensible. |
 | Structured output | FSM/PDA logit masking | Guaranteed valid JSON/schema/regex. |
