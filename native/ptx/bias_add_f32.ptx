@@ -18,6 +18,7 @@
 	.param .u32 bias_add_f32_param_2,
 	.param .u32 bias_add_f32_param_3
 )
+.maxntid 256, 1, 1
 {
 	.reg .pred 	%p<2>;
 	.reg .b16 	%rs<2>;

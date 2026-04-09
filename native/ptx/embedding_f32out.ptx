@@ -19,6 +19,7 @@
 	.param .u32 embedding_lookup_f32_f32out_param_3,
 	.param .u32 embedding_lookup_f32_f32out_param_4
 )
+.maxntid 256, 1, 1
 {
 	.reg .pred 	%p<4>;
 	.reg .f32 	%f<2>;
@@ -26,9 +27,9 @@
 	.reg .b64 	%rd<18>;
 
 
-	ld.param.u64 	%rd5, [embedding_lookup_f32_f32out_param_0];
-	ld.param.u64 	%rd6, [embedding_lookup_f32_f32out_param_1];
-	ld.param.u64 	%rd7, [embedding_lookup_f32_f32out_param_2];
+	ld.param.u64 	%rd4, [embedding_lookup_f32_f32out_param_0];
+	ld.param.u64 	%rd5, [embedding_lookup_f32_f32out_param_1];
+	ld.param.u64 	%rd6, [embedding_lookup_f32_f32out_param_2];
 	ld.param.u32 	%r7, [embedding_lookup_f32_f32out_param_3];
 	ld.param.u32 	%r6, [embedding_lookup_f32_f32out_param_4];
 	mov.u32 	%r1, %ctaid.x;
@@ -39,25 +40,25 @@
 	setp.ge.s32 	%p2, %r9, %r6;
 	@%p2 bra 	$L__BB0_4;
 
-	cvta.to.global.u64 	%rd8, %rd6;
-	mul.wide.s32 	%rd9, %r1, 4;
-	add.s64 	%rd10, %rd8, %rd9;
-	ld.global.nc.u32 	%r8, [%rd10];
+	cvta.to.global.u64 	%rd7, %rd5;
+	mul.wide.s32 	%rd8, %r1, 4;
+	add.s64 	%rd9, %rd7, %rd8;
+	ld.global.nc.u32 	%r8, [%rd9];
 	mov.u32 	%r3, %ntid.x;
-	cvta.to.global.u64 	%rd1, %rd7;
-	cvta.to.global.u64 	%rd2, %rd5;
-	mul.wide.s32 	%rd3, %r6, %r1;
-	mul.wide.s32 	%rd4, %r8, %r6;
+	cvta.to.global.u64 	%rd1, %rd4;
+	mul.wide.s32 	%rd2, %r6, %r1;
+	mul.wide.s32 	%rd3, %r8, %r6;
+	cvta.to.global.u64 	%rd15, %rd6;
 
 $L__BB0_3:
-	cvt.s64.s32 	%rd11, %r9;
-	add.s64 	%rd12, %rd4, %rd11;
-	shl.b64 	%rd13, %rd12, 2;
-	add.s64 	%rd14, %rd2, %rd13;
-	ld.global.nc.f32 	%f1, [%rd14];
-	add.s64 	%rd15, %rd3, %rd11;
-	shl.b64 	%rd16, %rd15, 2;
-	add.s64 	%rd17, %rd1, %rd16;
+	cvt.s64.s32 	%rd10, %r9;
+	add.s64 	%rd11, %rd3, %rd10;
+	shl.b64 	%rd12, %rd11, 2;
+	add.s64 	%rd13, %rd1, %rd12;
+	ld.global.nc.f32 	%f1, [%rd13];
+	add.s64 	%rd14, %rd2, %rd10;
+	shl.b64 	%rd16, %rd14, 2;
+	add.s64 	%rd17, %rd15, %rd16;
 	st.global.f32 	[%rd17], %f1;
 	add.s32 	%r9, %r9, %r3;
 	setp.lt.s32 	%p3, %r9, %r6;
@@ -75,6 +76,7 @@ $L__BB0_4:
 	.param .u32 embedding_lookup_f16_f32out_param_3,
 	.param .u32 embedding_lookup_f16_f32out_param_4
 )
+.maxntid 256, 1, 1
 {
 	.reg .pred 	%p<4>;
 	.reg .b16 	%rs<2>;
@@ -83,9 +85,9 @@ $L__BB0_4:
 	.reg .b64 	%rd<18>;
 
 
-	ld.param.u64 	%rd5, [embedding_lookup_f16_f32out_param_0];
-	ld.param.u64 	%rd6, [embedding_lookup_f16_f32out_param_1];
-	ld.param.u64 	%rd7, [embedding_lookup_f16_f32out_param_2];
+	ld.param.u64 	%rd4, [embedding_lookup_f16_f32out_param_0];
+	ld.param.u64 	%rd5, [embedding_lookup_f16_f32out_param_1];
+	ld.param.u64 	%rd6, [embedding_lookup_f16_f32out_param_2];
 	ld.param.u32 	%r7, [embedding_lookup_f16_f32out_param_3];
 	ld.param.u32 	%r6, [embedding_lookup_f16_f32out_param_4];
 	mov.u32 	%r1, %ctaid.x;
@@ -96,29 +98,29 @@ $L__BB0_4:
 	setp.ge.s32 	%p2, %r9, %r6;
 	@%p2 bra 	$L__BB1_4;
 
-	cvta.to.global.u64 	%rd8, %rd6;
-	mul.wide.s32 	%rd9, %r1, 4;
-	add.s64 	%rd10, %rd8, %rd9;
-	ld.global.nc.u32 	%r8, [%rd10];
+	cvta.to.global.u64 	%rd7, %rd5;
+	mul.wide.s32 	%rd8, %r1, 4;
+	add.s64 	%rd9, %rd7, %rd8;
+	ld.global.nc.u32 	%r8, [%rd9];
 	mov.u32 	%r3, %ntid.x;
-	cvta.to.global.u64 	%rd1, %rd7;
-	cvta.to.global.u64 	%rd2, %rd5;
-	mul.wide.s32 	%rd3, %r6, %r1;
-	mul.wide.s32 	%rd4, %r8, %r6;
+	cvta.to.global.u64 	%rd1, %rd4;
+	mul.wide.s32 	%rd2, %r6, %r1;
+	mul.wide.s32 	%rd3, %r8, %r6;
+	cvta.to.global.u64 	%rd15, %rd6;
 
 $L__BB1_3:
-	cvt.s64.s32 	%rd11, %r9;
-	add.s64 	%rd12, %rd4, %rd11;
-	shl.b64 	%rd13, %rd12, 1;
-	add.s64 	%rd14, %rd2, %rd13;
-	ld.global.nc.u16 	%rs1, [%rd14];
+	cvt.s64.s32 	%rd10, %r9;
+	add.s64 	%rd11, %rd3, %rd10;
+	shl.b64 	%rd12, %rd11, 1;
+	add.s64 	%rd13, %rd1, %rd12;
+	ld.global.nc.u16 	%rs1, [%rd13];
 	// begin inline asm
 	{  cvt.f32.f16 %f1, %rs1;}
 
 	// end inline asm
-	add.s64 	%rd15, %rd3, %rd11;
-	shl.b64 	%rd16, %rd15, 2;
-	add.s64 	%rd17, %rd1, %rd16;
+	add.s64 	%rd14, %rd2, %rd10;
+	shl.b64 	%rd16, %rd14, 2;
+	add.s64 	%rd17, %rd15, %rd16;
 	st.global.f32 	[%rd17], %f1;
 	add.s32 	%r9, %r9, %r3;
 	setp.lt.s32 	%p3, %r9, %r6;
@@ -136,6 +138,7 @@ $L__BB1_4:
 	.param .u32 embedding_lookup_q8_0_f32out_param_3,
 	.param .u32 embedding_lookup_q8_0_f32out_param_4
 )
+.maxntid 256, 1, 1
 {
 	.reg .pred 	%p<4>;
 	.reg .b16 	%rs<66>;

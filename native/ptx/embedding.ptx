@@ -19,6 +19,7 @@
 	.param .u32 embedding_lookup_f32_param_3,
 	.param .u32 embedding_lookup_f32_param_4
 )
+.maxntid 256, 1, 1
 {
 	.reg .pred 	%p<4>;
 	.reg .b16 	%rs<2>;
@@ -27,9 +28,9 @@
 	.reg .b64 	%rd<18>;
 
 
-	ld.param.u64 	%rd5, [embedding_lookup_f32_param_0];
-	ld.param.u64 	%rd6, [embedding_lookup_f32_param_1];
-	ld.param.u64 	%rd7, [embedding_lookup_f32_param_2];
+	ld.param.u64 	%rd4, [embedding_lookup_f32_param_0];
+	ld.param.u64 	%rd5, [embedding_lookup_f32_param_1];
+	ld.param.u64 	%rd6, [embedding_lookup_f32_param_2];
 	ld.param.u32 	%r7, [embedding_lookup_f32_param_3];
 	ld.param.u32 	%r6, [embedding_lookup_f32_param_4];
 	mov.u32 	%r1, %ctaid.x;
@@ -40,29 +41,29 @@
 	setp.ge.s32 	%p2, %r9, %r6;
 	@%p2 bra 	$L__BB0_4;
 
-	cvta.to.global.u64 	%rd8, %rd6;
-	mul.wide.s32 	%rd9, %r1, 4;
-	add.s64 	%rd10, %rd8, %rd9;
-	ld.global.nc.u32 	%r8, [%rd10];
+	cvta.to.global.u64 	%rd7, %rd5;
+	mul.wide.s32 	%rd8, %r1, 4;
+	add.s64 	%rd9, %rd7, %rd8;
+	ld.global.nc.u32 	%r8, [%rd9];
 	mov.u32 	%r3, %ntid.x;
-	cvta.to.global.u64 	%rd1, %rd7;
-	cvta.to.global.u64 	%rd2, %rd5;
-	mul.wide.s32 	%rd3, %r6, %r1;
-	mul.wide.s32 	%rd4, %r8, %r6;
+	cvta.to.global.u64 	%rd1, %rd4;
+	mul.wide.s32 	%rd2, %r6, %r1;
+	mul.wide.s32 	%rd3, %r8, %r6;
+	cvta.to.global.u64 	%rd15, %rd6;
 
 $L__BB0_3:
-	cvt.s64.s32 	%rd11, %r9;
-	add.s64 	%rd12, %rd3, %rd11;
-	add.s64 	%rd13, %rd4, %rd11;
-	shl.b64 	%rd14, %rd13, 2;
-	add.s64 	%rd15, %rd2, %rd14;
-	ld.global.nc.f32 	%f1, [%rd15];
+	cvt.s64.s32 	%rd10, %r9;
+	add.s64 	%rd11, %rd2, %rd10;
+	add.s64 	%rd12, %rd3, %rd10;
+	shl.b64 	%rd13, %rd12, 2;
+	add.s64 	%rd14, %rd1, %rd13;
+	ld.global.nc.f32 	%f1, [%rd14];
 	// begin inline asm
 	{  cvt.rn.f16.f32 %rs1, %f1;}
 
 	// end inline asm
-	shl.b64 	%rd16, %rd12, 1;
-	add.s64 	%rd17, %rd1, %rd16;
+	shl.b64 	%rd16, %rd11, 1;
+	add.s64 	%rd17, %rd15, %rd16;
 	st.global.u16 	[%rd17], %rs1;
 	add.s32 	%r9, %r9, %r3;
 	setp.lt.s32 	%p3, %r9, %r6;
@@ -80,6 +81,7 @@ $L__BB0_4:
 	.param .u32 embedding_lookup_f16_param_3,
 	.param .u32 embedding_lookup_f16_param_4
 )
+.maxntid 256, 1, 1
 {
 	.reg .pred 	%p<4>;
 	.reg .b16 	%rs<2>;
@@ -87,9 +89,9 @@ $L__BB0_4:
 	.reg .b64 	%rd<18>;
 
 
-	ld.param.u64 	%rd5, [embedding_lookup_f16_param_0];
-	ld.param.u64 	%rd6, [embedding_lookup_f16_param_1];
-	ld.param.u64 	%rd7, [embedding_lookup_f16_param_2];
+	ld.param.u64 	%rd4, [embedding_lookup_f16_param_0];
+	ld.param.u64 	%rd5, [embedding_lookup_f16_param_1];
+	ld.param.u64 	%rd6, [embedding_lookup_f16_param_2];
 	ld.param.u32 	%r7, [embedding_lookup_f16_param_3];
 	ld.param.u32 	%r6, [embedding_lookup_f16_param_4];
 	mov.u32 	%r1, %ctaid.x;
@@ -100,25 +102,25 @@ $L__BB0_4:
 	setp.ge.s32 	%p2, %r9, %r6;
 	@%p2 bra 	$L__BB1_4;
 
-	cvta.to.global.u64 	%rd8, %rd6;
-	mul.wide.s32 	%rd9, %r1, 4;
-	add.s64 	%rd10, %rd8, %rd9;
-	ld.global.nc.u32 	%r8, [%rd10];
+	cvta.to.global.u64 	%rd7, %rd5;
+	mul.wide.s32 	%rd8, %r1, 4;
+	add.s64 	%rd9, %rd7, %rd8;
+	ld.global.nc.u32 	%r8, [%rd9];
 	mov.u32 	%r3, %ntid.x;
-	cvta.to.global.u64 	%rd1, %rd7;
-	cvta.to.global.u64 	%rd2, %rd5;
-	mul.wide.s32 	%rd3, %r6, %r1;
-	mul.wide.s32 	%rd4, %r8, %r6;
+	cvta.to.global.u64 	%rd1, %rd4;
+	mul.wide.s32 	%rd2, %r6, %r1;
+	mul.wide.s32 	%rd3, %r8, %r6;
+	cvta.to.global.u64 	%rd15, %rd6;
 
 $L__BB1_3:
-	cvt.s64.s32 	%rd11, %r9;
-	add.s64 	%rd12, %rd3, %rd11;
-	add.s64 	%rd13, %rd4, %rd11;
-	shl.b64 	%rd14, %rd13, 1;
-	add.s64 	%rd15, %rd2, %rd14;
-	ld.global.nc.u16 	%rs1, [%rd15];
-	shl.b64 	%rd16, %rd12, 1;
-	add.s64 	%rd17, %rd1, %rd16;
+	cvt.s64.s32 	%rd10, %r9;
+	add.s64 	%rd11, %rd2, %rd10;
+	add.s64 	%rd12, %rd3, %rd10;
+	shl.b64 	%rd13, %rd12, 1;
+	add.s64 	%rd14, %rd1, %rd13;
+	ld.global.nc.u16 	%rs1, [%rd14];
+	shl.b64 	%rd16, %rd11, 1;
+	add.s64 	%rd17, %rd15, %rd16;
 	st.global.u16 	[%rd17], %rs1;
 	add.s32 	%r9, %r9, %r3;
 	setp.lt.s32 	%p3, %r9, %r6;
@@ -136,6 +138,7 @@ $L__BB1_4:
 	.param .u32 embedding_lookup_q8_0_param_3,
 	.param .u32 embedding_lookup_q8_0_param_4
 )
+.maxntid 256, 1, 1
 {
 	.reg .pred 	%p<4>;
 	.reg .b16 	%rs<98>;

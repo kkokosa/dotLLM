@@ -22,4 +22,57 @@
     </Content>
   </ItemGroup>
 
+  <!-- CUDA PTX compilation: .cu to .ptx via nvcc.
+       Runs automatically during build if nvcc is in PATH.
+       Skipped when CUDA Toolkit is not installed (CPU-only users
+       get pre-compiled PTX from the repo). -->
+  <PropertyGroup>
+    <CudaKernelDir>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', '..', 'native', 'kernels'))</CudaKernelDir>
+    <PtxOutputDir>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', '..', 'native', 'ptx'))</PtxOutputDir>
+    <CudaArch>compute_61</CudaArch>
+  </PropertyGroup>
+
+  <!-- All .cu kernel files, default to precise math -->
+  <ItemGroup>
+    <CudaKernel Include="$(CudaKernelDir)\*.cu">
+      <FastMathFlag></FastMathFlag>
+    </CudaKernel>
+    <!-- Element-wise kernels: safe for fast_math (no expf/rsqrtf/sinf/cosf accumulation) -->
+    <CudaKernel Update="$(CudaKernelDir)\add.cu;$(CudaKernelDir)\add_f32.cu;$(CudaKernelDir)\swiglu.cu;$(CudaKernelDir)\swiglu_f32.cu;$(CudaKernelDir)\convert.cu;$(CudaKernelDir)\bias_add.cu;$(CudaKernelDir)\bias_add_f32.cu;$(CudaKernelDir)\embedding.cu;$(CudaKernelDir)\embedding_f32out.cu;$(CudaKernelDir)\dequant.cu;$(CudaKernelDir)\quant_kv.cu">
+      <FastMathFlag>--use_fast_math</FastMathFlag>
+    </CudaKernel>
+  </ItemGroup>
+
+  <!-- Compile .cu kernels to PTX via nvcc. Single target: detect nvcc, find cl.exe (Windows), compile. -->
+  <Target Name="CompileCudaPtx" BeforeTargets="BeforeBuild">
+    <!-- 1. Detect nvcc -->
+    <Exec Command="nvcc --version" IgnoreExitCode="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="_NvccExitCode" />
+    </Exec>
+    <Message Condition="'$(_NvccExitCode)' != '0'" Importance="normal"
+             Text="nvcc not found in PATH. Skipping CUDA PTX compilation (pre-compiled PTX from repo will be used)." />
+
+    <!-- 2. On Windows: find cl.exe for nvcc (only if VCToolsInstallDir not already set) -->
+    <PropertyGroup Condition="'$(_NvccExitCode)' == '0' AND '$([MSBuild]::IsOSPlatform(Windows))' == 'true' AND '$(VCToolsInstallDir)' != ''">
+      <_CompilerBinDir>--compiler-bindir="$(VCToolsInstallDir)bin\Hostx64\x64"</_CompilerBinDir>
+    </PropertyGroup>
+    <Exec Condition="'$(_NvccExitCode)' == '0' AND '$([MSBuild]::IsOSPlatform(Windows))' == 'true' AND '$(_CompilerBinDir)' == ''"
+          Command="for /f &quot;delims=&quot; %%i in ('&quot;%25ProgramFiles(x86)%25\Microsoft Visual Studio\Installer\vswhere.exe&quot; -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find VC\Tools\MSVC\**\bin\Hostx64\x64\cl.exe') do @echo %%~dpi"
+          ConsoleToMSBuild="true" IgnoreExitCode="true" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_ClExeDir" />
+    </Exec>
+    <PropertyGroup Condition="'$(_CompilerBinDir)' == '' AND '$(_ClExeDir)' != ''">
+      <_ClExeDirClean>$(_ClExeDir.Trim().TrimEnd('\'))</_ClExeDirClean>
+      <_CompilerBinDir>--compiler-bindir=&quot;$(_ClExeDirClean)&quot;</_CompilerBinDir>
+    </PropertyGroup>
+
+    <!-- 3. Compile each .cu to .ptx -->
+    <MakeDir Condition="'$(_NvccExitCode)' == '0'" Directories="$(PtxOutputDir)" />
+    <Exec Condition="'$(_NvccExitCode)' == '0'"
+          Command="nvcc -ptx -arch=$(CudaArch) %(CudaKernel.FastMathFlag) $(_CompilerBinDir) -o &quot;$(PtxOutputDir)/%(CudaKernel.Filename).ptx&quot; &quot;%(CudaKernel.FullPath)&quot;"
+          StandardOutputImportance="low" />
+    <Message Condition="'$(_NvccExitCode)' == '0'" Importance="high"
+             Text="Compiled %(CudaKernel.Filename).cu to PTX" />
+  </Target>
+
 </Project>

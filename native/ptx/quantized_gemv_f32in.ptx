@@ -20,6 +20,7 @@
 	.param .u32 quantized_gemv_q8_0_f32in_param_3,
 	.param .u32 quantized_gemv_q8_0_f32in_param_4
 )
+.maxntid 256, 1, 1
 {
 	.reg .pred 	%p<19>;
 	.reg .b16 	%rs<18>;
