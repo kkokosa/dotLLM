@@ -14,24 +14,51 @@ public static class RequestConverter
     /// <summary>
     /// Converts chat message DTOs to engine ChatMessage records.
     /// </summary>
-    public static ChatMessage[] ToMessages(ChatMessageDto[] dtos) =>
-        dtos.Select(d => new ChatMessage
+    public static ChatMessage[] ToMessages(ChatMessageDto[] dtos)
+    {
+        var result = new ChatMessage[dtos.Length];
+        for (int i = 0; i < dtos.Length; i++)
         {
-            Role = d.Role,
-            Content = d.Content ?? "",
-            ToolCalls = d.ToolCalls?.Select(tc => new ToolCall(
-                tc.Id, tc.Function.Name, tc.Function.Arguments)).ToArray(),
-            ToolCallId = d.ToolCallId,
-        }).ToArray();
+            var d = dtos[i];
+            ToolCall[]? toolCalls = null;
+            if (d.ToolCalls is { Length: > 0 })
+            {
+                toolCalls = new ToolCall[d.ToolCalls.Length];
+                for (int j = 0; j < d.ToolCalls.Length; j++)
+                {
+                    var tc = d.ToolCalls[j];
+                    toolCalls[j] = new ToolCall(tc.Id, tc.Function.Name, tc.Function.Arguments);
+                }
+            }
+
+            result[i] = new ChatMessage
+            {
+                Role = d.Role,
+                Content = d.Content ?? "",
+                ToolCalls = toolCalls,
+                ToolCallId = d.ToolCallId,
+            };
+        }
+        return result;
+    }
 
     /// <summary>
     /// Converts tool definition DTOs to engine ToolDefinition records.
     /// </summary>
-    public static ToolDefinition[]? ToTools(ToolDefinitionDto[]? dtos) =>
-        dtos?.Select(d => new ToolDefinition(
-            d.Function.Name,
-            d.Function.Description ?? "",
-            d.Function.Parameters?.GetRawText() ?? "{}")).ToArray();
+    public static ToolDefinition[]? ToTools(ToolDefinitionDto[]? dtos)
+    {
+        if (dtos is null) return null;
+        var result = new ToolDefinition[dtos.Length];
+        for (int i = 0; i < dtos.Length; i++)
+        {
+            var d = dtos[i];
+            result[i] = new ToolDefinition(
+                d.Function.Name,
+                d.Function.Description ?? "",
+                d.Function.Parameters?.GetRawText() ?? "{}");
+        }
+        return result;
+    }
 
     /// <summary>
     /// Builds <see cref="InferenceOptions"/> from a chat completion request.
@@ -153,16 +180,24 @@ public static class RequestConverter
     /// <summary>
     /// Converts engine <see cref="ToolCall"/> records to DTOs.
     /// </summary>
-    public static ToolCallDto[] ToToolCallDtos(ToolCall[] toolCalls) =>
-        toolCalls.Select(tc => new ToolCallDto
+    public static ToolCallDto[] ToToolCallDtos(ToolCall[] toolCalls)
+    {
+        var result = new ToolCallDto[toolCalls.Length];
+        for (int i = 0; i < toolCalls.Length; i++)
         {
-            Id = tc.Id,
-            Function = new ToolCallFunctionDto
+            var tc = toolCalls[i];
+            result[i] = new ToolCallDto
             {
-                Name = tc.FunctionName,
-                Arguments = tc.Arguments,
-            }
-        }).ToArray();
+                Id = tc.Id,
+                Function = new ToolCallFunctionDto
+                {
+                    Name = tc.FunctionName,
+                    Arguments = tc.Arguments,
+                }
+            };
+        }
+        return result;
+    }
 
     /// <summary>
     /// Generates a unique request ID in the OpenAI format.
@@ -193,14 +228,25 @@ public static class RequestConverter
 
     private static TokenLogprobDto ToTokenLogprobDto(TokenLogprobInfo info)
     {
-        TopLogprobDto[] topLogprobs = info.TopLogprobs is { Length: > 0 }
-            ? info.TopLogprobs.Select(t => new TopLogprobDto
+        TopLogprobDto[] topLogprobs;
+        if (info.TopLogprobs is { Length: > 0 })
+        {
+            topLogprobs = new TopLogprobDto[info.TopLogprobs.Length];
+            for (int i = 0; i < info.TopLogprobs.Length; i++)
             {
-                Token = t.Token,
-                Logprob = t.Logprob,
-                Bytes = t.Bytes,
-            }).ToArray()
-            : [];
+                var t = info.TopLogprobs[i];
+                topLogprobs[i] = new TopLogprobDto
+                {
+                    Token = t.Token,
+                    Logprob = t.Logprob,
+                    Bytes = t.Bytes,
+                };
+            }
+        }
+        else
+        {
+            topLogprobs = [];
+        }
 
         return new TokenLogprobDto
         {

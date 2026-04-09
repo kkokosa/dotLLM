@@ -216,3 +216,45 @@ Ensures first real request doesn't pay JIT compilation or CUDA kernel loading pe
 
 - `GET /health` — Returns 200 when server is running.
 - `GET /ready` — Returns 200 only after warm-up completes and model is loaded. Used by load balancers.
+
+## Security
+
+**dotLLM's server is a development/local tool.** It has no authentication, no TLS, and permissive CORS. Do not expose it to the internet without a reverse proxy.
+
+### Binding
+
+The server binds to `localhost` by default. To expose externally, pass `--host 0.0.0.0` — but only behind a reverse proxy (nginx, Caddy, Traefik) that provides TLS and authentication.
+
+### Authentication
+
+No built-in auth. For network-exposed deployments, configure your reverse proxy to require `Authorization: Bearer <key>` headers.
+
+### CORS
+
+Default policy is permissive (`AllowAnyOrigin`) for local Chat UI development. For production, restrict origins via your reverse proxy.
+
+### Dangerous Endpoints
+
+- `POST /v1/models/load` — loads arbitrary GGUF files from disk
+- `POST /v1/config` — changes sampling parameters
+
+These are designed for the local Chat UI workflow and must not be internet-exposed.
+
+## Concurrency
+
+The server processes one inference request at a time, serialized by a `SemaphoreSlim(1, 1)` gate. Concurrent requests queue and are served FIFO. This is by design — no batch scheduler exists yet.
+
+The startup log prints `Single-request mode — requests processed sequentially` as a reminder.
+
+## Request Validation
+
+Both `/v1/chat/completions` and `/v1/completions` validate inputs before inference:
+
+| Check | Limit | Response |
+|-------|-------|----------|
+| Empty messages array | 0 | 400 `"messages array must not be empty"` |
+| Messages count | > 1024 | 400 `"messages array exceeds maximum of 1024"` |
+| Empty prompt (completions) | empty/null | 400 `"prompt must not be empty"` |
+| `max_tokens` | &le; 0 | 400 `"max_tokens must be a positive integer"` |
+| Prompt token count | &ge; `MaxSequenceLength` | 400 `"prompt (N tokens) exceeds model context length (M)"` |
+| `prompt_tokens + max_tokens` | > `MaxSequenceLength` | `max_tokens` silently clamped to remaining context |

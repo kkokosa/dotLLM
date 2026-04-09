@@ -30,15 +30,45 @@ public static class CompletionEndpoint
             return;
         }
 
+        // Validate request structure
+        var validationError = RequestValidator.ValidateCompletionRequest(request);
+        if (validationError is not null)
+        {
+            httpContext.Response.StatusCode = 400;
+            await httpContext.Response.WriteAsJsonAsync(
+                new ErrorResponse { Error = validationError },
+                ServerJsonContext.Default.ErrorResponse,
+                contentType: null,
+                httpContext.RequestAborted);
+            return;
+        }
+
         var ct = httpContext.RequestAborted;
         var requestId = RequestConverter.GenerateRequestId();
         var modelId = state.Options.ModelId;
         var generator = state.Generator;
 
+        // Validate prompt length against model context
+        int maxTokens = request.MaxTokens ?? state.SamplingDefaults.MaxTokens;
+        var promptError = RequestValidator.ValidatePromptLength(
+            request.Prompt, state.Tokenizer!, state.Config!.MaxSequenceLength,
+            maxTokens, out int effectiveMaxTokens, out _);
+        if (promptError is not null)
+        {
+            httpContext.Response.StatusCode = 400;
+            await httpContext.Response.WriteAsJsonAsync(
+                new ErrorResponse { Error = promptError },
+                ServerJsonContext.Default.ErrorResponse,
+                contentType: null,
+                httpContext.RequestAborted);
+            return;
+        }
+
         var options = RequestConverter.ToInferenceOptions(request,
             state.SamplingDefaults,
             new DotLLM.Core.Configuration.ThreadingConfig(
                 state.Options.Threads, state.Options.DecodeThreads));
+        options = options with { MaxTokens = effectiveMaxTokens };
 
         if (request.Stream)
             await HandleStreamingAsync(generator, state, httpContext, request.Prompt, options,
