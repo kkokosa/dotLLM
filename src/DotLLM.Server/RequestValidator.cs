@@ -17,7 +17,7 @@ public static class RequestValidator
     /// </summary>
     public static string? ValidateChatRequest(ChatCompletionRequest request)
     {
-        if (request.Messages.Length == 0)
+        if (request.Messages is null || request.Messages.Length == 0)
             return "messages array must not be empty";
 
         if (request.Messages.Length > MaxMessages)
@@ -53,8 +53,9 @@ public static class RequestValidator
         string prompt, ITokenizer tokenizer, int maxSequenceLength,
         int requestedMaxTokens, out int effectiveMaxTokens, out int promptTokenCount)
     {
-        var tokens = tokenizer.Encode(prompt);
-        promptTokenCount = tokens.Length;
+        // TODO: BpeTokenizer.CountTokens currently delegates to Encode().Length (same allocation).
+        // When a streaming/counting-only tokenizer path is added, this will benefit automatically.
+        promptTokenCount = tokenizer.CountTokens(prompt);
 
         if (promptTokenCount >= maxSequenceLength)
         {
