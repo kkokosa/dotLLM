@@ -19,14 +19,13 @@ mkdir -p "$OUT_DIR"
 ARCH="compute_61"
 
 # Kernels where --use_fast_math is safe (element-wise ops, no precision-sensitive math):
-FAST_MATH_KERNELS="add add_f32 swiglu swiglu_f32 convert bias_add bias_add_f32 embedding embedding_f32out dequant quant_kv"
+FAST_MATH_KERNELS="add add_f32 swiglu swiglu_f32 convert bias_add bias_add_f32 embedding embedding_f32out dequant quant_kv quantized_gemv quantized_gemv_f32in"
 
 # Kernels requiring precise math (expf, rsqrtf, sinf, cosf, powf):
 # - softmax/attention: expf in softmax accumulates error
 # - rmsnorm/fused_add_rmsnorm: rsqrtf precision matters
 # - rope: sinf/cosf/powf precision matters for position encoding
-# - quantized_gemv: feeds precision-sensitive downstream ops
-PRECISE_KERNELS="softmax rmsnorm rmsnorm_f32 rmsnorm_f32in rope rope_f32 attention attention_f32 fused_add_rmsnorm per_head_rmsnorm per_head_rmsnorm_f32 quantized_gemv quantized_gemv_f32in"
+PRECISE_KERNELS="softmax rmsnorm rmsnorm_f32 rmsnorm_f32in rope rope_f32 attention attention_f32 fused_add_rmsnorm per_head_rmsnorm per_head_rmsnorm_f32"
 
 is_fast_math_kernel() {
     local name="$1"

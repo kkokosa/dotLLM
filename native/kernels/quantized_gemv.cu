@@ -64,7 +64,7 @@ extern "C" __global__ void __launch_bounds__(256) quantized_gemv_q8_0(
 
 // ── Q4_K: 144 bytes per 256 values ──────────────────────────────────
 
-extern "C" __global__ void __launch_bounds__(256, 2) quantized_gemv_q4_k(
+extern "C" __global__ void __launch_bounds__(256) quantized_gemv_q4_k(
     const uint8_t* __restrict__ weight,
     const half* __restrict__ x,
     half* __restrict__ y,
@@ -155,7 +155,7 @@ extern "C" __global__ void __launch_bounds__(256, 2) quantized_gemv_q4_k(
 
 // ── Q6_K: 210 bytes per 256 values ──────────────────────────────────
 
-extern "C" __global__ void __launch_bounds__(256, 2) quantized_gemv_q6_k(
+extern "C" __global__ void __launch_bounds__(256) quantized_gemv_q6_k(
     const uint8_t* __restrict__ weight,
     const half* __restrict__ x,
     half* __restrict__ y,
@@ -301,7 +301,7 @@ extern "C" __global__ void __launch_bounds__(256) quantized_gemv_q5_0(
 // ── Q5_K: 176 bytes per 256 values ──────────────────────────────────
 // struct block_q5_K { half d, dmin; uint8_t scales[12]; uint8_t qh[32]; uint8_t qs[128]; };
 
-extern "C" __global__ void __launch_bounds__(256, 2) quantized_gemv_q5_k(
+extern "C" __global__ void __launch_bounds__(256) quantized_gemv_q5_k(
     const uint8_t* __restrict__ weight,
     const half* __restrict__ x,
     half* __restrict__ y,
