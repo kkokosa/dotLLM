@@ -30,16 +30,31 @@ public sealed class TopKSampler : ISamplerStep
             var sorted = rented.AsSpan(0, logits.Length);
             logits.CopyTo(sorted);
 
-            // Partial sort: find the k-th largest value as threshold.
-            // Full sort is simpler and sufficient for typical vocab sizes with this approach.
+            // Full sort to find the k-th largest value as threshold.
             sorted.Sort();
             // sorted is ascending; k-th largest is at index [length - k]
             float threshold = sorted[logits.Length - k];
 
+            // Count tokens strictly above threshold to handle ties correctly.
+            // Allow only enough ties to fill exactly K slots.
+            int aboveCount = 0;
             for (int i = 0; i < logits.Length; i++)
             {
-                if (logits[i] < threshold)
-                    logits[i] = float.NegativeInfinity;
+                if (logits[i] > threshold)
+                    aboveCount++;
+            }
+
+            int tiesAllowed = k - aboveCount;
+            for (int i = 0; i < logits.Length; i++)
+            {
+                if (logits[i] > threshold)
+                    continue;
+                if (logits[i] == threshold && tiesAllowed > 0)
+                {
+                    tiesAllowed--;
+                    continue;
+                }
+                logits[i] = float.NegativeInfinity;
             }
         }
         finally

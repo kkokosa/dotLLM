@@ -37,20 +37,20 @@ public static class RequestConverter
     /// Builds <see cref="InferenceOptions"/> from a chat completion request.
     /// </summary>
     public static InferenceOptions ToInferenceOptions(ChatCompletionRequest request,
-        IReadOnlyList<string> stopSequences, ThreadingConfig threading)
+        IReadOnlyList<string> stopSequences, SamplingDefaults defaults, ThreadingConfig threading)
     {
         var allStops = new List<string>(stopSequences);
         AddRequestStopSequences(allStops, request.Stop);
 
         return new InferenceOptions
         {
-            Temperature = request.Temperature ?? 0.7f,
-            TopK = request.TopK ?? 0,
-            TopP = request.TopP ?? 1.0f,
-            MinP = request.MinP ?? 0f,
-            RepetitionPenalty = request.RepetitionPenalty ?? 1.0f,
-            MaxTokens = request.MaxTokens ?? 2048,
-            Seed = request.Seed,
+            Temperature = request.Temperature ?? defaults.Temperature,
+            TopK = request.TopK ?? defaults.TopK,
+            TopP = request.TopP ?? defaults.TopP,
+            MinP = request.MinP ?? defaults.MinP,
+            RepetitionPenalty = request.RepetitionPenalty ?? defaults.RepetitionPenalty,
+            MaxTokens = request.MaxTokens ?? defaults.MaxTokens,
+            Seed = request.Seed ?? defaults.Seed,
             StopSequences = allStops,
             ResponseFormat = ParseResponseFormat(request.ResponseFormat),
             Logprobs = request.Logprobs ?? false,
@@ -63,20 +63,20 @@ public static class RequestConverter
     /// Builds <see cref="InferenceOptions"/> from a raw completion request.
     /// </summary>
     public static InferenceOptions ToInferenceOptions(CompletionRequest request,
-        ThreadingConfig threading)
+        SamplingDefaults defaults, ThreadingConfig threading)
     {
         var stops = new List<string>();
         AddRequestStopSequences(stops, request.Stop);
 
         return new InferenceOptions
         {
-            Temperature = request.Temperature ?? 0.7f,
-            TopK = request.TopK ?? 0,
-            TopP = request.TopP ?? 1.0f,
-            MinP = request.MinP ?? 0f,
-            RepetitionPenalty = request.RepetitionPenalty ?? 1.0f,
-            MaxTokens = request.MaxTokens ?? 2048,
-            Seed = request.Seed,
+            Temperature = request.Temperature ?? defaults.Temperature,
+            TopK = request.TopK ?? defaults.TopK,
+            TopP = request.TopP ?? defaults.TopP,
+            MinP = request.MinP ?? defaults.MinP,
+            RepetitionPenalty = request.RepetitionPenalty ?? defaults.RepetitionPenalty,
+            MaxTokens = request.MaxTokens ?? defaults.MaxTokens,
+            Seed = request.Seed ?? defaults.Seed,
             StopSequences = stops,
             ResponseFormat = ParseResponseFormat(request.ResponseFormat),
             Logprobs = request.Logprobs ?? false,

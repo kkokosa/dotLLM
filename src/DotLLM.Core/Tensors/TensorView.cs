@@ -25,7 +25,7 @@ public sealed class TensorView : ITensor
     public long ElementCount { get; }
 
     /// <inheritdoc/>
-    public long ByteCount => ElementCount * DType.SizeInBytes;
+    public long ByteCount => DType.ComputeByteCount(ElementCount);
 
     /// <summary>
     /// Creates a non-owning view over an existing data pointer.

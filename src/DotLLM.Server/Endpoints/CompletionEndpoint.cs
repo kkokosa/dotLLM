@@ -36,6 +36,7 @@ public static class CompletionEndpoint
         var generator = state.Generator;
 
         var options = RequestConverter.ToInferenceOptions(request,
+            state.SamplingDefaults,
             new DotLLM.Core.Configuration.ThreadingConfig(
                 state.Options.Threads, state.Options.DecodeThreads));
 

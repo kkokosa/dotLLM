@@ -70,4 +70,20 @@ public class CategoricalSamplerTests
 
         Assert.True(seen.Count > 1, "Uniform distribution should produce variety over 100 samples.");
     }
+
+    [Fact]
+    public void Sample_FallbackReturnsHighestProbToken()
+    {
+        // Construct logits where index 2 has the highest logit.
+        // The fallback should return index 2, not vocabSize-1 (index 4).
+        float[] logits = [-10f, -10f, 10f, -10f, -10f];
+
+        // With such peaked logits, softmax gives ~1.0 to index 2.
+        // All seeds should pick index 2 (either through normal sampling or fallback).
+        for (int i = 0; i < 20; i++)
+        {
+            int result = CategoricalSampler.Sample(logits, new Random(i));
+            Assert.Equal(2, result);
+        }
+    }
 }

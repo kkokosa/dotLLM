@@ -1,4 +1,5 @@
 using System.IO.MemoryMappedFiles;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 
 namespace DotLLM.Models.Gguf;
@@ -75,6 +76,7 @@ public sealed unsafe class GgufFile : IDisposable
         List<GgufTensorDescriptor> tensors;
         long streamPositionAfterInfos;
 
+        long fileLength;
         using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
         using (var reader = new BinaryReader(fs))
         {
@@ -82,13 +84,28 @@ public sealed unsafe class GgufFile : IDisposable
             rawMetadata = GgufReader.ReadMetadata(reader, header);
             tensors = GgufReader.ReadTensorInfos(reader, header);
             streamPositionAfterInfos = fs.Position;
+            fileLength = fs.Length;
         }
 
         var metadata = new GgufMetadata(rawMetadata);
 
         // Alignment: default 32, overridable via general.alignment.
         uint alignment = metadata.GetUInt32OrDefault("general.alignment", 32);
+        if (alignment == 0 || !BitOperations.IsPow2(alignment))
+            throw new InvalidDataException(
+                $"GGUF alignment must be a power of 2, got {alignment}.");
+
         long dataSectionOffset = AlignUp(streamPositionAfterInfos, alignment);
+
+        // Validate tensor data offsets are within the file.
+        long dataSectionLength = fileLength - dataSectionOffset;
+        foreach (var tensor in tensors)
+        {
+            if ((long)tensor.DataOffset >= dataSectionLength)
+                throw new InvalidDataException(
+                    $"Tensor '{tensor.Name}' offset ({tensor.DataOffset}) " +
+                    $"exceeds data section size ({dataSectionLength}).");
+        }
 
         var tensorsByName = new Dictionary<string, GgufTensorDescriptor>(tensors.Count);
         foreach (var tensor in tensors)

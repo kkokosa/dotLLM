@@ -140,4 +140,48 @@ public class GgufFileTests : IDisposable
 
         Assert.Equal(0, file.DataSectionOffset % 32);
     }
+
+    [Fact]
+    public void Open_TensorOffsetBeyondFile_Throws()
+    {
+        // Build a GGUF with two tensors. The second tensor's offset
+        // is computed from the first blob size. Then truncate the file
+        // so the second tensor's data section offset is past the end.
+        var data = new GgufTestData(version: 3)
+            .AddTensor("first", [4], 0, new byte[16])
+            .AddTensor("second", [4], 0, new byte[16]);
+        string path = WriteTempGguf(data);
+
+        // Truncate the file to remove the second tensor's data entirely.
+        // The second tensor has DataOffset=16 but the data section will be < 16 bytes.
+        byte[] bytes = File.ReadAllBytes(path);
+        File.WriteAllBytes(path, bytes[..(bytes.Length - 20)]);
+
+        var ex = Assert.Throws<InvalidDataException>(() => GgufFile.Open(path));
+        Assert.Contains("second", ex.Message);
+    }
+
+    [Fact]
+    public void Open_NonPowerOf2Alignment_Throws()
+    {
+        var data = new GgufTestData(version: 3)
+            .AddUInt32("general.alignment", 3)
+            .AddTensor("w", [4], 0, new byte[16]);
+        string path = WriteTempGguf(data);
+
+        var ex = Assert.Throws<InvalidDataException>(() => GgufFile.Open(path));
+        Assert.Contains("power of 2", ex.Message);
+    }
+
+    [Fact]
+    public void Open_ZeroAlignment_Throws()
+    {
+        var data = new GgufTestData(version: 3)
+            .AddUInt32("general.alignment", 0)
+            .AddTensor("w", [4], 0, new byte[16]);
+        string path = WriteTempGguf(data);
+
+        var ex = Assert.Throws<InvalidDataException>(() => GgufFile.Open(path));
+        Assert.Contains("power of 2", ex.Message);
+    }
 }

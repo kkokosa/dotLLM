@@ -55,6 +55,7 @@ public static class ChatCompletionEndpoint
         // Build inference options
         var stopSequences = CommonStopSequences;
         var options = RequestConverter.ToInferenceOptions(request, stopSequences,
+            state.SamplingDefaults,
             new DotLLM.Core.Configuration.ThreadingConfig(
                 state.Options.Threads, state.Options.DecodeThreads));
 
@@ -253,7 +254,6 @@ public static class ChatCompletionEndpoint
                 SpeculativeAcceptedTokens = timings.Value.SpeculativeAcceptedTokens,
                 SpeculativeAcceptanceRate = timings.Value.SpeculativeAcceptanceRate,
             } : null,
-            Prompt = prompt,
         };
         await WriteSseChunk(httpContext, finalChunk, ct);
 

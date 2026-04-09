@@ -28,7 +28,7 @@ public sealed class MappedTensor : ITensor
     public long ElementCount => _elementCount;
 
     /// <inheritdoc/>
-    public long ByteCount => _elementCount * DType.SizeInBytes;
+    public long ByteCount => DType.ComputeByteCount(_elementCount);
 
     /// <summary>
     /// Creates a non-owning tensor view over the given pointer.

@@ -37,8 +37,8 @@ public static class CategoricalSampler
                     return i;
             }
 
-            // TODO: Return last non-masked token instead of vocab end (slight bias for floating-point edge cases)
-            return vocabSize - 1;
+            // Floating-point edge case: return highest-probability token
+            return TensorPrimitives.IndexOfMax(probs);
         }
         finally
         {

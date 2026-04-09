@@ -50,9 +50,9 @@ public sealed class CudaTensor : ITensor
     /// <param name="deviceId">GPU device ordinal (0-based).</param>
     public static CudaTensor Allocate(TensorShape shape, DType dtype, int deviceId)
     {
-        long bytes = shape.ElementCount * dtype.SizeInBytes;
+        long bytes = dtype.ComputeByteCount(shape.ElementCount);
         if (bytes <= 0)
-            throw new ArgumentException($"Cannot allocate tensor with {shape.ElementCount} elements of {dtype} (SizeInBytes={dtype.SizeInBytes}).");
+            throw new ArgumentException($"Cannot allocate tensor with {shape.ElementCount} elements of {dtype} (computed byte count={bytes}).");
 
         CudaDriverApi.cuMemAlloc_v2(out nint ptr, (nuint)bytes).ThrowOnError();
         return new CudaTensor(shape, dtype, deviceId, ptr, bytes);

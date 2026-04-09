@@ -60,4 +60,31 @@ public class TopKSamplerTests
         Assert.Equal(5.0f, logits[1]);
         Assert.True(float.IsNegativeInfinity(logits[2]));
     }
+
+    [Fact]
+    public void Apply_WithTies_KeepsExactlyK()
+    {
+        // [1, 2, 2, 2, 3] with K=2: should keep exactly 2 tokens (3 and one of the 2s)
+        float[] logits = [1.0f, 2.0f, 2.0f, 2.0f, 3.0f];
+        var context = new SamplerContext(Temperature: 1.0f, TopK: 2, TopP: 1.0f, MinP: 0f, Seed: null);
+
+        _sampler.Apply(logits, context);
+
+        int keptCount = logits.Count(v => !float.IsNegativeInfinity(v));
+        Assert.Equal(2, keptCount);
+        // The max value (3.0) must always be kept
+        Assert.Equal(3.0f, logits[4]);
+    }
+
+    [Fact]
+    public void Apply_AllSameValue_KeepsExactlyK()
+    {
+        float[] logits = [5.0f, 5.0f, 5.0f, 5.0f];
+        var context = new SamplerContext(Temperature: 1.0f, TopK: 2, TopP: 1.0f, MinP: 0f, Seed: null);
+
+        _sampler.Apply(logits, context);
+
+        int keptCount = logits.Count(v => !float.IsNegativeInfinity(v));
+        Assert.Equal(2, keptCount);
+    }
 }

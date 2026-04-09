@@ -36,7 +36,7 @@ public readonly record struct TensorRef
     public long ByteCount
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => ElementCount * DType.SizeInBytes;
+        get => DType.ComputeByteCount(ElementCount);
     }
 
     /// <summary>

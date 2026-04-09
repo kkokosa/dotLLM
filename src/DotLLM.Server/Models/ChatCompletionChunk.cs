@@ -30,10 +30,6 @@ public sealed record ChatCompletionChunk
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public TimingsDto? Timings { get; init; }
 
-    /// <summary>Raw prompt string after chat template application (dotLLM extension for diagnostics).</summary>
-    [JsonPropertyName("prompt")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? Prompt { get; init; }
 }
 
 /// <summary>

@@ -31,7 +31,7 @@ public sealed class UnmanagedTensor : ITensor
     public long ElementCount => _elementCount;
 
     /// <inheritdoc/>
-    public long ByteCount => _elementCount * DType.SizeInBytes;
+    public long ByteCount => DType.ComputeByteCount(_elementCount);
 
     /// <summary>
     /// Wraps an existing aligned pointer in a tensor. The tensor takes ownership of the pointer.
@@ -59,7 +59,7 @@ public sealed class UnmanagedTensor : ITensor
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe UnmanagedTensor Allocate(TensorShape shape, DType dtype, int deviceId = -1)
     {
-        long byteCount = shape.ElementCount * dtype.SizeInBytes;
+        long byteCount = dtype.ComputeByteCount(shape.ElementCount);
         nint ptr = (nint)NativeMemory.AlignedAlloc((nuint)byteCount, 64);
         return new UnmanagedTensor(shape, dtype, deviceId, ptr);
     }

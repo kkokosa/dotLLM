@@ -260,7 +260,7 @@ internal sealed class CudaWeights : IDisposable
             CudaDriverApi.cuMemAlloc_v2(out nint devF16, (nuint)f16Bytes).ThrowOnError();
             allocs.Add(devF16);
             kernels.LaunchConvertF32ToF16(devF32, devF16, totalElements, stream);
-            CudaDriverApi.cuStreamSynchronize(stream);
+            CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
             allocs.Remove(devF32);
             CudaDriverApi.cuMemFree_v2(devF32);
             return devF16;

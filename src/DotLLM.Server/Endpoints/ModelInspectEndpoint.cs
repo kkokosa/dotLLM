@@ -22,6 +22,7 @@ public static class ModelInspectEndpoint
             if (!IsAllowedModelPath(fullPath, state))
                 return Results.Json(
                     new ErrorResponse { Error = "Path is outside allowed model directories" },
+                    ServerJsonContext.Default.ErrorResponse,
                     statusCode: 403);
 
             if (!fullPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase))
