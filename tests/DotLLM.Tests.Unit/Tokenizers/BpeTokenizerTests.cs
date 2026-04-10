@@ -320,6 +320,94 @@ public class BpeTokenizerTests
     }
 
     // -------------------------------------------------------------------------
+    // Special-token pre-splitting (trie-based)
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Minimal ChatML-style vocab with special control tokens:
+    ///   0:&lt;unk&gt;  1:h  2:i  3:&lt;|im_start|&gt;  4:&lt;|im_end|&gt;  5:&lt;|user|&gt;  6:&lt;|im&gt;
+    /// Tokens 3..6 have tokenType=3 (control) so they are pre-split before BPE.
+    /// Token 6 (&lt;|im&gt;) is a strict prefix of tokens 3/4 — exercises longest-match semantics.
+    /// </summary>
+    private static BpeTokenizer BuildChatMlVocab()
+    {
+        string[] tokens = ["<unk>", "h", "i", "<|im_start|>", "<|im_end|>", "<|user|>", "<|im>"];
+        float[] scores  = [0f, -1f, -2f, 0f, 0f, 0f, 0f];
+        int[] tokenTypes = [1, 1, 1, 3, 3, 3, 3]; // 1=normal, 3=control
+        return BpeTokenizer.CreateSentencePiece(tokens, scores, tokenTypes,
+            bosId: 0, eosId: 0, addBosSpace: false);
+    }
+
+    [Fact]
+    public void SpecialToken_EmittedAsSingleId_NotBpeEncoded()
+    {
+        var tok = BuildChatMlVocab();
+        int[] ids = tok.Encode("<|im_start|>");
+        Assert.Equal([3], ids);
+    }
+
+    [Fact]
+    public void SpecialToken_LongestMatchWins_OverPrefix()
+    {
+        // "<|im_start|>" must match before "<|im>" (both are prefixes; longest wins).
+        var tok = BuildChatMlVocab();
+        int[] ids = tok.Encode("<|im_start|>");
+        Assert.Equal([3], ids);
+
+        // "<|im>" on its own should still match as its own control token.
+        int[] idsShort = tok.Encode("<|im>");
+        Assert.Equal([6], idsShort);
+    }
+
+    [Fact]
+    public void SpecialToken_SplitsSurroundingText_IntoBpeSegments()
+    {
+        var tok = BuildChatMlVocab();
+        // "hi<|im_end|>hi" → [h, i, <|im_end|>, h, i] = [1, 2, 4, 1, 2]
+        int[] ids = tok.Encode("hi<|im_end|>hi");
+        Assert.Equal([1, 2, 4, 1, 2], ids);
+    }
+
+    [Fact]
+    public void SpecialToken_AtStart_NotAtEnd_EmitsCorrectOrder()
+    {
+        var tok = BuildChatMlVocab();
+        int[] ids = tok.Encode("<|im_start|>hi");
+        Assert.Equal([3, 1, 2], ids);
+    }
+
+    [Fact]
+    public void SpecialToken_MultipleAdjacent_EmittedConsecutively()
+    {
+        var tok = BuildChatMlVocab();
+        int[] ids = tok.Encode("<|im_start|><|im_end|>");
+        Assert.Equal([3, 4], ids);
+    }
+
+    [Fact]
+    public void SpecialToken_TextContainsOpeningBracketButNotFullMatch_BpeEncodesLiterally()
+    {
+        var tok = BuildChatMlVocab();
+        // "hi<" has no matching special token → BPE over the whole segment.
+        // "<" is not in the vocab → byte fallback? BuildChatMlVocab has no byte tokens,
+        // so the unknown char becomes <unk>(0). The test just verifies the special-token scan
+        // doesn't match "<" by itself and doesn't crash.
+        int[] ids = tok.Encode("hi<");
+        // h, i, <unk>
+        Assert.Equal([1, 2, 0], ids);
+    }
+
+    [Fact]
+    public void SpecialToken_NoSpecials_TakesFastPath()
+    {
+        // Vocab with no control tokens → specialTokens.Length == 0, trie is null,
+        // Encode() should take the no-special-tokens fast path.
+        var tok = BuildMinimalVocab(); // tokenTypes=null → no specials
+        int[] ids = tok.Encode("abc");
+        Assert.Equal([6], ids);
+    }
+
+    // -------------------------------------------------------------------------
     // Tiktoken pre-tokenization
     // -------------------------------------------------------------------------
 

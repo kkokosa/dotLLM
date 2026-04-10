@@ -10,6 +10,8 @@ public sealed unsafe class DequantizeTests
 {
     private const int Q8_0BlockBytes = 34;
     private const int Q8_0GroupSize = 32;
+    private const int Q5_0BlockBytes = 22;
+    private const int Q5_0GroupSize = 32;
 
     // ──────────────────── FP16 ────────────────────
 
@@ -236,6 +238,93 @@ public sealed unsafe class DequantizeTests
         }
     }
 
+    // ──────────────────── Q5_0 ────────────────────
+
+    [Fact]
+    public void Q5_0_Scalar_ZeroPayload_Gives_NegativeSixteenTimesScale()
+    {
+        // All nibbles + high bits = 0 → every value becomes (0 - 16) * scale = -16 * scale.
+        nint ptr = AllocQ5_0Block(scale: (Half)0.5f, qh: 0u, fillQs: _ => 0);
+        try
+        {
+            float[] dest = new float[Q5_0GroupSize];
+            Dequantize.ToFloat32(ptr, Q5_0GroupSize, QuantizationType.Q5_0, dest);
+            for (int i = 0; i < Q5_0GroupSize; i++)
+                Assert.Equal(-8.0f, dest[i]);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
+    [Fact]
+    public void Q5_0_Scalar_AllBitsSet_Gives_PositiveFifteenTimesScale()
+    {
+        // All nibbles = 0xFF (lo=0xF, hi=0xF) + all high bits set → each element = (31 - 16) = 15.
+        nint ptr = AllocQ5_0Block(scale: (Half)1.0f, qh: 0xFFFFFFFFu, fillQs: _ => 0xFF);
+        try
+        {
+            float[] dest = new float[Q5_0GroupSize];
+            Dequantize.ToFloat32(ptr, Q5_0GroupSize, QuantizationType.Q5_0, dest);
+            for (int i = 0; i < Q5_0GroupSize; i++)
+                Assert.Equal(15.0f, dest[i]);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
+    [Fact]
+    public void Q5_0_ScalarVsAvx2_MatchOnPseudoRandomBlocks()
+    {
+        const int blockCount = 32;
+        const int totalElements = blockCount * Q5_0GroupSize;
+        nuint totalBytes = (nuint)(blockCount * Q5_0BlockBytes);
+
+        nint ptr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        try
+        {
+            // Fill with deterministic pseudo-random data.
+            var rng = new Random(1337);
+            byte* p = (byte*)ptr;
+            for (int b = 0; b < blockCount; b++)
+            {
+                *(Half*)p = (Half)(rng.NextSingle() * 4.0f - 2.0f);
+                uint qh = (uint)rng.Next() ^ ((uint)rng.Next() << 16);
+                *(uint*)(p + 2) = qh;
+                for (int i = 0; i < 16; i++)
+                    (p + 6)[i] = (byte)rng.Next(0, 256);
+                p += Q5_0BlockBytes;
+            }
+
+            float[] scalarDest = new float[totalElements];
+            float[] simdDest = new float[totalElements];
+
+            Dequantize.DequantizeQ5_0Scalar(ptr, totalElements, scalarDest);
+
+            if (Avx2.IsSupported)
+            {
+                Dequantize.DequantizeQ5_0Avx2(ptr, totalElements, simdDest);
+
+                for (int i = 0; i < totalElements; i++)
+                    Assert.Equal(scalarDest[i], simdDest[i], 1e-5f);
+            }
+
+            // Also verify the public dispatch path matches scalar (exercises the Avx2.IsSupported branch).
+            float[] dispatchDest = new float[totalElements];
+            Dequantize.ToFloat32(ptr, totalElements, QuantizationType.Q5_0, dispatchDest);
+
+            for (int i = 0; i < totalElements; i++)
+                Assert.Equal(scalarDest[i], dispatchDest[i], 1e-5f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
     // ──────────────────── F32 ────────────────────
 
     [Fact]
@@ -295,6 +384,17 @@ public sealed unsafe class DequantizeTests
         *(Half*)p = scale;
         for (int i = 0; i < Q8_0GroupSize; i++)
             ((sbyte*)(p + 2))[i] = fillQs(i);
+        return ptr;
+    }
+
+    private static nint AllocQ5_0Block(Half scale, uint qh, Func<int, byte> fillQs)
+    {
+        nint ptr = (nint)NativeMemory.AlignedAlloc(Q5_0BlockBytes, 32);
+        byte* p = (byte*)ptr;
+        *(Half*)p = scale;
+        *(uint*)(p + 2) = qh;
+        for (int i = 0; i < 16; i++)
+            (p + 6)[i] = fillQs(i);
         return ptr;
     }
 }

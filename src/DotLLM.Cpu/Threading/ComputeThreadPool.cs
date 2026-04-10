@@ -29,11 +29,17 @@ public sealed unsafe class ComputeThreadPool : IDisposable
     private readonly int _threadCount;
     private readonly int _decodeThreadCount;
     private readonly int[] _workerCoreAssignment; // maps worker index → logical processor ID (or -1)
+    private readonly int _callerCoreId;           // -1 if caller thread should not be pinned
 
     private volatile bool _shutdown;
     private int _dispatchGeneration;
     private volatile DispatchMode _currentMode;
     private volatile int _activeWorkerCount; // number of active workers (not including caller)
+
+    // Caller-thread pinning state (see PinCallerThread).
+    // _callerPinAttempted: 0 = first-dispatch needed, 1 = already attempted (success or skip).
+    private int _callerPinAttempted;
+    private volatile bool _callerPinSucceeded;
 
     // Current work item — set by Dispatch before signalling workers
     private nint _context;
@@ -47,6 +53,14 @@ public sealed unsafe class ComputeThreadPool : IDisposable
 
     /// <summary>Total number of threads (workers + caller).</summary>
     public int ThreadCount => _threadCount;
+
+    /// <summary>
+    /// Whether the caller (inference) thread has been successfully pinned to a logical
+    /// processor. <c>false</c> when pinning is disabled, unsupported on the current OS,
+    /// the caller ran on a ThreadPool thread, or the pin syscall failed. Exposed for
+    /// observability and testing.
+    /// </summary>
+    public bool CallerThreadPinned => _callerPinSucceeded;
 
     /// <summary>
     /// Creates a compute thread pool with <paramref name="threadCount"/> total threads.
@@ -82,8 +96,10 @@ public sealed unsafe class ComputeThreadPool : IDisposable
                 ? Math.Clamp(topology.MemoryChannelEstimate, 2, threadCount)
                 : threadCount;
 
-        // Build core assignment map
-        _workerCoreAssignment = BuildCoreAssignment(workerCount, topology, config);
+        // Build core assignment map (and caller core if pinning is enabled).
+        (int[] workerAssignment, int callerCore) = BuildCoreAssignment(workerCount, topology, config);
+        _workerCoreAssignment = workerAssignment;
+        _callerCoreId = config.EnableCallerPinning ? callerCore : -1;
 
         _workers = new Thread[workerCount];
         _workReady = new ManualResetEventSlim[workerCount];
@@ -137,6 +153,12 @@ public sealed unsafe class ComputeThreadPool : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Dispatch(nint context, delegate*<nint, int, int, void> fn)
     {
+        // Lazily pin the caller thread on the first dispatch. Doing this in the constructor
+        // would be wrong because the inference loop may run on a different thread than the
+        // one that built the pool.
+        if (_callerPinAttempted == 0)
+            PinCallerThread();
+
         int activeWorkers = _activeWorkerCount;
         int totalActive = activeWorkers + 1; // workers + caller
 
@@ -278,22 +300,56 @@ public sealed unsafe class ComputeThreadPool : IDisposable
     }
 
     /// <summary>
-    /// Builds the core assignment array mapping each worker index to a logical processor ID.
-    /// Returns -1 for workers that should not be pinned.
+    /// Pins the calling thread to <see cref="_callerCoreId"/>, one-shot and idempotent.
+    /// Safe to call multiple times (second and subsequent calls are no-ops). Automatically
+    /// invoked on the first <see cref="Dispatch"/> call.
     /// </summary>
-    private static int[] BuildCoreAssignment(int workerCount, NumaTopology? topology, ThreadingConfig config)
+    /// <remarks>
+    /// <para>
+    /// This must run on the thread that drives the inference loop, not on the thread that
+    /// constructed the pool — hence the deferred first-dispatch invocation.
+    /// </para>
+    /// <para>
+    /// Pinning is <b>skipped</b> when the calling thread is a <c>ThreadPool</c> thread —
+    /// sticking affinity to a pool thread would corrupt the pool for the rest of the process.
+    /// In that case the method is a no-op and <see cref="CallerThreadPinned"/> stays <c>false</c>.
+    /// </para>
+    /// </remarks>
+    public void PinCallerThread()
     {
-        // TODO: The caller thread (thread 0 = Forward() thread) is not pinned.
-        // If scheduled on an E-core, pinned P-core workers idle at the barrier.
-        // Consider a PinCallerThread() API for the inference thread (follow-up issue).
+        // One-shot: ensure only the first caller runs the pinning logic.
+        if (Interlocked.CompareExchange(ref _callerPinAttempted, 1, 0) != 0)
+            return;
+
+        if (_callerCoreId < 0)
+            return;
+
+        if (Thread.CurrentThread.IsThreadPoolThread)
+        {
+            System.Diagnostics.Trace.TraceWarning(
+                "ComputeThreadPool: skipping caller-thread pinning — current thread is a ThreadPool thread.");
+            return;
+        }
+
+        _callerPinSucceeded = CpuAffinity.PinCurrentThread(_callerCoreId);
+    }
+
+    /// <summary>
+    /// Builds the core assignment array mapping each worker index to a logical processor ID,
+    /// plus the logical processor ID reserved for the caller thread (or <c>-1</c> if no
+    /// pinning is configured).
+    /// </summary>
+    private static (int[] Assignment, int CallerCore) BuildCoreAssignment(
+        int workerCount, NumaTopology? topology, ThreadingConfig config)
+    {
         var assignment = new int[workerCount];
         Array.Fill(assignment, -1); // -1 = no pinning
 
         if (topology is null)
-            return assignment;
+            return (assignment, -1);
 
         if (!config.EnableNumaPinning && !config.EnablePCorePinning)
-            return assignment;
+            return (assignment, -1);
 
         IReadOnlyList<int> candidateCores;
         if (config.EnablePCorePinning && topology.IsHybrid)
@@ -325,11 +381,11 @@ public sealed unsafe class ComputeThreadPool : IDisposable
         }
         else
         {
-            return assignment;
+            return (assignment, -1);
         }
 
-        // Worker 0 in the array corresponds to thread index 1 (caller is thread 0).
-        // Skip candidateCores[0] for the caller thread — assign workers starting from index 1.
+        // Reserve candidateCores[0] for the caller thread; workers start at index 1.
+        int callerCore = candidateCores.Count > 0 ? candidateCores[0] : -1;
         for (int i = 0; i < workerCount; i++)
         {
             int coreIdx = i + 1; // skip one for caller
@@ -337,7 +393,7 @@ public sealed unsafe class ComputeThreadPool : IDisposable
                 assignment[i] = candidateCores[coreIdx];
         }
 
-        return assignment;
+        return (assignment, callerCore);
     }
 
     /// <inheritdoc/>

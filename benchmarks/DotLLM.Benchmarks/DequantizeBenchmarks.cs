@@ -18,9 +18,12 @@ public unsafe class DequantizeBenchmarks
 {
     private const int Q8_0BlockBytes = 34;
     private const int Q8_0GroupSize = 32;
+    private const int Q5_0BlockBytes = 22;
+    private const int Q5_0GroupSize = 32;
 
     private nint _fp16Src;
     private nint _q8Src;
+    private nint _q5_0Src;
     private nint _f32Src;
     private float[] _dest = null!;
 
@@ -52,6 +55,20 @@ public unsafe class DequantizeBenchmarks
             p += Q8_0BlockBytes;
         }
 
+        // Q5_0 source: (ElementCount / 32) blocks × 22 bytes
+        int q5BlockCount = ElementCount / Q5_0GroupSize;
+        nuint q5Bytes = (nuint)(q5BlockCount * Q5_0BlockBytes);
+        _q5_0Src = (nint)NativeMemory.AlignedAlloc(q5Bytes, 64);
+        byte* q5p = (byte*)_q5_0Src;
+        for (int b = 0; b < q5BlockCount; b++)
+        {
+            *(Half*)q5p = (Half)(rng.NextSingle() * 0.1f);
+            *(uint*)(q5p + 2) = (uint)rng.Next() ^ ((uint)rng.Next() << 16);
+            for (int i = 0; i < 16; i++)
+                (q5p + 6)[i] = (byte)rng.Next(0, 256);
+            q5p += Q5_0BlockBytes;
+        }
+
         // F32 source: ElementCount × 4 bytes
         _f32Src = (nint)NativeMemory.AlignedAlloc((nuint)(ElementCount * sizeof(float)), 64);
         var f32Span = new Span<float>((void*)_f32Src, ElementCount);
@@ -66,6 +83,7 @@ public unsafe class DequantizeBenchmarks
     {
         NativeMemory.AlignedFree((void*)_fp16Src);
         NativeMemory.AlignedFree((void*)_q8Src);
+        NativeMemory.AlignedFree((void*)_q5_0Src);
         NativeMemory.AlignedFree((void*)_f32Src);
     }
 
@@ -80,6 +98,18 @@ public unsafe class DequantizeBenchmarks
     [Benchmark]
     public void Q8_0_Scalar()
         => Dequantize.DequantizeQ8_0Scalar(_q8Src, ElementCount, _dest);
+
+    [Benchmark]
+    public void Q5_0_ToFloat32()
+        => Dequantize.ToFloat32(_q5_0Src, ElementCount, QuantizationType.Q5_0, _dest);
+
+    [Benchmark]
+    public void Q5_0_Scalar()
+        => Dequantize.DequantizeQ5_0Scalar(_q5_0Src, ElementCount, _dest);
+
+    [Benchmark]
+    public void Q5_0_Avx2()
+        => Dequantize.DequantizeQ5_0Avx2(_q5_0Src, ElementCount, _dest);
 
     [Benchmark]
     public void F32_Passthrough()

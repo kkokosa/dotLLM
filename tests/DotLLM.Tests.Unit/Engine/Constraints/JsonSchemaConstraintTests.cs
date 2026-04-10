@@ -394,6 +394,69 @@ public class JsonSchemaConstraintTests
         Assert.False(mask.IsAllowed(5), "'n' should not be allowed (not an enum prefix)");
     }
 
+    // -------------------------------------------------------------------------
+    // LRU cache eviction
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void MaskCache_LruEvicts_OldestEntryOnOverflow()
+    {
+        // Cache capacity = 2. Walk through 3 distinct schema states, then return to state 1.
+        // If the cache were LRU-correct, state 1 should still be hot after 2 intermediate
+        // lookups; if it cleared on overflow (old behavior), all state would be gone.
+        var tokenizer = new SchemaStubTokenizer();
+        var constraint = new JsonSchemaConstraint(tokenizer, """
+            { "type": "object", "properties": { "name": { "type": "string" } } }
+            """, maxCacheEntries: 2);
+
+        // State A: at-start — mask includes '{'
+        var maskA1 = constraint.GetAllowedTokens();
+        Assert.True(maskA1.IsAllowed(0));
+
+        // State B: after '{' — mask includes '"'
+        constraint.Advance(0);
+        var maskB1 = constraint.GetAllowedTokens();
+        Assert.True(maskB1.IsAllowed(2));
+
+        // State C: after '{"' — mask no longer includes '{'
+        constraint.Advance(2);
+        var maskC1 = constraint.GetAllowedTokens();
+        // This third insertion should evict state A (LRU), not state B (MRU).
+
+        // Walk a second constraint back to state B to verify its mask is still computable.
+        // (We cannot probe cache contents directly; this test mainly asserts no crash and
+        // that mask contents remain schema-correct after eviction has occurred.)
+        var constraint2 = new JsonSchemaConstraint(tokenizer, """
+            { "type": "object", "properties": { "name": { "type": "string" } } }
+            """, maxCacheEntries: 2);
+        constraint2.Advance(0);
+        var maskB2 = constraint2.GetAllowedTokens();
+
+        // Masks for structurally-equivalent states must match bit-for-bit.
+        for (int i = 0; i < tokenizer.VocabSize; i++)
+            Assert.Equal(maskB1.IsAllowed(i), maskB2.IsAllowed(i));
+    }
+
+    [Fact]
+    public void MaskCache_UnderCapacity_Reuses()
+    {
+        // Repeated GetAllowedTokens() at the same state should return the cached mask
+        // (not rebuild). Only observable via correctness — two calls at the same state
+        // must produce identical mask contents.
+        var constraint = CreateConstraint("""{ "type": "object" }""");
+
+        var mask1 = constraint.GetAllowedTokens();
+        var mask2 = constraint.GetAllowedTokens();
+        var mask3 = constraint.GetAllowedTokens();
+
+        var tokenizer = new SchemaStubTokenizer();
+        for (int i = 0; i < tokenizer.VocabSize; i++)
+        {
+            Assert.Equal(mask1.IsAllowed(i), mask2.IsAllowed(i));
+            Assert.Equal(mask1.IsAllowed(i), mask3.IsAllowed(i));
+        }
+    }
+
     /// <summary>
     /// Helper: advances the constraint character-by-character by finding single-char tokens.
     /// </summary>

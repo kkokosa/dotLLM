@@ -120,9 +120,14 @@ public static unsafe partial class MatMul
     /// Extracts 32 high bits from Q5_0 <paramref name="qh"/> into a 256-bit vector
     /// where each byte is 0x10 (16) if the corresponding bit was set, 0x00 otherwise.
     /// Uses vpshufb to broadcast each qh byte to 8 positions, then bit masking.
+    /// Byte j (for j in 0..31) corresponds to bit j of <paramref name="qh"/>.
     /// </summary>
+    /// <remarks>
+    /// Shared with <c>Dequantize.DequantizeQ5_0Avx2</c> — keep <c>internal</c> so both
+    /// the GEMV fused vec_dot and the dequant kernel use the same bit-extraction routine.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector256<byte> ExtractQ5HighBits(uint qh)
+    internal static Vector256<byte> ExtractQ5HighBits(uint qh)
     {
         // Broadcast the 4 qh bytes into a vector — set1_epi32 puts same 4 bytes in every lane
         Vector256<byte> qhVec = Vector256.Create(qh).AsByte();

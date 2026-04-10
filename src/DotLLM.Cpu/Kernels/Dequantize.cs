@@ -159,7 +159,14 @@ public static unsafe partial class Dequantize
                 $"Q5_0 element count must be a multiple of {Q5_0GroupSize}, got {elementCount}",
                 nameof(elementCount));
 
-        DequantizeQ5_0Scalar(src, elementCount, dest);
+        if (Avx2.IsSupported)
+        {
+            DequantizeQ5_0Avx2(src, elementCount, dest);
+        }
+        else
+        {
+            DequantizeQ5_0Scalar(src, elementCount, dest);
+        }
     }
 
     /// <summary>
@@ -197,6 +204,74 @@ public static unsafe partial class Dequantize
 
             outIdx += Q5_0GroupSize;
             blockBase += Q5_0BlockBytes;
+        }
+    }
+
+    // ──────────────────── Q5_0 AVX2 ────────────────────
+
+    /// <summary>
+    /// AVX2-accelerated Q5_0 dequantization. Processes one 32-element block per iteration:
+    /// unpacks low/high nibbles into a 256-bit vector, ORs in the 5th bit from <c>qh</c> via
+    /// <see cref="MatMul.ExtractQ5HighBits"/>, subtracts 16 to recover the signed value, then
+    /// widens sbyte→short→int→float and multiplies by the broadcast scale.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void DequantizeQ5_0Avx2(nint src, long elementCount, Span<float> dest)
+    {
+        long blockCount = elementCount / Q5_0GroupSize;
+        byte* blockBase = (byte*)src;
+
+        Vector128<byte> nibbleMask = Vector128.Create((byte)0x0F);
+        Vector256<sbyte> sixteen = Vector256.Create((sbyte)16);
+
+        fixed (float* destPtr = dest)
+        {
+            float* outPtr = destPtr;
+
+            for (long b = 0; b < blockCount; b++)
+            {
+                // Broadcast the Half scale to all 8 lanes.
+                float scale = (float)Unsafe.ReadUnaligned<Half>(blockBase);
+                Vector256<float> vScale = Vector256.Create(scale);
+
+                // Load the 4-byte high-bit field and the 16-byte packed-nibble payload.
+                uint qh = Unsafe.ReadUnaligned<uint>(blockBase + 2);
+                Vector128<byte> qsRaw = Unsafe.ReadUnaligned<Vector128<byte>>(blockBase + 6);
+
+                // Unpack nibbles: low 4 bits → elements 0..15, high 4 bits → elements 16..31.
+                Vector128<byte> lo128 = Sse2.And(qsRaw, nibbleMask);
+                Vector128<byte> hi128 = Sse2.And(
+                    Sse2.ShiftRightLogical(qsRaw.AsUInt16(), 4).AsByte(),
+                    nibbleMask);
+
+                // Combine halves, OR in the 5th bit (0x10 per set bit), subtract 16 to center.
+                Vector256<byte> q5vals = Avx2.Or(
+                    Vector256.Create(lo128, hi128),
+                    MatMul.ExtractQ5HighBits(qh));
+                Vector256<sbyte> centered = Avx2.Subtract(q5vals.AsSByte(), sixteen);
+
+                // Widen sbyte → short → int and convert to float × scale.
+                Vector256<short> shortsLo = Avx2.ConvertToVector256Int16(centered.GetLower());
+                Vector256<short> shortsHi = Avx2.ConvertToVector256Int16(centered.GetUpper());
+
+                Vector256<int> ints0 = Avx2.ConvertToVector256Int32(shortsLo.GetLower());
+                Vector256<int> ints1 = Avx2.ConvertToVector256Int32(shortsLo.GetUpper());
+                Vector256<int> ints2 = Avx2.ConvertToVector256Int32(shortsHi.GetLower());
+                Vector256<int> ints3 = Avx2.ConvertToVector256Int32(shortsHi.GetUpper());
+
+                Vector256<float> f0 = Avx.Multiply(Avx.ConvertToVector256Single(ints0), vScale);
+                Vector256<float> f1 = Avx.Multiply(Avx.ConvertToVector256Single(ints1), vScale);
+                Vector256<float> f2 = Avx.Multiply(Avx.ConvertToVector256Single(ints2), vScale);
+                Vector256<float> f3 = Avx.Multiply(Avx.ConvertToVector256Single(ints3), vScale);
+
+                Avx.Store(outPtr, f0);
+                Avx.Store(outPtr + 8, f1);
+                Avx.Store(outPtr + 16, f2);
+                Avx.Store(outPtr + 24, f3);
+
+                outPtr += Q5_0GroupSize;
+                blockBase += Q5_0BlockBytes;
+            }
         }
     }
 

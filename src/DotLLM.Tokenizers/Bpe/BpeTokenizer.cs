@@ -13,9 +13,17 @@ public sealed class BpeTokenizer : ITokenizer
 
     /// <summary>
     /// Special tokens sorted by descending length so longer tokens match first.
-    /// Each entry is (tokenString, tokenId).
+    /// Kept for <see cref="BuildSpecialTokenTable"/>'s output contract; the hot-path
+    /// encode loop uses <see cref="_specialTokenTrie"/> instead.
     /// </summary>
     private readonly (string Text, int Id)[] _specialTokens;
+
+    /// <summary>
+    /// Trie built from <see cref="_specialTokens"/> for O(L) longest-prefix matching
+    /// at each text position. <see langword="null"/> when there are no special tokens
+    /// (the tokenizer takes the fast path in <see cref="Encode"/>).
+    /// </summary>
+    private readonly Trie? _specialTokenTrie;
 
     /// <inheritdoc/>
     public int BosTokenId { get; }
@@ -31,9 +39,20 @@ public sealed class BpeTokenizer : ITokenizer
     {
         _encoding = encoding;
         _specialTokens = specialTokens;
+        _specialTokenTrie = BuildSpecialTokenTrie(specialTokens);
         BosTokenId = bosId;
         EosTokenId = eosId;
         VocabSize = vocabSize;
+    }
+
+    private static Trie? BuildSpecialTokenTrie((string Text, int Id)[] specialTokens)
+    {
+        if (specialTokens.Length == 0)
+            return null;
+        var trie = new Trie();
+        foreach (var (text, id) in specialTokens)
+            trie.Add(text, id, score: 0f);
+        return trie;
     }
 
     /// <summary>
@@ -133,34 +152,20 @@ public sealed class BpeTokenizer : ITokenizer
     }
 
     /// <summary>
-    /// Encodes text with special token pre-splitting. Scans for special tokens,
-    /// emits their IDs directly, and BPE-encodes the text segments between them.
+    /// Encodes text with special token pre-splitting. Scans for special tokens via the
+    /// pre-built trie (O(L) per position where L is the match length), emits their IDs
+    /// directly, and BPE-encodes the text segments between them.
     /// </summary>
     private int[] EncodeWithSpecialTokens(string text)
     {
+        var trie = _specialTokenTrie!; // Encode() fast-paths when _specialTokens.Length == 0
         var result = new List<int>();
         int pos = 0;
         bool isFirstSegment = true;
 
         while (pos < text.Length)
         {
-            // Try to match a special token at the current position
-            int matchedLen = 0;
-            int matchedId = -1;
-
-            for (int i = 0; i < _specialTokens.Length; i++)
-            {
-                var (specialText, specialId) = _specialTokens[i];
-                if (pos + specialText.Length <= text.Length &&
-                    text.AsSpan(pos, specialText.Length).SequenceEqual(specialText))
-                {
-                    matchedLen = specialText.Length;
-                    matchedId = specialId;
-                    break; // First match wins (sorted by descending length)
-                }
-            }
-
-            if (matchedId >= 0)
+            if (trie.TryMatchLongest(text.AsSpan(pos), out int matchedId, out _, out int matchedLen))
             {
                 // Emit the special token ID directly
                 result.Add(matchedId);
@@ -198,18 +203,11 @@ public sealed class BpeTokenizer : ITokenizer
     /// </summary>
     private int FindNextSpecialToken(string text, int startPos)
     {
+        var trie = _specialTokenTrie!;
         for (int pos = startPos; pos < text.Length; pos++)
         {
-            for (int i = 0; i < _specialTokens.Length; i++)
-            {
-                var (specialText, _) = _specialTokens[i];
-                if (text[pos] == specialText[0] &&
-                    pos + specialText.Length <= text.Length &&
-                    text.AsSpan(pos, specialText.Length).SequenceEqual(specialText))
-                {
-                    return pos;
-                }
-            }
+            if (trie.TryMatchLongest(text.AsSpan(pos), out _, out _, out _))
+                return pos;
         }
 
         return text.Length;

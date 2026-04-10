@@ -108,6 +108,101 @@ public sealed unsafe class ComputeThreadPoolTests
     }
 
     /// <summary>
+    /// Without NUMA topology or explicit pinning flags, caller-thread pinning has no
+    /// candidate core and must remain a no-op. The property should stay <c>false</c>.
+    /// </summary>
+    [Fact]
+    public void CallerPinning_NoTopology_IsNoOp()
+    {
+        const int threadCount = 3;
+        using var pool = new ComputeThreadPool(threadCount);
+
+        // Force a dispatch — PinCallerThread runs automatically.
+        var result = RunSumWork(pool, 64);
+        Assert.Equal(64, result);
+
+        Assert.False(pool.CallerThreadPinned,
+            "No topology provided → no candidate core → pinning must be a no-op");
+    }
+
+    /// <summary>
+    /// When caller pinning is explicitly disabled via <see cref="ThreadingConfig"/>,
+    /// the pool must not pin the caller even if topology is available.
+    /// </summary>
+    [Fact]
+    public void CallerPinning_ExplicitlyDisabled_IsNoOp()
+    {
+        const int threadCount = 3;
+        var config = new ThreadingConfig(
+            ThreadCount: threadCount,
+            DecodeThreadCount: 0,
+            EnableNumaPinning: true,
+            EnablePCorePinning: true,
+            EnableCallerPinning: false);
+
+        // Even if topology were supplied, EnableCallerPinning=false forces _callerCoreId=-1.
+        using var pool = new ComputeThreadPool(threadCount, topology: null, config);
+
+        var result = RunSumWork(pool, 64);
+        Assert.Equal(64, result);
+
+        Assert.False(pool.CallerThreadPinned);
+    }
+
+    /// <summary>
+    /// Calling <c>PinCallerThread</c> from a <c>ThreadPool</c> thread (via <c>Task.Run</c>)
+    /// must skip pinning rather than corrupt the pool. The method should be silent and
+    /// <see cref="ComputeThreadPool.CallerThreadPinned"/> must remain <c>false</c>.
+    /// </summary>
+    [Fact]
+    public void PinCallerThread_OnThreadPoolThread_Skips()
+    {
+        // Exercise the ThreadPool-skip guard: call PinCallerThread from a pool thread
+        // and assert it did not flip the flag. The guard short-circuits before the
+        // actual pin syscall so pool threads keep their existing affinity.
+        // Uses a signal primitive instead of await because the test class is 'unsafe'
+        // (which precludes async/await).
+        const int threadCount = 3;
+        using var pool = new ComputeThreadPool(threadCount);
+
+        using var done = new ManualResetEventSlim(false);
+        bool wasOnPoolThread = false;
+        bool pinnedAfter = false;
+
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            wasOnPoolThread = Thread.CurrentThread.IsThreadPoolThread;
+            pool.PinCallerThread();
+            pinnedAfter = pool.CallerThreadPinned;
+            done.Set();
+        });
+
+        Assert.True(done.Wait(TimeSpan.FromSeconds(5)), "Pool-thread pin attempt timed out");
+        Assert.True(wasOnPoolThread, "Test helper did not run on a ThreadPool thread");
+        Assert.False(pinnedAfter, "PinCallerThread on a ThreadPool thread must be a no-op");
+    }
+
+    /// <summary>
+    /// <c>PinCallerThread</c> is idempotent — repeated calls must not re-run the pin logic
+    /// nor throw. Verified via the CAS-based one-shot flag.
+    /// </summary>
+    [Fact]
+    public void PinCallerThread_Idempotent()
+    {
+        const int threadCount = 3;
+        using var pool = new ComputeThreadPool(threadCount);
+
+        // Call multiple times — must not throw and must not flip state unexpectedly.
+        pool.PinCallerThread();
+        pool.PinCallerThread();
+        pool.PinCallerThread();
+
+        // A subsequent dispatch should also be a no-op for the pin path.
+        var result = RunSumWork(pool, 64);
+        Assert.Equal(64, result);
+    }
+
+    /// <summary>
     /// Helper: dispatches work that sums an array of 1.0f values across all threads.
     /// Returns the computed sum (should equal arraySize when each element is 1.0f).
     /// </summary>
