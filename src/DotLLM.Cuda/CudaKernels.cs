@@ -11,6 +11,14 @@ public sealed unsafe class CudaKernels : IDisposable
 {
     private const int BlockSize = 256;
 
+    /// <summary>
+    /// Max CUDA blocks for dequant kernel launches. Kernels use grid-stride loops,
+    /// so capping grid size amortizes block launch overhead on GPUs with many SMs
+    /// (e.g. RTX 3050 has 20 SMs; launching 65K+ blocks per dequant overwhelms the
+    /// hardware block scheduler). Value is ~4x typical consumer SM count.
+    /// </summary>
+    private const int MaxDequantGridSize = 256;
+
     private readonly CudaModule _rmsnormModule;
     private readonly CudaModule _ropeModule;
     private readonly CudaModule _swigluModule;
@@ -609,8 +617,9 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalBlocks = totalElements / 32;
                 int tbArg = totalBlocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
-                // Coalesced: 1 warp (32 threads) per quant block → 8 quant blocks per CUDA block
-                uint gridDim = (uint)((totalBlocks + 7) / 8);
+                // Grid-stride loop: cap grid at MaxDequantGridSize CUDA blocks.
+                // Each CUDA block has 8 warps, so natural 1:1 mapping is ceil(totalBlocks/8).
+                uint gridDim = (uint)Math.Min((totalBlocks + 7) / 8, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ8_0Func,
                         gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
@@ -622,8 +631,7 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalBlocks = totalElements / 32;
                 int tbArg = totalBlocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
-                // Coalesced: 1 warp per quant block → 8 quant blocks per CUDA block
-                uint gridDim = (uint)((totalBlocks + 7) / 8);
+                uint gridDim = (uint)Math.Min((totalBlocks + 7) / 8, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ4_0Func,
                         gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
@@ -635,8 +643,7 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalBlocks = totalElements / 32;
                 int tbArg = totalBlocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
-                // Coalesced: 1 warp per quant block → 8 quant blocks per CUDA block
-                uint gridDim = (uint)((totalBlocks + 7) / 8);
+                uint gridDim = (uint)Math.Min((totalBlocks + 7) / 8, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ5_0Func,
                         gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
@@ -648,9 +655,10 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalSuperblocks = totalElements / 256;
                 int tsbArg = totalSuperblocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tsbArg};
-                // Coalesced: 1 CUDA block (256 threads) per superblock
+                // Grid-stride loop: 1 CUDA block per superblock naturally, capped at MaxDequantGridSize
+                uint gridDim = (uint)Math.Min(totalSuperblocks, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ4_KFunc,
-                        (uint)totalSuperblocks, 1, 1, BlockSize, 1, 1,
+                        gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
                 return;
             }
@@ -660,9 +668,9 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalSuperblocks = totalElements / 256;
                 int tsbArg = totalSuperblocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tsbArg};
-                // Coalesced: 1 CUDA block (256 threads) per superblock
+                uint gridDim = (uint)Math.Min(totalSuperblocks, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ5_KFunc,
-                        (uint)totalSuperblocks, 1, 1, BlockSize, 1, 1,
+                        gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
                 return;
             }
@@ -672,9 +680,9 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalSuperblocks = totalElements / 256;
                 int tsbArg = totalSuperblocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tsbArg};
-                // Coalesced: 1 CUDA block (256 threads) per superblock
+                uint gridDim = (uint)Math.Min(totalSuperblocks, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ6_KFunc,
-                        (uint)totalSuperblocks, 1, 1, BlockSize, 1, 1,
+                        gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
                 return;
             }
