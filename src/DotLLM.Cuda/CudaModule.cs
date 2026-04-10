@@ -64,6 +64,7 @@ public sealed class CudaModule : IDisposable
         return func;
     }
 
+
     /// <inheritdoc/>
     public void Dispose()
     {

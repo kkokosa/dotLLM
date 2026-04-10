@@ -6,7 +6,7 @@
 
 #include <cuda_fp16.h>
 
-extern "C" __global__ void fused_add_rmsnorm_f16(
+extern "C" __global__ void __launch_bounds__(256) fused_add_rmsnorm_f16(
     half* __restrict__ residual,       // [n] in/out: updated with sum
     const half* __restrict__ x,        // [n] layer output to add
     const half* __restrict__ weight,   // [n] norm weights

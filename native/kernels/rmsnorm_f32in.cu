@@ -4,7 +4,7 @@
 
 #include <cuda_fp16.h>  // needed for half output type
 
-extern "C" __global__ void rmsnorm_f32in_f16out(
+extern "C" __global__ void __launch_bounds__(256) rmsnorm_f32in_f16out(
     const float* __restrict__ input,
     const float* __restrict__ weight,
     half* __restrict__ output,

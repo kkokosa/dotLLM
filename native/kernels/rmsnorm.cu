@@ -5,7 +5,7 @@
 
 #include <cuda_fp16.h>
 
-extern "C" __global__ void rmsnorm_f16(
+extern "C" __global__ void __launch_bounds__(256) rmsnorm_f16(
     const half* __restrict__ input,
     const half* __restrict__ weight,
     half* __restrict__ output,

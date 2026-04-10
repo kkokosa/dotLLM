@@ -19,56 +19,118 @@
 	.param .u32 swiglu_f16_param_3,
 	.param .u32 swiglu_f16_param_4
 )
+.maxntid 256, 1, 1
 {
-	.reg .pred 	%p<2>;
+	.reg .pred 	%p<6>;
 	.reg .b16 	%rs<4>;
-	.reg .f32 	%f<8>;
-	.reg .b32 	%r<8>;
-	.reg .b64 	%rd<11>;
+	.reg .f32 	%f<22>;
+	.reg .b32 	%r<18>;
+	.reg .b64 	%rd<15>;
 
 
-	ld.param.u64 	%rd1, [swiglu_f16_param_0];
-	ld.param.u64 	%rd2, [swiglu_f16_param_1];
-	ld.param.u64 	%rd3, [swiglu_f16_param_2];
-	ld.param.u32 	%r2, [swiglu_f16_param_3];
-	ld.param.u32 	%r3, [swiglu_f16_param_4];
-	mov.u32 	%r4, %ctaid.x;
+	ld.param.u64 	%rd4, [swiglu_f16_param_0];
+	ld.param.u64 	%rd5, [swiglu_f16_param_1];
+	ld.param.u64 	%rd6, [swiglu_f16_param_2];
+	ld.param.u32 	%r3, [swiglu_f16_param_3];
+	ld.param.u32 	%r4, [swiglu_f16_param_4];
+	cvta.to.global.u64 	%rd1, %rd6;
+	cvta.to.global.u64 	%rd2, %rd5;
+	cvta.to.global.u64 	%rd3, %rd4;
 	mov.u32 	%r5, %ntid.x;
-	mov.u32 	%r6, %tid.x;
-	mad.lo.s32 	%r1, %r4, %r5, %r6;
-	mul.lo.s32 	%r7, %r3, %r2;
-	setp.ge.s32 	%p1, %r1, %r7;
+	mov.u32 	%r6, %ctaid.x;
+	mov.u32 	%r7, %tid.x;
+	mad.lo.s32 	%r1, %r6, %r5, %r7;
+	mul.lo.s32 	%r2, %r4, %r3;
+	shr.u32 	%r8, %r2, 31;
+	add.s32 	%r9, %r2, %r8;
+	shr.s32 	%r10, %r9, 1;
+	setp.ge.s32 	%p1, %r1, %r10;
 	@%p1 bra 	$L__BB0_2;
 
-	cvta.to.global.u64 	%rd4, %rd1;
-	mul.wide.s32 	%rd5, %r1, 2;
-	add.s64 	%rd6, %rd4, %rd5;
-	ld.global.nc.u16 	%rs1, [%rd6];
+	mul.wide.s32 	%rd7, %r1, 4;
+	add.s64 	%rd8, %rd3, %rd7;
+	ld.global.nc.u32 	%r11, [%rd8];
+	add.s64 	%rd9, %rd2, %rd7;
+	ld.global.nc.u32 	%r13, [%rd9];
 	// begin inline asm
-	{  cvt.f32.f16 %f1, %rs1;}
+	{.reg .f16 low,high;
+  mov.b32 {low,high},%r11;
+  cvt.f32.f16 %f1, low;}
 
 	// end inline asm
-	cvta.to.global.u64 	%rd7, %rd2;
-	add.s64 	%rd8, %rd7, %rd5;
-	ld.global.nc.u16 	%rs2, [%rd8];
 	// begin inline asm
-	{  cvt.f32.f16 %f2, %rs2;}
+	{.reg .f16 low,high;
+  mov.b32 {low,high},%r11;
+  cvt.f32.f16 %f2, high;}
 
 	// end inline asm
-	mul.ftz.f32 	%f4, %f1, 0fBFB8AA3B;
-	ex2.approx.ftz.f32 	%f5, %f4;
-	add.ftz.f32 	%f6, %f5, 0f3F800000;
-	div.approx.ftz.f32 	%f7, %f1, %f6;
-	mul.ftz.f32 	%f3, %f2, %f7;
 	// begin inline asm
-	{  cvt.rn.f16.f32 %rs3, %f3;}
+	{.reg .f16 low,high;
+  mov.b32 {low,high},%r13;
+  cvt.f32.f16 %f3, low;}
 
 	// end inline asm
-	cvta.to.global.u64 	%rd9, %rd3;
-	add.s64 	%rd10, %rd9, %rd5;
-	st.global.u16 	[%rd10], %rs3;
+	// begin inline asm
+	{.reg .f16 low,high;
+  mov.b32 {low,high},%r13;
+  cvt.f32.f16 %f4, high;}
+
+	// end inline asm
+	mul.ftz.f32 	%f7, %f1, 0fBFB8AA3B;
+	ex2.approx.ftz.f32 	%f8, %f7;
+	add.ftz.f32 	%f9, %f8, 0f3F800000;
+	div.approx.ftz.f32 	%f10, %f1, %f9;
+	mul.ftz.f32 	%f5, %f3, %f10;
+	mul.ftz.f32 	%f11, %f2, 0fBFB8AA3B;
+	ex2.approx.ftz.f32 	%f12, %f11;
+	add.ftz.f32 	%f13, %f12, 0f3F800000;
+	div.approx.ftz.f32 	%f14, %f2, %f13;
+	mul.ftz.f32 	%f6, %f4, %f14;
+	add.s64 	%rd10, %rd1, %rd7;
+	// begin inline asm
+	{.reg .f16 low,high;
+  cvt.rn.f16.f32 low, %f5;
+  cvt.rn.f16.f32 high, %f6;
+  mov.b32 %r15, {low,high};}
+
+	// end inline asm
+	st.global.u32 	[%rd10], %r15;
 
 $L__BB0_2:
+	and.b32  	%r16, %r2, 1;
+	setp.eq.b32 	%p2, %r16, 1;
+	not.pred 	%p3, %p2;
+	setp.ne.s32 	%p4, %r1, 0;
+	or.pred  	%p5, %p4, %p3;
+	@%p5 bra 	$L__BB0_4;
+
+	add.s32 	%r17, %r2, -1;
+	mul.wide.s32 	%rd11, %r17, 2;
+	add.s64 	%rd12, %rd3, %rd11;
+	ld.global.nc.u16 	%rs1, [%rd12];
+	// begin inline asm
+	{  cvt.f32.f16 %f15, %rs1;}
+
+	// end inline asm
+	add.s64 	%rd13, %rd2, %rd11;
+	ld.global.nc.u16 	%rs2, [%rd13];
+	// begin inline asm
+	{  cvt.f32.f16 %f16, %rs2;}
+
+	// end inline asm
+	mul.ftz.f32 	%f18, %f15, 0fBFB8AA3B;
+	ex2.approx.ftz.f32 	%f19, %f18;
+	add.ftz.f32 	%f20, %f19, 0f3F800000;
+	div.approx.ftz.f32 	%f21, %f15, %f20;
+	mul.ftz.f32 	%f17, %f16, %f21;
+	// begin inline asm
+	{  cvt.rn.f16.f32 %rs3, %f17;}
+
+	// end inline asm
+	add.s64 	%rd14, %rd1, %rd11;
+	st.global.u16 	[%rd14], %rs3;
+
+$L__BB0_4:
 	ret;
 
 }

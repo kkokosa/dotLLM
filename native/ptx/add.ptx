@@ -18,36 +18,62 @@
 	.param .u64 add_f16_param_2,
 	.param .u32 add_f16_param_3
 )
+.maxntid 256, 1, 1
 {
-	.reg .pred 	%p<2>;
+	.reg .pred 	%p<6>;
 	.reg .b16 	%rs<4>;
 	.reg .f32 	%f<4>;
-	.reg .b32 	%r<6>;
-	.reg .b64 	%rd<11>;
+	.reg .b32 	%r<14>;
+	.reg .b64 	%rd<15>;
 
 
-	ld.param.u64 	%rd1, [add_f16_param_0];
-	ld.param.u64 	%rd2, [add_f16_param_1];
-	ld.param.u64 	%rd3, [add_f16_param_2];
+	ld.param.u64 	%rd4, [add_f16_param_0];
+	ld.param.u64 	%rd5, [add_f16_param_1];
+	ld.param.u64 	%rd6, [add_f16_param_2];
 	ld.param.u32 	%r2, [add_f16_param_3];
-	mov.u32 	%r3, %ctaid.x;
-	mov.u32 	%r4, %ntid.x;
+	cvta.to.global.u64 	%rd1, %rd6;
+	cvta.to.global.u64 	%rd2, %rd5;
+	cvta.to.global.u64 	%rd3, %rd4;
+	mov.u32 	%r3, %ntid.x;
+	mov.u32 	%r4, %ctaid.x;
 	mov.u32 	%r5, %tid.x;
-	mad.lo.s32 	%r1, %r3, %r4, %r5;
-	setp.ge.s32 	%p1, %r1, %r2;
+	mad.lo.s32 	%r1, %r4, %r3, %r5;
+	shr.u32 	%r6, %r2, 31;
+	add.s32 	%r7, %r2, %r6;
+	shr.s32 	%r8, %r7, 1;
+	setp.ge.s32 	%p1, %r1, %r8;
 	@%p1 bra 	$L__BB0_2;
 
-	cvta.to.global.u64 	%rd4, %rd1;
-	mul.wide.s32 	%rd5, %r1, 2;
-	add.s64 	%rd6, %rd4, %rd5;
-	ld.global.nc.u16 	%rs1, [%rd6];
+	mul.wide.s32 	%rd7, %r1, 4;
+	add.s64 	%rd8, %rd1, %rd7;
+	add.s64 	%rd9, %rd3, %rd7;
+	ld.global.nc.u32 	%r10, [%rd9];
+	add.s64 	%rd10, %rd2, %rd7;
+	ld.global.nc.u32 	%r11, [%rd10];
+	// begin inline asm
+	{add.f16x2 %r9,%r10,%r11;
+}
+	// end inline asm
+	st.global.u32 	[%rd8], %r9;
+
+$L__BB0_2:
+	and.b32  	%r12, %r2, 1;
+	setp.eq.b32 	%p2, %r12, 1;
+	not.pred 	%p3, %p2;
+	setp.ne.s32 	%p4, %r1, 0;
+	or.pred  	%p5, %p4, %p3;
+	@%p5 bra 	$L__BB0_4;
+
+	add.s32 	%r13, %r2, -1;
+	mul.wide.s32 	%rd11, %r13, 2;
+	add.s64 	%rd12, %rd3, %rd11;
+	ld.global.nc.u16 	%rs1, [%rd12];
 	// begin inline asm
 	{  cvt.f32.f16 %f1, %rs1;}
 
 	// end inline asm
-	cvta.to.global.u64 	%rd7, %rd2;
-	add.s64 	%rd8, %rd7, %rd5;
-	ld.global.nc.u16 	%rs2, [%rd8];
+	add.s64 	%rd13, %rd2, %rd11;
+	ld.global.nc.u16 	%rs2, [%rd13];
 	// begin inline asm
 	{  cvt.f32.f16 %f2, %rs2;}
 
@@ -57,11 +83,10 @@
 	{  cvt.rn.f16.f32 %rs3, %f3;}
 
 	// end inline asm
-	cvta.to.global.u64 	%rd9, %rd3;
-	add.s64 	%rd10, %rd9, %rd5;
-	st.global.u16 	[%rd10], %rs3;
+	add.s64 	%rd14, %rd1, %rd11;
+	st.global.u16 	[%rd14], %rs3;
 
-$L__BB0_2:
+$L__BB0_4:
 	ret;
 
 }

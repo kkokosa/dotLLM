@@ -17,6 +17,7 @@
 	.param .u64 quant_f16_to_q8_0_param_1,
 	.param .u32 quant_f16_to_q8_0_param_2
 )
+.maxntid 256, 1, 1
 {
 	.local .align 16 .b8 	__local_depot0[128];
 	.reg .b64 	%SP;
@@ -230,6 +231,7 @@ $L__BB0_8:
 	.param .u64 quant_f16_to_q4_0_param_1,
 	.param .u32 quant_f16_to_q4_0_param_2
 )
+.maxntid 256, 1, 1
 {
 	.local .align 16 .b8 	__local_depot1[128];
 	.reg .b64 	%SP;

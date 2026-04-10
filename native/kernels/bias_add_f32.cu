@@ -2,7 +2,7 @@
 
 #include <cuda_fp16.h>
 
-extern "C" __global__ void bias_add_f32(
+extern "C" __global__ void __launch_bounds__(256) bias_add_f32(
     float* __restrict__ output, const half* __restrict__ bias,
     const int dim, const int seq_len)
 {

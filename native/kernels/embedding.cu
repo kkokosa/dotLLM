@@ -9,7 +9,7 @@
 #define Q8_0_BLOCK_SIZE 32
 #define Q8_0_BLOCK_BYTES 34
 
-extern "C" __global__ void embedding_lookup_f32(
+extern "C" __global__ void __launch_bounds__(256) embedding_lookup_f32(
     const float* __restrict__ embed_table,
     const int* __restrict__ token_ids,
     half* __restrict__ output,
@@ -27,7 +27,7 @@ extern "C" __global__ void embedding_lookup_f32(
         out_row[i] = __float2half(row[i]);
 }
 
-extern "C" __global__ void embedding_lookup_f16(
+extern "C" __global__ void __launch_bounds__(256) embedding_lookup_f16(
     const half* __restrict__ embed_table,
     const int* __restrict__ token_ids,
     half* __restrict__ output,
@@ -45,7 +45,7 @@ extern "C" __global__ void embedding_lookup_f16(
         out_row[i] = row[i];
 }
 
-extern "C" __global__ void embedding_lookup_q8_0(
+extern "C" __global__ void __launch_bounds__(256) embedding_lookup_q8_0(
     const uint8_t* __restrict__ embed_table,
     const int* __restrict__ token_ids,
     half* __restrict__ output,

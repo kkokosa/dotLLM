@@ -18,6 +18,7 @@ Usage:
     python scripts/test_models.py --cache-type-k q8_0,q4_0 --cache-type-v q8_0,q4_0  # cartesian product
     python scripts/test_models.py --save results.json      # save results to JSON
     python scripts/test_models.py --show results.json      # display saved results
+    python scripts/test_models.py --compare before.json after.json  # diff two saved runs
 """
 
 from __future__ import annotations
@@ -406,14 +407,22 @@ def main() -> int:
     parser.add_argument("--cache-window", type=int, default=0,
                         help="Mixed-precision window size for KV-cache quantization (default: 0 = all quantized).")
     parser.add_argument("--save", type=str, default=None,
-                        help="Save results to a JSON file (e.g. --save results.json)")
+                        help="Save results to a JSON file (e.g. --save results.json). "
+                             "File includes both flat per-run results and a pivoted summary.")
     parser.add_argument("--show", type=str, default=None,
                         help="Load and display results from a JSON file (no tests run).")
+    parser.add_argument("--compare", type=str, nargs=2, default=None,
+                        metavar=("BEFORE", "AFTER"),
+                        help="Compare two saved JSON files: show throughput deltas per model per mode.")
     args = parser.parse_args()
 
     # --show mode: load and display, then exit
     if args.show:
         return _show_results(args.show)
+
+    # --compare mode: diff two JSON files, then exit
+    if args.compare:
+        return _compare_results(args.compare[0], args.compare[1])
 
     # Default to --cached-only when no explicit mode is given
     if not args.download and not args.list:
@@ -619,8 +628,52 @@ def main() -> int:
     return 1 if failed > 0 else 0
 
 
+def _build_summary(results: list[dict]) -> dict:
+    """Pivot flat per-run results into a summary keyed by model and mode.
+
+    Returns:
+        {
+            "modes": ["gpu", "KV:q8_0", ...],           # in first-seen order
+            "models": {
+                "SmolLM-135M": {
+                    "quant": "Q8_0",
+                    "arch": "Llama",
+                    "throughput": {
+                        "gpu": {"decode_tok_s": 43.9, "prefill_tok_s": ..., "passed": true},
+                        ...
+                    }
+                },
+                ...
+            }
+        }
+    """
+    modes: list[str] = []
+    models: dict[str, dict] = {}
+    for r in results:
+        mode = r.get("mode", "?")
+        if mode not in modes:
+            modes.append(mode)
+        name = r.get("name", "?")
+        if name not in models:
+            models[name] = {
+                "quant": r.get("quant", "?"),
+                "arch": r.get("arch", ""),
+                "throughput": {},
+            }
+        models[name]["throughput"][mode] = {
+            "decode_tok_s": r.get("decode_tok_s", 0),
+            "prefill_tok_s": r.get("prefill_tok_s", 0),
+            "passed": r.get("passed", False),
+        }
+    return {"modes": modes, "models": models}
+
+
 def _save_results(path: str, results: list[dict], args: argparse.Namespace) -> None:
-    """Export test results to a structured JSON file."""
+    """Export test results to a structured JSON file.
+
+    Writes both the flat per-run results and a pivoted summary (model × mode → tok/s).
+    The summary is what `--compare` consumes.
+    """
     export = {
         "label": "test_models",
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
@@ -637,6 +690,7 @@ def _save_results(path: str, results: list[dict], args: argparse.Namespace) -> N
             "filter": args.filter,
         },
         "results": results,
+        "summary": _build_summary(results),
     }
     dest = Path(path)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -736,6 +790,173 @@ def _show_results(path: str) -> int:
         _print_throughput_summary(throughput_data, mode_keys, list(seen.values()), [])
 
     return 1 if failed > 0 else 0
+
+
+def _load_summary(path: str) -> dict:
+    """Load a saved JSON file and return its summary pivot.
+
+    Handles both new-format files (with a top-level 'summary' field) and
+    legacy files (with only 'results') by rebuilding the pivot on the fly.
+    """
+    with open(path) as f:
+        data = json.load(f)
+    summary = data.get("summary")
+    if summary is None:
+        # Legacy file: rebuild from flat results
+        summary = _build_summary(data.get("results", []))
+    return {
+        "summary": summary,
+        "timestamp": data.get("timestamp", ""),
+        "system": data.get("system", {}),
+    }
+
+
+def _compare_results(path_before: str, path_after: str) -> int:
+    """Display a side-by-side throughput diff between two saved JSON files."""
+    try:
+        before = _load_summary(path_before)
+        after = _load_summary(path_after)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"Error loading comparison files: {e}", file=sys.stderr)
+        return 1
+
+    sb = before["summary"]
+    sa = after["summary"]
+
+    print(f"[compare] BEFORE: {path_before}")
+    if before.get("timestamp"):
+        print(f"           time:   {before['timestamp']}")
+    sys_b = before.get("system") or {}
+    if sys_b:
+        print(f"           system: {sys_b.get('cpu', '?')} ({sys_b.get('cores', '?')} cores)")
+    print(f"[compare] AFTER:  {path_after}")
+    if after.get("timestamp"):
+        print(f"           time:   {after['timestamp']}")
+    sys_a = after.get("system") or {}
+    if sys_a:
+        print(f"           system: {sys_a.get('cpu', '?')} ({sys_a.get('cores', '?')} cores)")
+    print()
+
+    # Union of modes (preserve order: before first, then new from after)
+    modes: list[str] = list(sb.get("modes", []))
+    for m in sa.get("modes", []):
+        if m not in modes:
+            modes.append(m)
+
+    # Union of model names (same order preservation)
+    models: list[str] = []
+    seen: set[str] = set()
+    for name in sb.get("models", {}).keys():
+        if name not in seen:
+            models.append(name)
+            seen.add(name)
+    for name in sa.get("models", {}).keys():
+        if name not in seen:
+            models.append(name)
+            seen.add(name)
+
+    if not models or not modes:
+        print("No overlapping data to compare.")
+        return 1
+
+    # Column widths
+    name_w = 28
+    quant_w = 7
+    col_w = 18  # "43.9 → 43.2 -1.6%" fits in ~18 chars
+
+    # Header
+    header = f"{'Model':<{name_w}} {'Quant':<{quant_w}}"
+    for m in modes:
+        header += f"  {m:>{col_w}}"
+    print(header)
+    print("-" * len(header))
+
+    def _get(summary: dict, name: str, mode: str) -> tuple[float, bool] | None:
+        m = summary.get("models", {}).get(name)
+        if not m:
+            return None
+        t = m.get("throughput", {}).get(mode)
+        if not t:
+            return None
+        return (t.get("decode_tok_s", 0.0), t.get("passed", False))
+
+    # Collect regressions/improvements for summary
+    regressions: list[tuple[str, str, float, float, float]] = []
+    improvements: list[tuple[str, str, float, float, float]] = []
+
+    for name in models:
+        m_info = sa.get("models", {}).get(name) or sb.get("models", {}).get(name) or {}
+        quant = m_info.get("quant", "?")
+        display_name = name[:name_w].rstrip()
+        line = f"{display_name:<{name_w}} {quant:<{quant_w}}"
+
+        for mode in modes:
+            bt = _get(sb, name, mode)
+            at = _get(sa, name, mode)
+            cell = _format_diff_cell(bt, at, col_w)
+            line += f"  {cell:>{col_w}}"
+
+            # Track changes (>= 2% delta, both runs valid)
+            if bt and at and bt[0] > 0 and at[0] > 0:
+                delta_pct = (at[0] - bt[0]) / bt[0] * 100.0
+                if delta_pct <= -2.0:
+                    regressions.append((name, mode, bt[0], at[0], delta_pct))
+                elif delta_pct >= 2.0:
+                    improvements.append((name, mode, bt[0], at[0], delta_pct))
+        print(line)
+
+    print("-" * len(header))
+    print(f"  legend: 'before → after ±%'    dropped: removed from this mode    added: new in this mode")
+
+    # Top regressions/improvements lists
+    def _sort_by_abs(items: list) -> list:
+        return sorted(items, key=lambda x: abs(x[4]), reverse=True)
+
+    if regressions:
+        print()
+        print(f"Regressions (>=2% slower):")
+        for name, mode, b, a, d in _sort_by_abs(regressions)[:10]:
+            print(f"  {name:<28} {mode:<16}  {b:>7.1f} → {a:>7.1f}  ({d:+.1f}%)")
+    if improvements:
+        print()
+        print(f"Improvements (>=2% faster):")
+        for name, mode, b, a, d in _sort_by_abs(improvements)[:10]:
+            print(f"  {name:<28} {mode:<16}  {b:>7.1f} → {a:>7.1f}  ({d:+.1f}%)")
+
+    return 0
+
+
+def _format_diff_cell(before: tuple[float, bool] | None,
+                      after: tuple[float, bool] | None,
+                      width: int) -> str:
+    """Format a single before→after cell as 'B → A ±%' or 'dropped'/'added'/etc."""
+    if before is None and after is None:
+        return "--"
+    if before is None:
+        if after[0] > 0:
+            fail = "x" if not after[1] else ""
+            return f"added {after[0]:.1f}{fail}"
+        return "added --"
+    if after is None:
+        if before[0] > 0:
+            return f"dropped ({before[0]:.1f})"
+        return "dropped"
+
+    b_val, b_ok = before
+    a_val, a_ok = after
+    b_fail = "x" if not b_ok else ""
+    a_fail = "x" if not a_ok else ""
+
+    if b_val <= 0 and a_val <= 0:
+        return "-- → --"
+    if b_val <= 0:
+        return f"-- → {a_val:.1f}{a_fail}"
+    if a_val <= 0:
+        return f"{b_val:.1f}{b_fail} → --"
+
+    delta_pct = (a_val - b_val) / b_val * 100.0
+    sign = "+" if delta_pct >= 0 else ""
+    return f"{b_val:.1f}{b_fail}→{a_val:.1f}{a_fail} {sign}{delta_pct:.0f}%"
 
 
 def _print_throughput_summary(

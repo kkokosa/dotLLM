@@ -1,10 +1,12 @@
 // Rotary Position Embedding (RoPE) kernel for dotLLM.
 // In-place rotation on Q[seqLen, numHeads * headDim] and K[seqLen, numKvHeads * headDim].
 // Computes cos/sin from theta in-kernel (no precomputed table upload needed).
+// Q and K are processed independently — reuse attempts hurt GQA models due to
+// num_heads != num_kv_heads causing different (t, head) decompositions.
 
 #include <cuda_fp16.h>
 
-extern "C" __global__ void rope_f16(
+extern "C" __global__ void __launch_bounds__(256) rope_f16(
     half* __restrict__ q,
     half* __restrict__ k,
     const int* __restrict__ positions,  // [seqLen] on device

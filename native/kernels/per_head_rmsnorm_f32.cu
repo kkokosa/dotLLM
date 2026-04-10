@@ -1,6 +1,6 @@
 // Per-head RMS normalization with FP32 data and FP32 weight.
 
-extern "C" __global__ void per_head_rmsnorm_f32(
+extern "C" __global__ void __launch_bounds__(256) per_head_rmsnorm_f32(
     float* __restrict__ qk, const float* __restrict__ weight,
     const float eps, const int num_heads, const int head_dim, const int seq_len)
 {

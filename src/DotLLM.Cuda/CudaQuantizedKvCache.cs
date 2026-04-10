@@ -227,22 +227,48 @@ public sealed class CudaQuantizedKvCache : IQuantizedKvCache
         }
 
         // Phase 2: Copy window region → scratch[quantizedLength..currentLength)
-        // Window is a ring buffer — copy per-row with ring index mapping.
+        // Window is a ring buffer. Use bulk copy when contiguous (no wraparound).
         int windowLen = WindowLength;
         if (windowLen > 0 && _keysWindow != null)
         {
-            for (int i = 0; i < windowLen; i++)
+            int ringStart = _quantizedLength % _windowSize;
+            bool windowContiguous = (ringStart + windowLen <= _windowSize);
+
+            if (windowContiguous)
             {
-                int pos = _quantizedLength + i;
-                int ringIdx = pos % _windowSize;
+                // No wraparound — single bulk copy
+                long bulkBytes = (long)windowLen * fp16RowBytes;
+                nint kSrc = _keysWindow[layerIndex] + (nint)(ringStart * fp16RowBytes);
+                nint vSrc = _valuesWindow![layerIndex] + (nint)(ringStart * fp16RowBytes);
+                nint kDst = _kScratch + (nint)(_quantizedLength * fp16RowBytes);
+                nint vDst = _vScratch + (nint)(_quantizedLength * fp16RowBytes);
+                CudaDriverApi.cuMemcpyDtoDAsync_v2(kDst, kSrc, (nuint)bulkBytes, stream).ThrowOnError();
+                CudaDriverApi.cuMemcpyDtoDAsync_v2(vDst, vSrc, (nuint)bulkBytes, stream).ThrowOnError();
+            }
+            else
+            {
+                // Wraparound — two bulk copies (tail + head of ring buffer)
+                int tailLen = _windowSize - ringStart;
+                int headLen = windowLen - tailLen;
 
-                nint kSrc = _keysWindow[layerIndex] + (nint)(ringIdx * fp16RowBytes);
-                nint vSrc = _valuesWindow![layerIndex] + (nint)(ringIdx * fp16RowBytes);
-                nint kDst = _kScratch + (nint)(pos * fp16RowBytes);
-                nint vDst = _vScratch + (nint)(pos * fp16RowBytes);
+                // Tail: ringStart..windowSize
+                long tailBytes = (long)tailLen * fp16RowBytes;
+                nint kDst = _kScratch + (nint)(_quantizedLength * fp16RowBytes);
+                nint vDst = _vScratch + (nint)(_quantizedLength * fp16RowBytes);
+                nint kSrc = _keysWindow[layerIndex] + (nint)(ringStart * fp16RowBytes);
+                nint vSrc = _valuesWindow![layerIndex] + (nint)(ringStart * fp16RowBytes);
+                CudaDriverApi.cuMemcpyDtoDAsync_v2(kDst, kSrc, (nuint)tailBytes, stream).ThrowOnError();
+                CudaDriverApi.cuMemcpyDtoDAsync_v2(vDst, vSrc, (nuint)tailBytes, stream).ThrowOnError();
 
-                CudaDriverApi.cuMemcpyDtoDAsync_v2(kDst, kSrc, (nuint)fp16RowBytes, stream).ThrowOnError();
-                CudaDriverApi.cuMemcpyDtoDAsync_v2(vDst, vSrc, (nuint)fp16RowBytes, stream).ThrowOnError();
+                // Head: 0..headLen
+                if (headLen > 0)
+                {
+                    long headBytes = (long)headLen * fp16RowBytes;
+                    nint kDst2 = kDst + (nint)tailBytes;
+                    nint vDst2 = vDst + (nint)tailBytes;
+                    CudaDriverApi.cuMemcpyDtoDAsync_v2(kDst2, _keysWindow[layerIndex], (nuint)headBytes, stream).ThrowOnError();
+                    CudaDriverApi.cuMemcpyDtoDAsync_v2(vDst2, _valuesWindow![layerIndex], (nuint)headBytes, stream).ThrowOnError();
+                }
             }
         }
 

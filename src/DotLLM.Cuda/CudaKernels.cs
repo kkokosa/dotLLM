@@ -11,6 +11,14 @@ public sealed unsafe class CudaKernels : IDisposable
 {
     private const int BlockSize = 256;
 
+    /// <summary>
+    /// Max CUDA blocks for dequant kernel launches. Kernels use grid-stride loops,
+    /// so capping grid size amortizes block launch overhead on GPUs with many SMs
+    /// (e.g. RTX 3050 has 20 SMs; launching 65K+ blocks per dequant overwhelms the
+    /// hardware block scheduler). Value is ~4x typical consumer SM count.
+    /// </summary>
+    private const int MaxDequantGridSize = 256;
+
     private readonly CudaModule _rmsnormModule;
     private readonly CudaModule _ropeModule;
     private readonly CudaModule _swigluModule;
@@ -64,6 +72,8 @@ public sealed unsafe class CudaKernels : IDisposable
     private readonly nint _convertF32ToF16Func;
     private readonly nint _quantizedGemvQ8_0Func;
     private readonly nint _quantizedGemvQ4_KFunc;
+    private readonly nint _quantizedGemvQ5_0Func;
+    private readonly nint _quantizedGemvQ5_KFunc;
     private readonly nint _quantizedGemvQ6_KFunc;
     private readonly nint _dequantQ8_0Func;
     private readonly nint _dequantQ4_0Func;
@@ -75,8 +85,6 @@ public sealed unsafe class CudaKernels : IDisposable
     private readonly nint _quantKvQ8_0Func;
     private readonly nint _quantKvQ4_0Func;
 
-    /// <summary>Max shared memory per block (bytes) for the current device.</summary>
-    private readonly uint _maxSharedMemoryPerBlock;
 
     /// <summary>
     /// Loads all PTX modules from the specified directory.
@@ -84,12 +92,6 @@ public sealed unsafe class CudaKernels : IDisposable
     /// <param name="ptxDir">Directory containing compiled .ptx files.</param>
     public CudaKernels(string ptxDir)
     {
-        // Query max shared memory per block for bounds checking in attention kernels.
-        CudaDriverApi.cuCtxGetDevice(out int device);
-        CudaDriverApi.cuDeviceGetAttribute(out int maxShared,
-            CudaDriverApi.CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, device);
-        _maxSharedMemoryPerBlock = (uint)maxShared;
-
         _rmsnormModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "rmsnorm.ptx"));
         _ropeModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "rope.ptx"));
         _swigluModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "swiglu.ptx"));
@@ -143,6 +145,8 @@ public sealed unsafe class CudaKernels : IDisposable
         _convertF32ToF16Func = _convertModule.GetFunction("convert_f32_to_f16");
         _quantizedGemvQ8_0Func = _quantizedGemvModule.GetFunction("quantized_gemv_q8_0");
         _quantizedGemvQ4_KFunc = _quantizedGemvModule.GetFunction("quantized_gemv_q4_k");
+        _quantizedGemvQ5_0Func = _quantizedGemvModule.GetFunction("quantized_gemv_q5_0");
+        _quantizedGemvQ5_KFunc = _quantizedGemvModule.GetFunction("quantized_gemv_q5_k");
         _quantizedGemvQ6_KFunc = _quantizedGemvModule.GetFunction("quantized_gemv_q6_k");
         _dequantQ8_0Func = _dequantModule.GetFunction("dequant_q8_0_f16");
         _dequantQ4_0Func = _dequantModule.GetFunction("dequant_q4_0_f16");
@@ -319,10 +323,9 @@ public sealed unsafe class CudaKernels : IDisposable
                         &poArg, &swArg};
 
         int numBlocks = seqQ * numHeads;
-        // Shared: scores[seqKv] + output_accum[headDim] + 1 scratch float
-        uint sharedBytes = (uint)((seqKv + headDim + 1) * sizeof(float));
-
-        ThrowIfSharedMemoryExceeded(sharedBytes, seqKv);
+        // Tiled online softmax: q_shared[headDim] + score_tile[256] + out_accum[headDim] + warp_scratch[32]
+        const int TileKv = 256;
+        uint sharedBytes = (uint)((headDim + TileKv + headDim + 32) * sizeof(float));
 
         CudaDriverApi.cuLaunchKernel(_attentionF32Func,
                 (uint)numBlocks, 1, 1, BlockSize, 1, 1,
@@ -395,7 +398,7 @@ public sealed unsafe class CudaKernels : IDisposable
                 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Fused SwiGLU: out = SiLU(gate) * up.</summary>
+    /// <summary>Fused SwiGLU: out = SiLU(gate) * up. half2 vectorized (2 elements/thread).</summary>
     public void LaunchSwiGLU(nint gate, nint up, nint output,
                               int n, int seqLen, nint stream)
     {
@@ -404,21 +407,23 @@ public sealed unsafe class CudaKernels : IDisposable
 
         void** args = stackalloc void*[] {&gateArg, &upArg, &outArg, &nArg, &slArg};
         int total = n * seqLen;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        // half2: each thread processes 2 elements
+        uint gridDim = (uint)((total / 2 + BlockSize - 1) / BlockSize);
 
         CudaDriverApi.cuLaunchKernel(_swigluFunc,
                 gridDim, 1, 1, BlockSize, 1, 1,
                 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Element-wise add: output = a + b.</summary>
+    /// <summary>Element-wise add: output = a + b. half2 vectorized (2 elements/thread).</summary>
     public void LaunchAdd(nint a, nint b, nint output, int n, nint stream)
     {
         nint aArg = a, bArg = b, outArg = output;
         int nArg = n;
 
         void** args = stackalloc void*[] {&aArg, &bArg, &outArg, &nArg};
-        uint gridDim = (uint)((n + BlockSize - 1) / BlockSize);
+        // half2: each thread processes 2 elements
+        uint gridDim = (uint)((n / 2 + BlockSize - 1) / BlockSize);
 
         CudaDriverApi.cuLaunchKernel(_addFunc,
                 gridDim, 1, 1, BlockSize, 1, 1,
@@ -481,17 +486,16 @@ public sealed unsafe class CudaKernels : IDisposable
                         &poArg, &swArg};
 
         int numBlocks = seqQ * numHeads;
-        // Shared memory: scores[seqKv] + output_accum[headDim], all float
-        uint sharedBytes = (uint)((seqKv + headDim) * sizeof(float));
-
-        ThrowIfSharedMemoryExceeded(sharedBytes, seqKv);
+        // Tiled online softmax: q_shared[headDim] + score_tile[256] + out_accum[headDim] + warp_scratch[32]
+        const int TileKv = 256;
+        uint sharedBytes = (uint)((headDim + TileKv + headDim + 32) * sizeof(float));
 
         CudaDriverApi.cuLaunchKernel(_attentionFunc,
                 (uint)numBlocks, 1, 1, BlockSize, 1, 1,
                 sharedBytes, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Bias add: output[t, :] += bias[:].</summary>
+    /// <summary>Bias add: output[t, :] += bias[:]. half2 vectorized (2 elements/thread).</summary>
     public void LaunchBiasAdd(nint output, nint bias, int dim, int seqLen, nint stream)
     {
         nint outArg = output, biasArg = bias;
@@ -499,7 +503,8 @@ public sealed unsafe class CudaKernels : IDisposable
 
         void** args = stackalloc void*[] {&outArg, &biasArg, &dimArg, &slArg};
         int total = dim * seqLen;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        // half2: each thread processes 2 elements
+        uint gridDim = (uint)((total / 2 + BlockSize - 1) / BlockSize);
 
         CudaDriverApi.cuLaunchKernel(_biasAddFunc,
                 gridDim, 1, 1, BlockSize, 1, 1,
@@ -522,28 +527,30 @@ public sealed unsafe class CudaKernels : IDisposable
                 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Convert FP16 → FP32.</summary>
+    /// <summary>Convert FP16 → FP32. half2/float2 vectorized (2 elements/thread).</summary>
     public void LaunchConvertF16ToF32(nint src, nint dst, int n, nint stream)
     {
         nint srcArg = src, dstArg = dst;
         int nArg = n;
 
         void** args = stackalloc void*[] {&srcArg, &dstArg, &nArg};
-        uint gridDim = (uint)((n + BlockSize - 1) / BlockSize);
+        // half2/float2: each thread processes 2 elements
+        uint gridDim = (uint)((n / 2 + BlockSize - 1) / BlockSize);
 
         CudaDriverApi.cuLaunchKernel(_convertF16ToF32Func,
                 gridDim, 1, 1, BlockSize, 1, 1,
                 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Convert FP32 → FP16.</summary>
+    /// <summary>Convert FP32 → FP16. float2/half2 vectorized (2 elements/thread).</summary>
     public void LaunchConvertF32ToF16(nint src, nint dst, int n, nint stream)
     {
         nint srcArg = src, dstArg = dst;
         int nArg = n;
 
         void** args = stackalloc void*[] {&srcArg, &dstArg, &nArg};
-        uint gridDim = (uint)((n + BlockSize - 1) / BlockSize);
+        // float2/half2: each thread processes 2 elements
+        uint gridDim = (uint)((n / 2 + BlockSize - 1) / BlockSize);
 
         CudaDriverApi.cuLaunchKernel(_convertF32ToF16Func,
                 gridDim, 1, 1, BlockSize, 1, 1,
@@ -561,6 +568,8 @@ public sealed unsafe class CudaKernels : IDisposable
         {
             QuantizationType.Q8_0 => _quantizedGemvQ8_0Func,
             QuantizationType.Q4_K => _quantizedGemvQ4_KFunc,
+            QuantizationType.Q5_0 => _quantizedGemvQ5_0Func,
+            QuantizationType.Q5_K => _quantizedGemvQ5_KFunc,
             QuantizationType.Q6_K => _quantizedGemvQ6_KFunc,
             _ => 0
         };
@@ -577,7 +586,8 @@ public sealed unsafe class CudaKernels : IDisposable
 
     /// <summary>Whether a quantization type has a custom quantized GEMV kernel.</summary>
     public static bool HasQuantizedGemv(QuantizationType qt) =>
-        qt is QuantizationType.Q8_0 or QuantizationType.Q4_K or QuantizationType.Q6_K;
+        qt is QuantizationType.Q8_0 or QuantizationType.Q4_K or QuantizationType.Q5_0
+            or QuantizationType.Q5_K or QuantizationType.Q6_K;
 
     /// <summary>Dequantize a weight matrix to FP16 on the GPU.</summary>
     /// <param name="src">Device pointer to quantized weight data.</param>
@@ -607,7 +617,9 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalBlocks = totalElements / 32;
                 int tbArg = totalBlocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
-                uint gridDim = (uint)((totalBlocks + BlockSize - 1) / BlockSize);
+                // Grid-stride loop: cap grid at MaxDequantGridSize CUDA blocks.
+                // Each CUDA block has 8 warps, so natural 1:1 mapping is ceil(totalBlocks/8).
+                uint gridDim = (uint)Math.Min((totalBlocks + 7) / 8, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ8_0Func,
                         gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
@@ -619,7 +631,7 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalBlocks = totalElements / 32;
                 int tbArg = totalBlocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
-                uint gridDim = (uint)((totalBlocks + BlockSize - 1) / BlockSize);
+                uint gridDim = (uint)Math.Min((totalBlocks + 7) / 8, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ4_0Func,
                         gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
@@ -631,7 +643,7 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalBlocks = totalElements / 32;
                 int tbArg = totalBlocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
-                uint gridDim = (uint)((totalBlocks + BlockSize - 1) / BlockSize);
+                uint gridDim = (uint)Math.Min((totalBlocks + 7) / 8, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ5_0Func,
                         gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
@@ -643,7 +655,8 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalSuperblocks = totalElements / 256;
                 int tsbArg = totalSuperblocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tsbArg};
-                uint gridDim = (uint)((totalSuperblocks + BlockSize - 1) / BlockSize);
+                // Grid-stride loop: 1 CUDA block per superblock naturally, capped at MaxDequantGridSize
+                uint gridDim = (uint)Math.Min(totalSuperblocks, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ4_KFunc,
                         gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
@@ -655,7 +668,7 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalSuperblocks = totalElements / 256;
                 int tsbArg = totalSuperblocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tsbArg};
-                uint gridDim = (uint)((totalSuperblocks + BlockSize - 1) / BlockSize);
+                uint gridDim = (uint)Math.Min(totalSuperblocks, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ5_KFunc,
                         gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
@@ -667,7 +680,7 @@ public sealed unsafe class CudaKernels : IDisposable
                 int totalSuperblocks = totalElements / 256;
                 int tsbArg = totalSuperblocks;
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tsbArg};
-                uint gridDim = (uint)((totalSuperblocks + BlockSize - 1) / BlockSize);
+                uint gridDim = (uint)Math.Min(totalSuperblocks, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ6_KFunc,
                         gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
@@ -711,19 +724,6 @@ public sealed unsafe class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(func,
                 gridDim, 1, 1, BlockSize, 1, 1,
                 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>
-    /// Throws if the required shared memory exceeds the device limit.
-    /// Prevents silent kernel launch failure for long context lengths.
-    /// </summary>
-    private void ThrowIfSharedMemoryExceeded(uint sharedBytes, int seqKv)
-    {
-        if (sharedBytes > _maxSharedMemoryPerBlock)
-            throw new InvalidOperationException(
-                $"CUDA attention requires {sharedBytes / 1024} KB shared memory for sequence " +
-                $"length {seqKv}, but device supports max {_maxSharedMemoryPerBlock / 1024} KB per block. " +
-                $"Reduce context length or use CPU backend for long contexts.");
     }
 
     /// <inheritdoc/>

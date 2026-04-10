@@ -1,8 +1,9 @@
 // RoPE kernel with FP32 Q/K data.
+// Q and K are processed independently — reuse attempts hurt GQA models.
 
 #include <math.h>
 
-extern "C" __global__ void rope_f32(
+extern "C" __global__ void __launch_bounds__(256) rope_f32(
     float* __restrict__ q,
     float* __restrict__ k,
     const int* __restrict__ positions,

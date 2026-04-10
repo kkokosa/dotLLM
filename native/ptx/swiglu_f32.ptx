@@ -19,6 +19,7 @@
 	.param .u32 swiglu_f32_param_3,
 	.param .u32 swiglu_f32_param_4
 )
+.maxntid 256, 1, 1
 {
 	.reg .pred 	%p<2>;
 	.reg .f32 	%f<8>;

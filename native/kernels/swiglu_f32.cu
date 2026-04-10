@@ -2,7 +2,7 @@
 
 #include <math.h>
 
-extern "C" __global__ void swiglu_f32(
+extern "C" __global__ void __launch_bounds__(256) swiglu_f32(
     const float* __restrict__ gate, const float* __restrict__ up,
     float* __restrict__ output, const int n, const int seq_len)
 {

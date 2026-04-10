@@ -61,28 +61,50 @@ public sealed class CudaKvCache : IKvCache
     {
         long rowBytes = (long)_kvStride * sizeof(ushort); // FP16 KV-cache
 
+        // Detect contiguous positions for bulk copy (common case: prefill or sequential decode)
+        bool contiguous = seqLen > 0;
         for (int i = 0; i < seqLen; i++)
         {
-            int pos = positions[i];
-            if ((uint)pos >= (uint)_maxSeqLen)
+            if ((uint)positions[i] >= (uint)_maxSeqLen)
                 throw new ArgumentOutOfRangeException(nameof(positions),
-                    $"Position {pos} at index {i} exceeds max KV-cache length {_maxSeqLen}.");
-            nint kDst = _keys[layerIndex] + (nint)(pos * rowBytes);
-            nint vDst = _values[layerIndex] + (nint)(pos * rowBytes);
-            nint kSrc = keysDevice + (nint)(i * rowBytes);
-            nint vSrc = valuesDevice + (nint)(i * rowBytes);
+                    $"Position {positions[i]} at index {i} exceeds max KV-cache length {_maxSeqLen}.");
+            if (i > 0 && positions[i] != positions[i - 1] + 1)
+                contiguous = false;
+        }
 
-            CudaDriverApi.cuMemcpyDtoDAsync_v2(kDst, kSrc, (nuint)rowBytes, stream).ThrowOnError();
-            CudaDriverApi.cuMemcpyDtoDAsync_v2(vDst, vSrc, (nuint)rowBytes, stream).ThrowOnError();
+        if (contiguous && seqLen > 1)
+        {
+            // Bulk copy: single D2D transfer for all positions
+            long bulkBytes = (long)seqLen * rowBytes;
+            nint kDst = _keys[layerIndex] + (nint)(positions[0] * rowBytes);
+            nint vDst = _values[layerIndex] + (nint)(positions[0] * rowBytes);
+            CudaDriverApi.cuMemcpyDtoDAsync_v2(kDst, keysDevice, (nuint)bulkBytes, stream).ThrowOnError();
+            CudaDriverApi.cuMemcpyDtoDAsync_v2(vDst, valuesDevice, (nuint)bulkBytes, stream).ThrowOnError();
+        }
+        else
+        {
+            // Per-position copy (non-contiguous positions, e.g., prompt cache partial reuse)
+            for (int i = 0; i < seqLen; i++)
+            {
+                int pos = positions[i];
+                nint kDst = _keys[layerIndex] + (nint)(pos * rowBytes);
+                nint vDst = _values[layerIndex] + (nint)(pos * rowBytes);
+                nint kSrc = keysDevice + (nint)(i * rowBytes);
+                nint vSrc = valuesDevice + (nint)(i * rowBytes);
+                CudaDriverApi.cuMemcpyDtoDAsync_v2(kDst, kSrc, (nuint)rowBytes, stream).ThrowOnError();
+                CudaDriverApi.cuMemcpyDtoDAsync_v2(vDst, vSrc, (nuint)rowBytes, stream).ThrowOnError();
+            }
         }
 
         // Update length
+        int maxPos = positions[seqLen - 1];
         for (int i = 0; i < seqLen; i++)
         {
-            int newLen = positions[i] + 1;
-            if (newLen > _currentLength)
-                _currentLength = newLen;
+            if (positions[i] > maxPos) maxPos = positions[i];
         }
+        int newLength = maxPos + 1;
+        if (newLength > _currentLength)
+            _currentLength = newLength;
     }
 
     /// <summary>Returns device pointer to cached keys for the given layer.</summary>

@@ -4,7 +4,7 @@
 #include <cuda_fp16.h>
 #include <stdint.h>
 
-extern "C" __global__ void quantized_gemv_q8_0_f32in(
+extern "C" __global__ void __launch_bounds__(256) quantized_gemv_q8_0_f32in(
     const uint8_t* __restrict__ weight,
     const float* __restrict__ x,
     float* __restrict__ y,

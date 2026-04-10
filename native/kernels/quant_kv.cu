@@ -13,7 +13,7 @@
 
 // One thread per block of 32 elements.
 // Quantizes a row of FP16 values to Q8_0 format.
-extern "C" __global__ void quant_f16_to_q8_0(
+extern "C" __global__ void __launch_bounds__(256) quant_f16_to_q8_0(
     const half* __restrict__ src,
     uint8_t* __restrict__ dst,
     const int total_blocks)
@@ -63,7 +63,7 @@ extern "C" __global__ void quant_f16_to_q8_0(
 #define Q4_0_BLOCK_SIZE 32
 #define Q4_0_BLOCK_BYTES 18
 
-extern "C" __global__ void quant_f16_to_q4_0(
+extern "C" __global__ void __launch_bounds__(256) quant_f16_to_q4_0(
     const half* __restrict__ src,
     uint8_t* __restrict__ dst,
     const int total_blocks)
