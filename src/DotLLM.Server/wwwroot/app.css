@@ -328,3 +328,170 @@ body {
     font-style: italic;
     font-size: 0.5625rem;
 }
+
+/* ──────────────── THEME TOGGLE ICONS ──────────────── */
+/* Sun shown by default (dark mode); moon shown only when html.light is active. */
+.theme-icon-moon { display: none; }
+html.light .theme-icon-sun { display: none; }
+html.light .theme-icon-moon { display: block; }
+
+/* ──────────────── LIGHT MODE ──────────────── */
+/*
+ * Additive overrides. The base stylesheet and inline Tailwind utilities encode
+ * the dark palette; these rules win by specificity (`html.light .foo` has
+ * class-count 2 vs Tailwind's 1) without requiring any HTML class refactor.
+ */
+
+html.light body {
+    background: #fafafa;
+    color: #18181b;
+}
+
+/* Tailwind utility overrides (compound class selectors beat Tailwind's 0,1,0). */
+html.light .bg-zinc-900 { background-color: #fafafa; }
+html.light .bg-zinc-950 { background-color: #f4f4f5; }
+html.light .bg-zinc-950\/80 { background-color: rgba(244, 244, 245, 0.85); }
+html.light .bg-zinc-900\/80 { background-color: rgba(250, 250, 250, 0.85); }
+html.light .bg-zinc-800 { background-color: #e4e4e7; }
+html.light .bg-zinc-800\/50 { background-color: rgba(228, 228, 231, 0.5); }
+
+html.light .text-zinc-100 { color: #18181b; }
+html.light .text-zinc-200 { color: #27272a; }
+html.light .text-zinc-300 { color: #3f3f46; }
+html.light .text-zinc-400 { color: #52525b; }
+html.light .text-zinc-500 { color: #71717a; }
+html.light .text-zinc-600 { color: #a1a1aa; }
+
+html.light .border-zinc-700 { border-color: #d4d4d8; }
+html.light .border-zinc-800 { border-color: #e4e4e7; }
+
+html.light .placeholder-zinc-600::placeholder { color: #a1a1aa; }
+
+/* Modal scrim — softer on light. */
+html.light .bg-black\/40 { background-color: rgba(0, 0, 0, 0.2); }
+html.light .bg-black\/60 { background-color: rgba(0, 0, 0, 0.3); }
+
+/* Hover states for borders/text used in the header buttons. */
+html.light .hover\:text-zinc-200:hover { color: #18181b; }
+html.light .hover\:text-zinc-300:hover { color: #27272a; }
+html.light .hover\:border-zinc-500:hover { border-color: #71717a; }
+
+/*
+ * Accent color family — re-mapped from cyan-400 (#22d3ee) to cyan-700 (#0e7490).
+ * The bright dark-mode cyan washes out on a near-white background; cyan-700 keeps
+ * the same hue identity while giving AA contrast for text (5.3:1 on #fafafa) and
+ * making the low-alpha button backgrounds actually visible.
+ */
+html.light .text-accent { color: #0e7490; }
+html.light .text-accent\/60 { color: rgba(14, 116, 144, 0.75); }
+
+html.light .bg-accent\/20 { background-color: rgba(14, 116, 144, 0.12); }
+html.light .bg-accent\/30 { background-color: rgba(14, 116, 144, 0.2); }
+html.light .hover\:bg-accent\/30:hover { background-color: rgba(14, 116, 144, 0.2); }
+
+html.light .border-accent\/20 { border-color: rgba(14, 116, 144, 0.35); }
+html.light .border-accent\/30 { border-color: rgba(14, 116, 144, 0.4); }
+html.light .focus\:border-accent\/50:focus { border-color: rgba(14, 116, 144, 0.6); }
+
+/* Native form element accent (checkboxes, radios, range sliders). */
+html.light .accent-cyan-500 { accent-color: #0e7490; }
+
+/* Scrollbars. */
+html.light ::-webkit-scrollbar-thumb { background: #d4d4d8; }
+html.light ::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
+html.light * { scrollbar-color: #d4d4d8 transparent; }
+
+/* Streaming cursor — keep cyan accent for continuity. */
+html.light .cursor-blink::after { color: #0e7490; }
+
+/* Message content (code blocks, links, emphasis). */
+html.light .msg-content pre {
+    background: #f4f4f5;
+    border-color: #d4d4d8;
+    color: #18181b;
+}
+html.light .msg-content code {
+    background: #e4e4e7;
+    color: #18181b;
+}
+html.light .msg-content pre code { background: transparent; }
+html.light .msg-content strong { color: #18181b; }
+html.light .msg-content a { color: #0e7490; }
+
+/* Stats bar (inline below assistant messages). */
+html.light .stats-bar {
+    color: #52525b;
+    border-top-color: #e4e4e7;
+}
+html.light .stats-bar .stat-label { color: #71717a; }
+
+/* Stats hover card. */
+html.light .stats-hover {
+    background: #fafafa;
+    border-color: #d4d4d8;
+    color: #52525b;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.15);
+}
+html.light .stats-hover .sh-seg-bar { background: #e4e4e7; }
+html.light .stats-hover .sh-marker {
+    background: #e4e4e7;
+    border-color: #a1a1aa;
+    color: #27272a;
+}
+html.light .stats-hover .sh-legend-num {
+    background: #e4e4e7;
+    border-color: #a1a1aa;
+    color: #27272a;
+}
+html.light .stats-hover .sh-legend-text { color: #52525b; }
+html.light .stats-hover .sh-legend-val { color: #18181b; }
+html.light .stats-hover .sh-divider { border-top-color: #e4e4e7; }
+html.light .stats-hover .sh-val { color: #18181b; }
+html.light .stats-hover .sh-desc { color: #71717a; }
+html.light .stats-hover .sh-spec-bar { background: #e4e4e7; }
+
+/* Spinner. */
+html.light .spinner {
+    border-color: #d4d4d8;
+    border-top-color: #0e7490;
+}
+
+/* Model list items (load modal). */
+html.light .model-item { border-color: #e4e4e7; }
+html.light .model-item:hover { border-color: #a1a1aa; }
+html.light .model-item.active {
+    border-color: #0e7490;
+    background: rgba(14, 116, 144, 0.06);
+}
+
+/* Live generation indicator. */
+html.light .gen-live { color: #0e7490; }
+
+/* Logprobs token tooltip. */
+html.light .lp-tooltip {
+    background: #fafafa;
+    border-color: #d4d4d8;
+    color: #52525b;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+}
+html.light .lp-tooltip-header { color: #18181b; }
+html.light .lp-tooltip-divider { border-top-color: #e4e4e7; }
+html.light .lp-tooltip-table tr.lp-tooltip-current td { color: #0e7490; }
+html.light .lp-tt-marker { color: #0e7490; }
+html.light .lp-tt-rank { color: #71717a; }
+
+/* Logprobs legend badge + hover tooltip. */
+html.light .lp-legend-label {
+    background: rgba(14, 116, 144, 0.1);
+    border-color: rgba(14, 116, 144, 0.3);
+    color: #0e7490;
+}
+html.light .lp-legend-tooltip {
+    background: #fafafa;
+    border-color: #d4d4d8;
+    color: #52525b;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.15);
+}
+html.light .lp-legend-title { color: #18181b; }
+html.light .lp-legend-divider { border-top-color: #e4e4e7; }
+html.light .lp-legend-hint { color: #a1a1aa; }

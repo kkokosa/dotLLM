@@ -85,6 +85,7 @@ const clearBtn = $('#clear-btn');
 const exportBtn = $('#export-btn');
 const exportDropdown = $('#export-dropdown');
 const exportDownloadBtn = $('#export-download-btn');
+const themeToggleBtn = $('#theme-toggle-btn');
 const settingsBtn = $('#settings-btn');
 const settingsPanel = $('#settings-panel');
 const settingsOverlay = $('#settings-overlay');
@@ -1684,6 +1685,19 @@ function loadConversation() {
 sendBtn.addEventListener('click', handleSend);
 stopBtn.addEventListener('click', handleStop);
 clearBtn.addEventListener('click', handleClear);
+
+// Theme toggle — the initial class is applied by an inline script in <head>
+// (before paint, to avoid a flash). This handler only flips the class and
+// persists the choice; the CSS in app.css renders the other theme on update.
+themeToggleBtn.addEventListener('click', () => {
+    const root = document.documentElement;
+    const goingLight = !root.classList.contains('light');
+    root.classList.toggle('light', goingLight);
+    root.classList.toggle('dark', !goingLight);
+    try {
+        localStorage.setItem('dotllm-theme', goingLight ? 'light' : 'dark');
+    } catch { /* localStorage unavailable */ }
+});
 
 // Export dropdown toggle + download
 exportBtn.addEventListener('click', (e) => {
