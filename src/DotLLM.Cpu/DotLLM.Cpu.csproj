@@ -1,5 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup>
+    <Description>CPU backend for dotLLM — SIMD-optimized tensor kernels (TensorPrimitives + hand-tuned intrinsics) for quantized matmul, RMSNorm, RoPE, softmax, and attention.</Description>
+  </PropertyGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
     <InternalsVisibleTo Include="DotLLM.Tests.Integration" />

@@ -13,8 +13,33 @@
     <Authors>Konrad Kokosa</Authors>
     <Company>dotLLM</Company>
     <Product>dotLLM</Product>
+    <Copyright>Copyright (c) Konrad Kokosa</Copyright>
     <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
+    <PackageProjectUrl>https://dotllm.dev/</PackageProjectUrl>
     <RepositoryUrl>https://github.com/kkokosa/dotLLM</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageTags>llm;inference;transformer;llama;mistral;phi;qwen;gguf;cuda;simd;ai</PackageTags>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
+
+  <PropertyGroup>
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+    <MinVerDefaultPreReleaseIdentifiers>preview.0</MinVerDefaultPreReleaseIdentifiers>
+  </PropertyGroup>
+
+  <!-- Deterministic, reproducible builds when running on GitHub Actions.
+       Normalizes source paths in embedded PDBs / SourceLink mappings. -->
+  <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(IsPackable)' != 'false'">
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Condition="Exists('$(MSBuildThisFileDirectory)README.md')" />
+    <None Include="$(MSBuildThisFileDirectory)docs\icon.png" Pack="true" PackagePath="\" Condition="Exists('$(MSBuildThisFileDirectory)docs\icon.png')" />
+  </ItemGroup>
 </Project>

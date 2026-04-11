@@ -1,5 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup>
+    <Description>Inference engine for dotLLM — KV-cache (paged / quantized), scheduler, composable samplers, constrained decoding (JSON / regex / grammar), speculative decoding, and prefix caching.</Description>
+  </PropertyGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
     <InternalsVisibleTo Include="DotLLM.Tests.Integration" />

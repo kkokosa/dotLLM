@@ -1,5 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup>
+    <Description>Interpretability and diagnostics for dotLLM — zero-cost inference hooks for activation capture, logit lens, logprobs, and SAE integration.</Description>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
   </ItemGroup>

@@ -1,5 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup>
+    <Description>Model loaders and transformer architectures for dotLLM — memory-mapped GGUF/SafeTensors, parameterized TransformerBlock supporting Llama, Mistral, Phi, Qwen, and DeepSeek.</Description>
+  </PropertyGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="DotLLM.Cuda" />
     <InternalsVisibleTo Include="DotLLM.Tests.Unit" />

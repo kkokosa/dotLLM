@@ -1,5 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup>
+    <Description>HuggingFace Hub integration for dotLLM — model search, metadata queries, and GGUF download/caching under ~/.dotllm/models/.</Description>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
   </ItemGroup>

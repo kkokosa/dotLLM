@@ -1,2 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Core abstractions for dotLLM — tensor types, backend interfaces, model config, sampling, attention strategies, and diagnostics hooks.</Description>
+  </PropertyGroup>
+
 </Project>

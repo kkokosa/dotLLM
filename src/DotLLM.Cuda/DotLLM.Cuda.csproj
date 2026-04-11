@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Description>CUDA GPU backend for dotLLM — PTX kernels loaded via the CUDA Driver API for attention, dequant, matmul, RoPE, softmax, and RMSNorm. Supports CPU/GPU hybrid offloading and KV-cache quantization.</Description>
   </PropertyGroup>
 
   <ItemGroup>

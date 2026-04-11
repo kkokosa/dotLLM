@@ -1,5 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup>
+    <Description>Telemetry and observability for dotLLM — System.Diagnostics.Metrics counters, Activity-based request tracing, and OpenTelemetry-friendly instrumentation.</Description>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
   </ItemGroup>

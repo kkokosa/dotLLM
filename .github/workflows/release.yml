@@ -1,0 +1,315 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  DOTNET_VERSION: '10.x'
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set.outputs.version }}
+      prerelease: ${{ steps.set.outputs.prerelease }}
+    steps:
+      - id: set
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  pack-nuget:
+    name: Pack NuGet packages
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+          cache-dependency-path: |
+            **/*.csproj
+            **/Directory.Packages.props
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Pack
+        run: dotnet pack -c Release --no-restore -o artifacts/nuget
+
+      - name: List packages
+        run: ls -lh artifacts/nuget/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: |
+            artifacts/nuget/*.nupkg
+            artifacts/nuget/*.snupkg
+          if-no-files-found: error
+
+  publish-single-file:
+    name: Publish single-file (${{ matrix.rid }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            archive: tar.gz
+            exe: dotllm
+          - os: windows-latest
+            rid: win-x64
+            archive: zip
+            exe: dotllm.exe
+          - os: macos-14
+            rid: osx-arm64
+            archive: tar.gz
+            exe: dotllm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+          cache-dependency-path: |
+            **/*.csproj
+            **/Directory.Packages.props
+
+      - name: Publish
+        shell: bash
+        run: |
+          dotnet publish src/DotLLM.Cli/DotLLM.Cli.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:EnableCompressionInSingleFile=true \
+            -p:DebugType=none \
+            -p:DebugSymbols=false \
+            -o publish/${{ matrix.rid }}
+
+      - name: Stage release payload
+        shell: bash
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          stage="stage/dotllm-${version}-${{ matrix.rid }}"
+          mkdir -p "$stage"
+          cp "publish/${{ matrix.rid }}/${{ matrix.exe }}" "$stage/"
+          if [ -d "publish/${{ matrix.rid }}/ptx" ]; then
+            cp -r "publish/${{ matrix.rid }}/ptx" "$stage/"
+          fi
+          cp README.md "$stage/"
+          cp LICENSE "$stage/"
+          ls -lh "$stage/"
+
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $version = "${{ needs.version.outputs.version }}"
+          $stage = "stage/dotllm-$version-${{ matrix.rid }}"
+          $out = "artifacts/dotllm-$version-${{ matrix.rid }}.zip"
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          Compress-Archive -Path "$stage/*" -DestinationPath $out -Force
+          Get-Item $out
+
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          stage="stage/dotllm-${version}-${{ matrix.rid }}"
+          out="artifacts/dotllm-${version}-${{ matrix.rid }}.tar.gz"
+          mkdir -p artifacts
+          tar -czf "$out" -C stage "dotllm-${version}-${{ matrix.rid }}"
+          ls -lh "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: single-file-${{ matrix.rid }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  publish-aot:
+    name: Publish AOT (${{ matrix.rid }}, experimental)
+    needs: version
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            archive: tar.gz
+            exe: dotllm
+          - os: windows-latest
+            rid: win-x64
+            archive: zip
+            exe: dotllm.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+          cache-dependency-path: |
+            **/*.csproj
+            **/Directory.Packages.props
+
+      - name: Install AOT dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Publish (AOT)
+        shell: bash
+        run: |
+          dotnet publish src/DotLLM.Cli/DotLLM.Cli.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            /p:PublishAot=true \
+            -o publish-aot/${{ matrix.rid }}
+
+      - name: Stage release payload
+        shell: bash
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          stage="stage/dotllm-${version}-aot-${{ matrix.rid }}"
+          mkdir -p "$stage"
+          cp "publish-aot/${{ matrix.rid }}/${{ matrix.exe }}" "$stage/"
+          if [ -d "publish-aot/${{ matrix.rid }}/ptx" ]; then
+            cp -r "publish-aot/${{ matrix.rid }}/ptx" "$stage/"
+          fi
+          cp README.md "$stage/"
+          cp LICENSE "$stage/"
+          ls -lh "$stage/"
+
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $version = "${{ needs.version.outputs.version }}"
+          $stage = "stage/dotllm-$version-aot-${{ matrix.rid }}"
+          $out = "artifacts/dotllm-$version-aot-${{ matrix.rid }}.zip"
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          Compress-Archive -Path "$stage/*" -DestinationPath $out -Force
+          Get-Item $out
+
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          stage="stage/dotllm-${version}-aot-${{ matrix.rid }}"
+          out="artifacts/dotllm-${version}-aot-${{ matrix.rid }}.tar.gz"
+          mkdir -p artifacts
+          tar -czf "$out" -C stage "dotllm-${version}-aot-${{ matrix.rid }}"
+          ls -lh "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aot-${{ matrix.rid }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  push-nuget:
+    name: Push to NuGet.org
+    needs: [version, pack-nuget, publish-single-file]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuget-packages
+          path: artifacts/nuget
+
+      - name: Push packages
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::warning::NUGET_API_KEY secret is not set — skipping NuGet.org push. Add the secret in repo Settings to enable publishing."
+            exit 0
+          fi
+          dotnet nuget push "artifacts/nuget/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
+
+  create-release:
+    name: Create GitHub Release
+    needs: [version, pack-nuget, publish-single-file, publish-aot]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+
+      - name: Flatten artifacts
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          find downloaded -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name '*.nupkg' -o -name '*.snupkg' \) -exec cp {} release-assets/ \;
+          ls -lh release-assets/
+
+      - name: Compose release notes preamble
+        shell: bash
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          cat > release-notes-preamble.md <<EOF
+          **dotLLM $version** — high-performance LLM inference engine for .NET.
+
+          - Website: https://dotllm.dev/
+          - Install as a global tool: \`dotnet tool install -g DotLLM.Cli --version $version\`
+          - Or add a library reference: \`dotnet add package DotLLM.Engine --version $version\`
+
+          Download the self-contained archive for your platform below, unpack it, and run \`dotllm run QuantFactory/SmolLM-135M-GGUF -p "Hello" -n 64\`. No .NET runtime required.
+
+          Experimental Native AOT builds (Linux / Windows) are also attached — smaller binaries and faster startup, but please report any crashes.
+
+          ---
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: dotLLM ${{ needs.version.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          body_path: release-notes-preamble.md
+          files: release-assets/*
+          fail_on_unmatched_files: true

@@ -5,6 +5,7 @@
 **dotLLM** is an open-source, high-performance LLM inference engine written natively in C#/.NET. It targets transformer-based models (Llama, Mistral, Phi, Qwen, DeepSeek) with CPU (SIMD-optimized) and CUDA GPU backends. Not a wrapper — a ground-up implementation.
 
 - **Repository**: https://github.com/kkokosa/dotLLM
+- **Website**: https://dotllm.dev/ (published from private repo `kkokosa/dotllm-page` — do not edit site content from this repo)
 - **License**: GPLv3
 - **Target framework**: .NET 10
 - **Languages**: C# + thin C/CUDA native library for GPU kernels

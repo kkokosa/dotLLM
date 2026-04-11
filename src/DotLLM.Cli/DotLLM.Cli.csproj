@@ -4,6 +4,8 @@
     <OutputType>Exe</OutputType>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>dotllm</ToolCommandName>
+    <Description>Command-line tool for dotLLM — run, chat, serve, and manage GGUF models. Install with: dotnet tool install -g DotLLM.Cli</Description>
+    <PackageTags>llm;inference;cli;dotnet-tool;llama;mistral;phi;qwen;gguf;cuda</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
@@ -22,9 +24,15 @@
     <PackageReference Include="Spectre.Console.Cli" />
   </ItemGroup>
 
-  <!-- Native AOT — opt-in via: dotnet publish -p:PublishAot=true -r <rid> -->
-  <PropertyGroup Condition="'$(PublishAot)' == 'true'">
+  <!-- Rename the exe to `dotllm` for both Native AOT and self-contained single-file publish.
+       Opt-in via `dotnet publish -p:PublishAot=true -r <rid>` or
+       `dotnet publish -p:PublishSingleFile=true -p:SelfContained=true -r <rid>`. -->
+  <PropertyGroup Condition="'$(PublishAot)' == 'true' or '$(PublishSingleFile)' == 'true'">
     <AssemblyName>dotllm</AssemblyName>
+  </PropertyGroup>
+
+  <!-- Native AOT-only settings -->
+  <PropertyGroup Condition="'$(PublishAot)' == 'true'">
     <StripSymbols>true</StripSymbols>
     <DebugType>none</DebugType>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
@@ -38,9 +46,10 @@
     <TrimmerRootDescriptor Include="TrimmerRoots.xml" />
   </ItemGroup>
 
-  <!-- AOT publish cleanup: remove dependency PDBs, XML docs, and IIS assets that aren't
-       needed in the single-file native binary output. Keeps only dotllm.exe + ptx/ -->
-  <Target Name="CleanAotPublishOutput" AfterTargets="Publish" Condition="'$(PublishAot)' == 'true'">
+  <!-- Publish cleanup: remove dependency PDBs, XML docs, and IIS assets that aren't needed
+       in the release binary output. Fires for both AOT and self-contained single-file publish.
+       Leaves only the single dotllm[.exe] + ptx/ -->
+  <Target Name="CleanPublishOutput" AfterTargets="Publish" Condition="'$(PublishAot)' == 'true' or '$(PublishSingleFile)' == 'true'">
     <ItemGroup>
       <_FilesToRemove Include="$(PublishDir)*.pdb" />
       <_FilesToRemove Include="$(PublishDir)*.xml" />

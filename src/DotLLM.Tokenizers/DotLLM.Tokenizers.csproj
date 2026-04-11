@@ -1,5 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup>
+    <Description>Tokenizers and chat templates for dotLLM — BPE, SentencePiece, HuggingFace tokenizer.json, and a Jinja2-subset chat template interpreter.</Description>
+  </PropertyGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
   </ItemGroup>
