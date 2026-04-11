@@ -196,9 +196,14 @@ dotllm run QuantFactory/SmolLM-135M-GGUF -p "..." --cache-type-k q8_0 --cache-ty
 # Constrained JSON output
 dotllm run QuantFactory/SmolLM-135M-GGUF -p "List 3 colors as JSON." --response-format json_object
 
-# Speculative decoding with a smaller draft model (must share vocabulary)
-dotllm run bartowski/Llama-3.2-3B-Instruct-GGUF -p "Explain ..." \
-    --speculative-model QuantFactory/SmolLM-135M-GGUF --speculative-k 5
+# Speculative decoding — target + draft must share the same vocabulary.
+# Example pair (validated by scripts/test_models_speculative.py):
+#   target: Llama-3.2-3B-Instruct Q8_0     draft: Llama-3.2-1B-Instruct Q4_K_M
+dotllm model pull bartowski/Llama-3.2-3B-Instruct-GGUF
+dotllm model pull bartowski/Llama-3.2-1B-Instruct-GGUF
+dotllm run bartowski/Llama-3.2-3B-Instruct-GGUF -q Q8_0 \
+    -p "Explain what a CPU cache is in one sentence." -n 48 \
+    --speculative-model bartowski/Llama-3.2-1B-Instruct-GGUF --speculative-k 5
 ```
 
 Sample output:
@@ -283,9 +288,9 @@ dotllm serve
 # GPU with partial hybrid offload and more warm-up iterations
 dotllm serve bartowski/Llama-3.2-3B-Instruct-GGUF --device gpu --gpu-layers 24 --warmup-iterations 5
 
-# Speculative decoding
-dotllm serve bartowski/Llama-3.2-3B-Instruct-GGUF \
-    --speculative-model QuantFactory/SmolLM-135M-GGUF --speculative-k 5
+# Speculative decoding — draft must share the target's vocabulary
+dotllm serve bartowski/Llama-3.2-3B-Instruct-GGUF -q Q8_0 \
+    --speculative-model bartowski/Llama-3.2-1B-Instruct-GGUF --speculative-k 5
 ```
 
 Any OpenAI-compatible client works against the running server:
