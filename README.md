@@ -517,16 +517,8 @@ using DotLLM.Server;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Your own services...
-builder.Services.AddAuthentication();
-
-var app = builder.Build();
-
-// Your own middleware and routes...
-app.UseAuthentication();
-app.MapGet("/hello", () => "hi");
-
-// Load a model and mount dotLLM's OpenAI-compatible endpoints:
+// Load the model up front so the state can be registered in DI
+// before builder.Build() — dotLLM endpoints resolve ServerState from DI.
 var modelPath = "llama-3.2-3b.Q4_K_M.gguf";
 var state = ServerStartup.LoadModel(modelPath, new ServerOptions
 {
@@ -535,6 +527,20 @@ var state = ServerStartup.LoadModel(modelPath, new ServerOptions
     PromptCacheEnabled = true,
     ModelId = "llama-3.2-3b",
 });
+
+// Your own services...
+builder.Services.AddAuthentication();
+
+// Register dotLLM's state + JSON context in the same IServiceCollection:
+builder.Services.AddDotLLM(state);
+
+var app = builder.Build();
+
+// Your own middleware and routes...
+app.UseAuthentication();
+app.MapGet("/hello", () => "hi");
+
+// Mount dotLLM's OpenAI-compatible endpoints:
 app.MapDotLLMEndpoints(serveUi: false);
 
 app.Run();
