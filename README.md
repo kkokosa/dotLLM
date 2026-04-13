@@ -37,16 +37,16 @@ dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around lla
 
 ### Serving
 - **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, tool calling, streaming via ASP.NET
-- **Continuous batching** — iteration-level scheduling with preemption and priority queuing
 - **Paged KV-cache** — PagedAttention with block-level allocation, prefix caching, and copy-on-write
-- **Speculative decoding** — draft-verify-accept with KV-cache rollback for higher throughput
+- **Speculative decoding** — draft-verify-accept with KV-cache rollback (greedy mode today; non-greedy planned — see issue #121)
 - **Structured output** — FSM/PDA-based constrained decoding guaranteeing valid JSON, JSON Schema, regex, and grammar
+- **(Planned) Continuous batching** — iteration-level scheduling with preemption and priority queuing — Phase 9, see [Roadmap](#roadmap)
 
 ### Extensibility
 - **Pluggable backends** — `IBackend` interface with separate packages per backend (CPU, CUDA, ROCm)
-- **LoRA adapters** — runtime loading, no weight merging, concurrent multi-adapter serving
 - **Diagnostic hooks** — zero-cost `IInferenceHook` points for activation capture, logit lens, SAE integration
-- **OpenTelemetry observability** — `System.Diagnostics.Metrics` + `Activity` for throughput, latency, and per-request tracing
+- **(Planned) LoRA adapters** — runtime loading, no weight merging, concurrent multi-adapter serving — Phase 7, see [Roadmap](#roadmap)
+- **(Planned) OpenTelemetry observability** — `System.Diagnostics.Metrics` + `Activity` for throughput, latency, and per-request tracing — Phase 7 / Phase 9, see [Roadmap](#roadmap)
 
 ## Architecture Overview
 
@@ -584,10 +584,10 @@ dotLLM ships as a set of NuGet packages so you can reference only what you need 
 | [`DotLLM.Models`](https://www.nuget.org/packages/DotLLM.Models) | Memory-mapped GGUF/SafeTensors loaders, parameterized `TransformerBlock` (Llama/Mistral/Phi/Qwen/DeepSeek) |
 | [`DotLLM.Tokenizers`](https://www.nuget.org/packages/DotLLM.Tokenizers) | BPE, SentencePiece, HuggingFace tokenizer.json, Jinja2-subset chat templates |
 | [`DotLLM.Engine`](https://www.nuget.org/packages/DotLLM.Engine) | Inference engine — KV-cache, scheduler, samplers, constrained decoding, speculative decoding |
-| [`DotLLM.Server`](https://www.nuget.org/packages/DotLLM.Server) | OpenAI-compatible HTTP server, tool calling, rate limiting, built-in chat UI |
+| [`DotLLM.Server`](https://www.nuget.org/packages/DotLLM.Server) | OpenAI-compatible HTTP server, tool calling, built-in chat UI |
 | [`DotLLM.HuggingFace`](https://www.nuget.org/packages/DotLLM.HuggingFace) | HuggingFace Hub search and GGUF download/caching |
 | [`DotLLM.Diagnostics`](https://www.nuget.org/packages/DotLLM.Diagnostics) | Interpretability hooks — activation capture, logit lens, logprobs |
-| [`DotLLM.Telemetry`](https://www.nuget.org/packages/DotLLM.Telemetry) | `System.Diagnostics.Metrics` counters and `Activity`-based tracing |
+| [`DotLLM.Telemetry`](https://www.nuget.org/packages/DotLLM.Telemetry) | Placeholder package; `System.Diagnostics.Metrics` counters and `Activity`-based tracing are planned (Phase 7 / Phase 9) |
 | [`DotLLM.Cli`](https://www.nuget.org/packages/DotLLM.Cli) | `dotnet tool` — the `dotllm` command (run / chat / serve / model management) |
 
 Install the engine plus CPU backend for a minimal setup:

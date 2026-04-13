@@ -12,16 +12,31 @@ using DotLLM.Engine.Samplers;
 namespace DotLLM.Engine;
 
 /// <summary>
-/// Implements speculative decoding with modified rejection sampling.
+/// Implements speculative decoding with draft-verify-accept.
 /// Draft model proposes K tokens autoregressively; target model verifies all K tokens
-/// in a single batched forward pass. Output distribution is provably identical to
-/// the target model's distribution.
+/// in a single batched forward pass.
 /// </summary>
 /// <remarks>
+/// <para>
+/// Currently supports <b>greedy</b> acceptance only (<c>greedy: true</c>). In greedy mode the
+/// accepted sequence is identical to what argmax-decoding the target model would produce,
+/// provided the downstream sampler is also effectively greedy (temperature 0 and no
+/// repetition penalty — see the gate in <c>TextGenerator</c>).
+/// </para>
+/// <para>
+/// Probabilistic (modified rejection sampling) acceptance is <b>not yet distributionally
+/// correct</b> under the full <see cref="SamplerPipeline"/>: the probabilities <c>q</c> and
+/// <c>p</c> used in acceptance must be drawn from the same post-transform distribution the
+/// pipeline actually samples from (temperature / top-k / top-p / min-p / repetition penalty),
+/// not raw softmax over constraint-masked logits. Tracked in Wave 8 (issue #121). The
+/// constructor rejects <c>greedy: false</c> until that work lands.
+/// </para>
+/// <para>
 /// Supports draft models with slightly different vocab sizes (up to 128 token difference,
 /// matching llama.cpp's tolerance). Probability comparison uses the shared vocab range;
 /// tokens beyond the draft's vocab can only be produced by the target (as corrected/bonus tokens).
 /// Zero-allocation on the hot path: all buffers are caller-owned or pool-rented, no per-call arrays.
+/// </para>
 /// </remarks>
 public sealed class SpeculativeDecoder : ISpeculativeDecoder
 {
@@ -31,10 +46,19 @@ public sealed class SpeculativeDecoder : ISpeculativeDecoder
     /// <summary>
     /// Creates a new speculative decoder.
     /// </summary>
-    /// <param name="greedy">When true, uses argmax matching instead of probabilistic acceptance.</param>
+    /// <param name="greedy">Must be <c>true</c>. Probabilistic acceptance is not yet
+    /// distributionally correct under the sampler pipeline; see Wave 8 (issue #121).</param>
     /// <param name="seed">Random seed for rejection sampling. Null = non-deterministic.</param>
+    /// <exception cref="NotSupportedException">Thrown when <paramref name="greedy"/> is <c>false</c>.</exception>
     public SpeculativeDecoder(bool greedy, int? seed = null)
     {
+        if (!greedy)
+        {
+            throw new NotSupportedException(
+                "Probabilistic speculative decoding is not yet distributionally correct " +
+                "under the sampler pipeline (temperature / top-k / top-p / min-p / repetition penalty). " +
+                "Use greedy mode. See Wave 8 (issue #121) for the planned fix.");
+        }
         _greedy = greedy;
         _rng = seed.HasValue ? new Random(seed.Value) : new Random();
     }

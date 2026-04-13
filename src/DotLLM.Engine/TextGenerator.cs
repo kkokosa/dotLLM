@@ -255,12 +255,14 @@ public sealed class TextGenerator
 
             int specDrafted = 0, specAccepted = 0;
 
-            // Decode loop (speculative decode disabled when logprobs requested — no per-position logit access)
-            if (_draftModel != null && !captureLogprobs)
+            // Decode loop (speculative decode disabled when logprobs requested — no per-position logit access;
+            // also disabled when sampling isn't effectively greedy, since non-greedy acceptance is not yet
+            // distributionally correct under the sampler pipeline — see Wave 8 / issue #121).
+            if (_draftModel != null && !captureLogprobs && IsEffectivelyGreedy(options))
             {
                 // ── Speculative decode loop ──
                 var specDecoder = new SpeculativeDecoder(
-                    greedy: options.Temperature <= 0f, seed: options.Seed);
+                    greedy: true, seed: options.Seed);
                 Core.Attention.IKvCache draftKvCache = AllocateDraftKvCache(cacheSize);
                 int[] specBuffer = ArrayPool<int>.Shared.Rent(_speculativeCandidates + 1);
                 try
@@ -598,12 +600,13 @@ public sealed class TextGenerator
 
             int specDrafted = 0, specAccepted = 0;
 
-            // Speculative decode disabled when logprobs requested — no per-position logit access
-            if (_draftModel != null && !captureLogprobs)
+            // Speculative decode disabled when logprobs requested — no per-position logit access.
+            // Also disabled when sampling isn't effectively greedy (see Wave 8 / issue #121).
+            if (_draftModel != null && !captureLogprobs && IsEffectivelyGreedy(options))
             {
                 // ── Speculative decode loop ──
                 var specDecoder = new SpeculativeDecoder(
-                    greedy: options.Temperature <= 0f, seed: options.Seed);
+                    greedy: true, seed: options.Seed);
                 Core.Attention.IKvCache draftKvCache = AllocateDraftKvCache(cacheSize);
                 int[] specBuffer = ArrayPool<int>.Shared.Rent(_speculativeCandidates + 1);
                 try
@@ -887,6 +890,14 @@ public sealed class TextGenerator
         }
         return StopResult.Continue;
     }
+
+    // Speculative decoding's greedy acceptance path matches the target pipeline only when the pipeline
+    // itself is effectively argmax. Temperature <= 0 forces argmax selection; repetition penalty can
+    // shift which token is argmax, so it must also be neutral. Top-k/p/min-p prune low-probability
+    // tokens and never mask the argmax, so they don't need to be checked. Wave 8 / issue #121 lifts
+    // this restriction by making q/p pipeline-aware.
+    private static bool IsEffectivelyGreedy(DotLLM.Core.Configuration.InferenceOptions options)
+        => options.Temperature <= 0f && options.RepetitionPenalty == 1.0f;
 
     /// <summary>
     /// Prefills the draft model with the full prompt.

@@ -2,7 +2,13 @@
 
 ## Overview
 
-A small **draft model** proposes K candidate tokens; the larger **target model** verifies them in a single forward pass. Achieves 2-3× speedup while producing output **exactly equal** to the target model's distribution.
+A small **draft model** proposes K candidate tokens; the larger **target model** verifies them in a single forward pass. Achieves 2-3× speedup while (with pipeline-aware acceptance) producing output drawn from the target model's distribution.
+
+## Current Status
+
+Speculative decoding is **greedy-only** in the current implementation. `SpeculativeDecoder`'s constructor rejects `greedy: false` and `TextGenerator` only engages speculative decoding when the sampler is effectively argmax — `Temperature <= 0` and `RepetitionPenalty == 1.0`. Requests that don't meet both fall through to the regular (non-speculative) decode path; they are never sampled from an incorrect distribution.
+
+The probabilistic (modified rejection sampling) path described below requires `q` and `p` to be drawn from the same post-transform distribution the [sampler pipeline](SAMPLING.md) actually samples from (temperature / top-k / top-p / min-p / repetition penalty). The current code computes them from raw softmax over constraint-masked logits, which only coincides with the pipeline for argmax. Tracked in Wave 8 ([issue #121](https://github.com/kkokosa/dotLLM/issues/121)).
 
 ## Algorithm
 
@@ -41,7 +47,7 @@ if all K accepted:
   output bonus
 ```
 
-**Key property**: This scheme guarantees the output distribution is **exactly** the target model's distribution, not an approximation.
+**Key property**: When `q` and `p` are computed from the same post-transform distribution the sampler pipeline actually draws from, this scheme produces samples from the target model's distribution exactly — not an approximation. See [Current Status](#current-status) for the current limitation: the probabilistic path is not yet pipeline-aware, so the implementation accepts only greedy (argmax) mode today.
 
 ## ISpeculativeDecoder Interface
 

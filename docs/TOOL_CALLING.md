@@ -450,3 +450,10 @@ The weather in Paris is 22°C and sunny.
 - **vLLM** — `ToolCallParser` with model-specific handlers, guided decoding for tool args
 - **Ollama** — Tool support via chat template integration, JSON extraction
 - **OpenAI API** — `tool_choice`, `tools`, `finish_reason: "tool_calls"` conventions
+
+## Known Limitations
+
+Tracked under Wave 8 ([issue #121](https://github.com/kkokosa/dotLLM/issues/121)).
+
+- **Streaming chat emits raw tool-call text as `delta.content`.** `/v1/chat/completions` with `stream: true` passes every generated token through as `delta.content`; tool-call parsing runs only after the stream completes, at which point the finish reason is switched to `tool_calls`. Clients therefore see raw tool-call markup (e.g., `<tool_call>{...}</tool_call>` or `<|python_tag|>...`) before the final chunk. The **non-streaming** path is correct: `ToolCallDetector` runs before the response is serialized, tool text is replaced with structured `tool_calls`. Planned fix: incremental parser that buffers a rolling window, suppresses `delta.content` inside detected tool-call regions, and emits `delta.tool_calls` fragments per the OpenAI SSE contract.
+- **`tool_choice` other than `auto` is not enforced.** The server parses `tool_choice` from the request but does not currently constrain decoding for `"required"` or specific-function values. The short-term plan is to reject unsupported `tool_choice` values with HTTP 400; long-term is constraint-driven enforcement via `ToolCallSchemaBuilder` + `JsonSchemaConstraint`.

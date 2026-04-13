@@ -9,7 +9,7 @@
     <!-- Microsoft.NET.Sdk.Web defaults IsPackable=false regardless of OutputType.
          Force it on so consumers can reference this library from their own ASP.NET hosts. -->
     <IsPackable>true</IsPackable>
-    <Description>OpenAI-compatible HTTP API server for dotLLM — /v1/chat/completions, /v1/completions, streaming, tool calling, rate limiting, and a built-in chat UI. Reference this package to host the API inside your own ASP.NET Core app.</Description>
+    <Description>OpenAI-compatible HTTP API server for dotLLM — /v1/chat/completions, /v1/completions, streaming, tool calling, and a built-in chat UI. Reference this package to host the API inside your own ASP.NET Core app.</Description>
     <!-- DTOs are self-documenting via [JsonPropertyName] attributes -->
     <!-- IL2026: MapGet/MapPost use reflection at build time but Request Delegate Generator
          handles them at publish time when PublishAot=true -->

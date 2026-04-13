@@ -84,6 +84,7 @@ StopResult: Continue | Stop | StopInclude
 - **EOS token** — Always active. Model's end-of-sequence token.
 - **Max tokens** — Hard limit on generated tokens.
 - **Stop strings** — Text patterns that terminate generation (e.g., `"\n\nHuman:"`, `"END"`). Rolling buffer of decoded text, check suffix matches. Stop string excluded from output.
+  - **Known limitation (Wave 8 / [issue #121](https://github.com/kkokosa/dotLLM/issues/121))**: the detector fires at token boundaries and the entire last token is removed from the output, not just the matched suffix. For BPE tokenizers that merge preceding text into the same token as the stop sequence, valid content may be lost. Use **stop token sequences** (below) when exact boundary control matters.
 - **Stop token sequences** — Token ID sequences (avoids tokenization ambiguity).
 - **Custom predicate** — Arbitrary `IStopCondition` implementation.
 

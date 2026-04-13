@@ -23,6 +23,19 @@ public sealed class SpeculativeDecoderTests
     private const int HeadDim = 4;
 
     /// <summary>
+    /// Probabilistic speculative decoding is not yet distributionally correct under the
+    /// sampler pipeline (see Wave 8 / issue #121). The constructor must reject
+    /// <c>greedy: false</c> so callers cannot silently produce non-target-distribution samples.
+    /// </summary>
+    [Fact]
+    public void Constructor_Throws_WhenNonGreedy()
+    {
+        var ex = Assert.Throws<NotSupportedException>(
+            () => new SpeculativeDecoder(greedy: false, seed: 42));
+        Assert.Contains("greedy", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// When draft and target models agree on argmax at temperature=0 (greedy),
     /// all K tokens should be accepted + 1 bonus = K+1 tokens.
     /// </summary>
