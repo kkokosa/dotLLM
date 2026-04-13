@@ -19,9 +19,17 @@ public sealed class StopStringCondition : IStopCondition
         _stopString = stopString;
     }
 
+    /// <summary>The stop string this condition matches against. Caller ensures the decoded tail
+    /// view it passes is at least this long.</summary>
+    public string StopString => _stopString;
+
     /// <inheritdoc/>
     public StopResult ShouldStop(int tokenId, IReadOnlyList<int> generatedTokens, string decodedText)
-        => decodedText.EndsWith(_stopString, StringComparison.Ordinal)
+        => ShouldStop(tokenId, generatedTokens, decodedText.AsSpan());
+
+    /// <inheritdoc/>
+    public StopResult ShouldStop(int tokenId, IReadOnlyList<int> generatedTokens, ReadOnlySpan<char> decodedTail)
+        => decodedTail.EndsWith(_stopString.AsSpan(), StringComparison.Ordinal)
             ? StopResult.Stop
             : StopResult.Continue;
 }
