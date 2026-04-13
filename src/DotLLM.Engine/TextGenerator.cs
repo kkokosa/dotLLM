@@ -134,6 +134,11 @@ public sealed class TextGenerator
         // Resolve KV-cache: reuse from prefix cache or allocate fresh
         var (kvCache, cachedTokenCount, ownsKvCache) = ResolveKvCache(promptIds, promptLen, maxTokens);
 
+        // Stop-check scratch buffer: rented up-front and returned in the outer finally to preserve
+        // the zero-GC-pressure guarantee on the inference hot path.
+        int stopTailSize = ComputeStopTailSize(stopConditions);
+        char[] stopScratch = ArrayPool<char>.Shared.Rent(stopTailSize);
+
         try
         {
             var generatedIds = new List<int>(maxTokens);
@@ -146,8 +151,6 @@ public sealed class TextGenerator
             // Incremental detokenizer keeps stop-check cost O(1) amortized per token
             // instead of decoding the entire generated sequence each step (O(n²)).
             var detok = new IncrementalDetokenizer(_tokenizer, initialCapacity: Math.Max(64, maxTokens * 4));
-            int stopTailSize = ComputeStopTailSize(stopConditions);
-            char[] stopScratch = new char[stopTailSize];
 
             // Local helper: snapshot log-softmax before sampling (which modifies logits in-place),
             // sample a token, then build logprob info.
@@ -395,6 +398,7 @@ public sealed class TextGenerator
         }
         finally
         {
+            ArrayPool<char>.Shared.Return(stopScratch);
             if (ownsKvCache)
                 kvCache.Dispose();
         }
@@ -471,6 +475,12 @@ public sealed class TextGenerator
         var (kvCache, cachedTokenCount, ownsKvCache) = ResolveKvCache(promptIds, promptLen, maxTokens);
         long kvBytes = GetKvCacheBytes(kvCache);
 
+        // Stop-check scratch buffer: rented up-front and returned in the outer finally. try/finally
+        // is preserved across yield points by the async-iterator state machine, so Return runs on
+        // normal completion, exception, or consumer-side cancellation (Dispose of the enumerator).
+        int stopTailSize = ComputeStopTailSize(stopConditions);
+        char[] stopScratch = ArrayPool<char>.Shared.Rent(stopTailSize);
+
         try
         {
             var generatedIds = new List<int>(maxTokens);
@@ -482,8 +492,6 @@ public sealed class TextGenerator
             // Incremental detokenizer: O(1) amortized per token for stop-check + streaming delta,
             // instead of decoding the full generated sequence at every step.
             var detok = new IncrementalDetokenizer(_tokenizer, initialCapacity: Math.Max(64, maxTokens * 4));
-            int stopTailSize = ComputeStopTailSize(stopConditions);
-            char[] stopScratch = new char[stopTailSize];
 
             // Local helper: snapshot log-softmax before sampling (which modifies logits in-place),
             // sample a token, then build logprob info.
@@ -787,6 +795,7 @@ public sealed class TextGenerator
         }
         finally
         {
+            ArrayPool<char>.Shared.Return(stopScratch);
             if (ownsKvCache)
                 kvCache.Dispose();
         }
