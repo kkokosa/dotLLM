@@ -62,6 +62,141 @@ extern "C" __global__ void __launch_bounds__(256) quantized_gemv_q8_0(
         y[row] = __float2half(acc);
 }
 
+// ── Q8_0 fused 2-output / 3-output GEMV ─────────────────────────────
+// Single kernel launch performs 2 or 3 GEMVs that share the input vector x.
+// Saves cuLaunchKernel overhead (~3 µs/launch) for the Q/K/V and Gate/Up
+// projections in transformer decode, where 3 (resp. 2) sequential launches
+// are issued for each layer. Block dispatch by blockIdx.x across the
+// concatenated row range — body is identical to quantized_gemv_q8_0.
+//
+// Caller computes total grid as n0+n1[+n2]. Outputs and weights are picked
+// up by row range. A small CSE'd preamble selects which (weight, output,
+// local_row) triple this block belongs to.
+
+__device__ __forceinline__ void q8_0_gemv_one_row(
+    const uint8_t* __restrict__ w_row,
+    const half* __restrict__ x,
+    half* __restrict__ y_out,
+    int blocks_per_row)
+{
+    float acc = 0.0f;
+
+    for (int b = threadIdx.x; b < blocks_per_row; b += blockDim.x)
+    {
+        const uint8_t* block = w_row + b * 34;
+        float d = __half2float(*reinterpret_cast<const half*>(block));
+        const int8_t* qs = reinterpret_cast<const int8_t*>(block + 2);
+
+        float block_sum = 0.0f;
+        #pragma unroll 8
+        for (int j = 0; j < 32; j++)
+            block_sum += (float)qs[j] * __half2float(x[b * 32 + j]);
+
+        acc += d * block_sum;
+    }
+
+    // Warp reduction
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+
+    __shared__ float warp_sums[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+
+    if (lane == 0) warp_sums[warp_id] = acc;
+    __syncthreads();
+
+    if (warp_id == 0)
+    {
+        int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+        acc = (lane < num_warps) ? warp_sums[lane] : 0.0f;
+        for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+            acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    }
+
+    if (threadIdx.x == 0)
+        *y_out = __float2half(acc);
+}
+
+extern "C" __global__ void __launch_bounds__(256) quantized_gemv_q8_0_fused3(
+    const uint8_t* __restrict__ w0,
+    const uint8_t* __restrict__ w1,
+    const uint8_t* __restrict__ w2,
+    half* __restrict__ y0,
+    half* __restrict__ y1,
+    half* __restrict__ y2,
+    const half* __restrict__ x,
+    const int n0,
+    const int n1,
+    const int n2,
+    const int k)
+{
+    int row = blockIdx.x;
+
+    const uint8_t* weight;
+    half* y;
+    int local_row;
+
+    if (row < n0)
+    {
+        weight = w0;
+        y = y0;
+        local_row = row;
+    }
+    else if (row < n0 + n1)
+    {
+        weight = w1;
+        y = y1;
+        local_row = row - n0;
+    }
+    else
+    {
+        local_row = row - n0 - n1;
+        if (local_row >= n2) return;
+        weight = w2;
+        y = y2;
+    }
+
+    const int blocks_per_row = k / 32;
+    const uint8_t* w_row = weight + (size_t)local_row * blocks_per_row * 34;
+    q8_0_gemv_one_row(w_row, x, y + local_row, blocks_per_row);
+}
+
+extern "C" __global__ void __launch_bounds__(256) quantized_gemv_q8_0_fused2(
+    const uint8_t* __restrict__ w0,
+    const uint8_t* __restrict__ w1,
+    half* __restrict__ y0,
+    half* __restrict__ y1,
+    const half* __restrict__ x,
+    const int n0,
+    const int n1,
+    const int k)
+{
+    int row = blockIdx.x;
+
+    const uint8_t* weight;
+    half* y;
+    int local_row;
+
+    if (row < n0)
+    {
+        weight = w0;
+        y = y0;
+        local_row = row;
+    }
+    else
+    {
+        local_row = row - n0;
+        if (local_row >= n1) return;
+        weight = w1;
+        y = y1;
+    }
+
+    const int blocks_per_row = k / 32;
+    const uint8_t* w_row = weight + (size_t)local_row * blocks_per_row * 34;
+    q8_0_gemv_one_row(w_row, x, y + local_row, blocks_per_row);
+}
+
 // ── Q4_K: 144 bytes per 256 values ──────────────────────────────────
 
 extern "C" __global__ void __launch_bounds__(256, 2) quantized_gemv_q4_k(
