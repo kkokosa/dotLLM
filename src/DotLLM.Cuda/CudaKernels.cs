@@ -71,6 +71,8 @@ public sealed unsafe class CudaKernels : IDisposable
     private readonly nint _convertF16ToF32Func;
     private readonly nint _convertF32ToF16Func;
     private readonly nint _quantizedGemvQ8_0Func;
+    private readonly nint _quantizedGemvQ8_0Fused3Func;
+    private readonly nint _quantizedGemvQ8_0Fused2Func;
     private readonly nint _quantizedGemvQ4_KFunc;
     private readonly nint _quantizedGemvQ5_0Func;
     private readonly nint _quantizedGemvQ5_KFunc;
@@ -144,6 +146,8 @@ public sealed unsafe class CudaKernels : IDisposable
         _convertF16ToF32Func = _convertModule.GetFunction("convert_f16_to_f32");
         _convertF32ToF16Func = _convertModule.GetFunction("convert_f32_to_f16");
         _quantizedGemvQ8_0Func = _quantizedGemvModule.GetFunction("quantized_gemv_q8_0");
+        _quantizedGemvQ8_0Fused3Func = _quantizedGemvModule.GetFunction("quantized_gemv_q8_0_fused3");
+        _quantizedGemvQ8_0Fused2Func = _quantizedGemvModule.GetFunction("quantized_gemv_q8_0_fused2");
         _quantizedGemvQ4_KFunc = _quantizedGemvModule.GetFunction("quantized_gemv_q4_k");
         _quantizedGemvQ5_0Func = _quantizedGemvModule.GetFunction("quantized_gemv_q5_0");
         _quantizedGemvQ5_KFunc = _quantizedGemvModule.GetFunction("quantized_gemv_q5_k");
@@ -588,6 +592,87 @@ public sealed unsafe class CudaKernels : IDisposable
     public static bool HasQuantizedGemv(QuantizationType qt) =>
         qt is QuantizationType.Q8_0 or QuantizationType.Q4_K or QuantizationType.Q5_0
             or QuantizationType.Q5_K or QuantizationType.Q6_K;
+
+    /// <summary>Whether a quantization type has a fused 2-/3-output GEMV kernel.</summary>
+    /// <remarks>
+    /// Fused decode kernels collapse the per-layer Q/K/V (3-way) and Gate/Up (2-way)
+    /// projection launches into a single kernel call. Currently implemented for Q8_0;
+    /// other quantization families fall back to the sequential
+    /// <see cref="LaunchQuantizedGemv"/> path.
+    /// </remarks>
+    public static bool HasFusedQuantizedGemv(QuantizationType qt) =>
+        qt is QuantizationType.Q8_0;
+
+    /// <summary>
+    /// Fused 3-output quantized GEMV: launches one kernel that computes y0[n0], y1[n1],
+    /// y2[n2] all from the shared input x[k] using weights w0/w1/w2. Used to fuse the
+    /// transformer Q/K/V projections in the decode path, eliminating two
+    /// <c>cuLaunchKernel</c> calls per layer (~2.86 µs each, 30 layers × 32 tokens =
+    /// ~5.5 ms saved per session at typical decode lengths).
+    /// </summary>
+    /// <remarks>
+    /// All three weights must share the same quantization type (currently Q8_0 only —
+    /// see <see cref="HasFusedQuantizedGemv(QuantizationType)"/>). Numerically identical
+    /// to three back-to-back <see cref="LaunchQuantizedGemv"/> calls; the kernel reuses
+    /// <c>q8_0_gemv_one_row</c> via a thin block-index dispatch prelude.
+    /// </remarks>
+    public void LaunchFusedQuantizedGemv3(
+        nint w0, nint w1, nint w2,
+        nint y0, nint y1, nint y2,
+        nint x, QuantizationType qt,
+        int n0, int n1, int n2, int k, nint stream)
+    {
+        if (qt != QuantizationType.Q8_0)
+            throw new NotSupportedException($"Fused 3-output GEMV not supported for {qt}.");
+
+        nint w0Arg = w0, w1Arg = w1, w2Arg = w2;
+        nint y0Arg = y0, y1Arg = y1, y2Arg = y2;
+        nint xArg = x;
+        int n0Arg = n0, n1Arg = n1, n2Arg = n2, kArg = k;
+
+        void** args = stackalloc void*[]
+        {
+            &w0Arg, &w1Arg, &w2Arg,
+            &y0Arg, &y1Arg, &y2Arg,
+            &xArg,
+            &n0Arg, &n1Arg, &n2Arg, &kArg,
+        };
+
+        CudaDriverApi.cuLaunchKernel(_quantizedGemvQ8_0Fused3Func,
+                (uint)(n0 + n1 + n2), 1, 1, BlockSize, 1, 1,
+                0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>
+    /// Fused 2-output quantized GEMV: companion to <see cref="LaunchFusedQuantizedGemv3"/>
+    /// for the Gate/Up FFN projections.
+    /// </summary>
+    public void LaunchFusedQuantizedGemv2(
+        nint w0, nint w1,
+        nint y0, nint y1,
+        nint x, QuantizationType qt,
+        int n0, int n1, int k, nint stream)
+    {
+        if (qt != QuantizationType.Q8_0)
+            throw new NotSupportedException($"Fused 2-output GEMV not supported for {qt}.");
+
+        nint w0Arg = w0, w1Arg = w1;
+        nint y0Arg = y0, y1Arg = y1;
+        nint xArg = x;
+        int n0Arg = n0, n1Arg = n1, kArg = k;
+
+        void** args = stackalloc void*[]
+        {
+            &w0Arg, &w1Arg,
+            &y0Arg, &y1Arg,
+            &xArg,
+            &n0Arg, &n1Arg, &kArg,
+        };
+
+        CudaDriverApi.cuLaunchKernel(_quantizedGemvQ8_0Fused2Func,
+                (uint)(n0 + n1), 1, 1, BlockSize, 1, 1,
+                0, stream, (nint)args, 0).ThrowOnError();
+    }
 
     /// <summary>Dequantize a weight matrix to FP16 on the GPU.</summary>
     /// <param name="src">Device pointer to quantized weight data.</param>

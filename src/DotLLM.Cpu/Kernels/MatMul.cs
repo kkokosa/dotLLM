@@ -227,66 +227,68 @@ public static unsafe partial class MatMul
         for (int block = 0; block < blockCount; block++)
         {
             byte* xBlock = x + block * Q8_0BlockBytes;
+            byte* blockBase = groupBase + block * wStride;
+
+            // Batched F16C scale conversion: 4 row scales sit at blockBase, +34, +68, +102
+            // (R4 layout = 4 rows of 34-byte Q8_0 blocks interleaved). One vcvtph2ps replaces
+            // 4 scalar Half→float conversions (~80 instructions on RyuJIT).
+            Vector128<float> dws = Load4HalfScalesStrided(blockBase, Q8_0BlockBytes);
             float dx = (float)Unsafe.ReadUnaligned<Half>(xBlock);
+            Vector128<float> dxdws = dws * Vector128.Create(dx);
+
             Vector256<sbyte> vx = Unsafe.ReadUnaligned<Vector256<sbyte>>(xBlock + 2);
             Vector256<sbyte> absX = Avx2.Sign(vx, vx);
 
-            byte* blockBase = groupBase + block * wStride;
-
             // Row 0
             {
-                byte* wBlock = blockBase;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
-                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(blockBase + 2);
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
+                Vector256<float> scale = Vector256.Create(dxdws.GetElement(0));
                 if (Fma.IsSupported)
-                    acc0 = Fma.MultiplyAdd(Vector256.Create(dx * dw), Avx.ConvertToVector256Single(isum), acc0);
+                    acc0 = Fma.MultiplyAdd(scale, Avx.ConvertToVector256Single(isum), acc0);
                 else
-                    acc0 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+                    acc0 += Avx.ConvertToVector256Single(isum) * scale;
             }
 
             // Row 1
             {
-                byte* wBlock = blockBase + Q8_0BlockBytes;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
-                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(blockBase + Q8_0BlockBytes + 2);
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
+                Vector256<float> scale = Vector256.Create(dxdws.GetElement(1));
                 if (Fma.IsSupported)
-                    acc1 = Fma.MultiplyAdd(Vector256.Create(dx * dw), Avx.ConvertToVector256Single(isum), acc1);
+                    acc1 = Fma.MultiplyAdd(scale, Avx.ConvertToVector256Single(isum), acc1);
                 else
-                    acc1 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+                    acc1 += Avx.ConvertToVector256Single(isum) * scale;
             }
 
             // Row 2
             {
-                byte* wBlock = blockBase + 2 * Q8_0BlockBytes;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
-                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(blockBase + 2 * Q8_0BlockBytes + 2);
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
+                Vector256<float> scale = Vector256.Create(dxdws.GetElement(2));
                 if (Fma.IsSupported)
-                    acc2 = Fma.MultiplyAdd(Vector256.Create(dx * dw), Avx.ConvertToVector256Single(isum), acc2);
+                    acc2 = Fma.MultiplyAdd(scale, Avx.ConvertToVector256Single(isum), acc2);
                 else
-                    acc2 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+                    acc2 += Avx.ConvertToVector256Single(isum) * scale;
             }
 
             // Row 3
             {
-                byte* wBlock = blockBase + 3 * Q8_0BlockBytes;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
-                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(blockBase + 3 * Q8_0BlockBytes + 2);
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
+                Vector256<float> scale = Vector256.Create(dxdws.GetElement(3));
                 if (Fma.IsSupported)
-                    acc3 = Fma.MultiplyAdd(Vector256.Create(dx * dw), Avx.ConvertToVector256Single(isum), acc3);
+                    acc3 = Fma.MultiplyAdd(scale, Avx.ConvertToVector256Single(isum), acc3);
                 else
-                    acc3 += Avx.ConvertToVector256Single(isum) * Vector256.Create(dx * dw);
+                    acc3 += Avx.ConvertToVector256Single(isum) * scale;
             }
         }
 
@@ -457,8 +459,16 @@ public static unsafe partial class MatMul
 
         for (int block = 0; block < blockCount; block++)
         {
-            byte* xBlock = x + block * Q8_0BlockBytes;
+            int blockOff = block * Q8_0BlockBytes;
+            byte* xBlock = x + blockOff;
+
+            // Batched F16C scale conversion: load 4 weight scales (one per row) into a
+            // Vector128<short>, reinterpret as Half, convert to float in one vcvtph2ps.
+            // Multiply by dx scalar once → per-row scale lives in dxdws[i].
+            Vector128<float> dws = Load4HalfScales(
+                w0 + blockOff, w1 + blockOff, w2 + blockOff, w3 + blockOff);
             float dx = (float)Unsafe.ReadUnaligned<Half>(xBlock);
+            Vector128<float> dxdws = dws * Vector128.Create(dx);
 
             // Load x data once per block.
             Vector256<sbyte> vx = Unsafe.ReadUnaligned<Vector256<sbyte>>(xBlock + 2);
@@ -466,14 +476,12 @@ public static unsafe partial class MatMul
 
             // Row 0
             {
-                byte* wBlock = w0 + block * Q8_0BlockBytes;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
-                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(w0 + blockOff + 2);
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
-                Vector256<float> scale = Vector256.Create(dx * dw);
+                Vector256<float> scale = Vector256.Create(dxdws.GetElement(0));
                 if (Fma.IsSupported)
                     acc0 = Fma.MultiplyAdd(scale, fsum, acc0);
                 else
@@ -482,14 +490,12 @@ public static unsafe partial class MatMul
 
             // Row 1
             {
-                byte* wBlock = w1 + block * Q8_0BlockBytes;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
-                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(w1 + blockOff + 2);
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
-                Vector256<float> scale = Vector256.Create(dx * dw);
+                Vector256<float> scale = Vector256.Create(dxdws.GetElement(1));
                 if (Fma.IsSupported)
                     acc1 = Fma.MultiplyAdd(scale, fsum, acc1);
                 else
@@ -498,14 +504,12 @@ public static unsafe partial class MatMul
 
             // Row 2
             {
-                byte* wBlock = w2 + block * Q8_0BlockBytes;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
-                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(w2 + blockOff + 2);
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
-                Vector256<float> scale = Vector256.Create(dx * dw);
+                Vector256<float> scale = Vector256.Create(dxdws.GetElement(2));
                 if (Fma.IsSupported)
                     acc2 = Fma.MultiplyAdd(scale, fsum, acc2);
                 else
@@ -514,14 +518,12 @@ public static unsafe partial class MatMul
 
             // Row 3
             {
-                byte* wBlock = w3 + block * Q8_0BlockBytes;
-                float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
-                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
+                Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(w3 + blockOff + 2);
                 Vector256<sbyte> adjW = Avx2.Sign(vw, vx);
                 Vector256<short> prod = Avx2.MultiplyAddAdjacent(absX.AsByte(), adjW);
                 Vector256<int> isum = Avx2.MultiplyAddAdjacent(prod, ones);
                 Vector256<float> fsum = Avx.ConvertToVector256Single(isum);
-                Vector256<float> scale = Vector256.Create(dx * dw);
+                Vector256<float> scale = Vector256.Create(dxdws.GetElement(3));
                 if (Fma.IsSupported)
                     acc3 = Fma.MultiplyAdd(scale, fsum, acc3);
                 else
@@ -1293,6 +1295,87 @@ public static unsafe partial class MatMul
     private static float HalfBitsToFloat(byte* ptr)
     {
         return (float)Unsafe.ReadUnaligned<Half>(ptr);
+    }
+
+    /// <summary>
+    /// SIMD-batched IEEE-754 binary16 → binary32 conversion of 4 Half values packed in the
+    /// lower lanes of a <see cref="Vector128{Int16}"/>. Uses 5 SSE2/SSE4.1 ops total.
+    /// <para>
+    /// <b>Why not <c>(float)Half</c>?</b> RyuJIT (.NET 10) inlines that cast as ~20 scalar
+    /// IEEE bit-manipulation instructions (and a forward branch into a denormal handler)
+    /// because it does not intrinsify <c>Half.op_Explicit</c> on non-AVX-512 CPUs.
+    /// Quantized GEMV reads 4 Half scales per block; the inline expansion bloats the hot
+    /// loop by ~80 scalar instructions per block (verified via <c>DOTNET_JitDisasm</c>).
+    /// </para>
+    /// <para>
+    /// <b>Correctness scope.</b> Bit-exact for normal Half values and zero — the only
+    /// shapes that appear as Q8_0/K-quant block scales (which are computed as
+    /// <c>max(|x|)/127</c> and stored as Half during quantization). The conversion does
+    /// NOT handle Half subnormals, infinities, or NaN — those map to the wrong float bit
+    /// pattern. This is acceptable here because GGML's quantizer never emits them as
+    /// scales.
+    /// </para>
+    /// <para>
+    /// <b>Formula.</b> For a normal Half with bit pattern <c>S EEEEE MMMMMMMMMM</c>, the
+    /// equivalent normal Single is <c>S 000 EEEEE000 MMMMMMMMMM 0...</c> with the exponent
+    /// shifted by the bias delta (127 − 15 = 112 = 0x38000000 once positioned). Zero is
+    /// handled by masking the bias add when <c>(h &amp; 0x7FFF) == 0</c>.
+    /// </para>
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<float> ConvertHalvesToSingles(Vector128<short> halfs)
+    {
+        // Sign-extend each of the lower 4 shorts into a 32-bit lane (vpmovsxwd, 1 op).
+        Vector128<int> sx = Sse41.ConvertToVector128Int32(halfs);
+
+        // Sign bit: (h & 0x8000) << 16 → bit 31 of float.
+        Vector128<int> sign = Sse2.ShiftLeftLogical(
+            Sse2.And(sx, Vector128.Create(unchecked((int)0x8000))), 16);
+
+        // Exponent + mantissa: (h & 0x7FFF) << 13 + 0x38000000 (rebias 15 → 127).
+        Vector128<int> expMant = Sse2.And(sx, Vector128.Create(0x7FFF));
+        Vector128<int> wasZero = Sse2.CompareEqual(expMant, Vector128<int>.Zero);
+        expMant = Sse2.Add(Sse2.ShiftLeftLogical(expMant, 13), Vector128.Create(0x38000000));
+        // Zero out lanes that were originally zero (else we'd produce ~3e-38 instead of 0).
+        expMant = Sse2.AndNot(wasZero, expMant);
+
+        return Sse2.Or(sign, expMant).AsSingle();
+    }
+
+    /// <summary>
+    /// Loads 4 Half values from 4 independent pointers (one per row) and returns them as
+    /// 4 floats. Replaces 4 inlined scalar <c>(float)Half</c> conversions in 4-row Q8_0
+    /// vec-dot kernels. See <see cref="ConvertHalvesToSingles(Vector128{Int16})"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<float> Load4HalfScales(byte* p0, byte* p1, byte* p2, byte* p3)
+    {
+        Vector128<short> bits = Vector128.Create(
+            Unsafe.ReadUnaligned<short>(p0),
+            Unsafe.ReadUnaligned<short>(p1),
+            Unsafe.ReadUnaligned<short>(p2),
+            Unsafe.ReadUnaligned<short>(p3),
+            (short)0, (short)0, (short)0, (short)0);
+        return ConvertHalvesToSingles(bits);
+    }
+
+    /// <summary>
+    /// Loads 4 strided Half values from a single base pointer (R4 layout: 4 rows of
+    /// fixed-size blocks interleaved) and returns them as 4 floats. Companion to
+    /// <see cref="Load4HalfScales(byte*, byte*, byte*, byte*)"/> for cache-friendly
+    /// R4-interleaved Q8_0 weights where the 4 row scales sit at
+    /// <c>base, base+stride, base+2·stride, base+3·stride</c>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<float> Load4HalfScalesStrided(byte* basePtr, int stride)
+    {
+        Vector128<short> bits = Vector128.Create(
+            Unsafe.ReadUnaligned<short>(basePtr),
+            Unsafe.ReadUnaligned<short>(basePtr + stride),
+            Unsafe.ReadUnaligned<short>(basePtr + 2 * stride),
+            Unsafe.ReadUnaligned<short>(basePtr + 3 * stride),
+            (short)0, (short)0, (short)0, (short)0);
+        return ConvertHalvesToSingles(bits);
     }
 
     /// <summary>
