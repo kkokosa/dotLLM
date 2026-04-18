@@ -425,3 +425,7 @@ FodyWeavers.xsd
 
 # dotLLM test model cache
 tests/.models/
+
+# Scratch files used during nemotron_h research (do not commit)
+_*.cpp
+_*.txt
