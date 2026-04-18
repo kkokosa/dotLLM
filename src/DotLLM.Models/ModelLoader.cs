@@ -23,7 +23,11 @@ public static class ModelLoader
     {
         var gguf = GgufFile.Open(path);
         var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var model = TransformerModel.LoadFromGguf(gguf, config, threading ?? ThreadingConfig.SingleThreaded);
+        IModel model = config.Architecture switch
+        {
+            Architecture.NemotronH => NemotronHTransformerModel.LoadFromGguf(gguf, config),
+            _ => TransformerModel.LoadFromGguf(gguf, config, threading ?? ThreadingConfig.SingleThreaded),
+        };
         return (model, gguf, config);
     }
 }
