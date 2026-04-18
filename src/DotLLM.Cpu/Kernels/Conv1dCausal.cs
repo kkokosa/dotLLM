@@ -9,21 +9,38 @@ namespace DotLLM.Cpu.Kernels;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Memory layout matches llama.cpp / GGUF exactly: time-major row vectors, one row per
-/// time step. The caller prepends the cached <c>conv_state</c> (<c>d_conv-1</c> rows)
-/// to the new activations <c>xBC</c> (<c>T</c> rows) before calling this kernel, so the
-/// combined input has shape <c>[d_conv-1+T, channels]</c> row-major. The kernel writes
-/// <c>T</c> output rows, one per current time step.
+/// Memory layout matches llama.cpp / GGUF exactly:
 /// </para>
+/// <list type="bullet">
+///   <item>
+///     <description>
+///       <b>Input / output</b> are time-major, one row per time step:
+///       element <c>(t, c)</c> at flat index <c>t * channels + c</c>.
+///       The caller prepends the cached <c>conv_state</c> (<c>d_conv-1</c> rows) to
+///       the new activations <c>xBC</c> (<c>T</c> rows), so the combined input has
+///       shape <c>[d_conv-1 + T, channels]</c>.
+///     </description>
+///   </item>
+///   <item>
+///     <description>
+///       <b>Weight</b> follows GGUF's channel-major layout for <c>ssm_conv1d.weight</c>:
+///       GGUF shape <c>[d_conv, channels]</c> with <c>ne[0] = d_conv</c> places a single
+///       channel's <c>d_conv</c> taps at contiguous addresses — element <c>(k, c)</c>
+///       at flat index <c>c * d_conv + k</c>. This matches llama.cpp's
+///       <c>ggml_ssm_conv</c> depthwise access pattern and gives each inner loop four
+///       sequential loads per channel.
+///     </description>
+///   </item>
+/// </list>
 /// <para>
 /// Output formula (per time step <c>t</c> in [0, T) and channel <c>c</c> in [0, channels)):
 /// <code>
-/// y[t, c] = bias[c] + Σ_{k=0..d_conv-1} input[t+k, c] * weight[k, c]
+/// y[t, c] = bias[c] + Σ_{k=0..d_conv-1} input[t+k, c] * weight[c * d_conv + k]
 /// </code>
 /// </para>
 /// <para>
 /// This is a scalar reference implementation — correctness first, SIMD later. The
-/// performance of the conv step is dwarfed by the <c>ssm_in</c> GEMM at 3136×17504 Q5_0
+/// performance of the conv step is dwarfed by the <c>ssm_in</c> GEMM at 3136×17504 Q5_0,
 /// so vectorisation can wait until that is profiled.
 /// </para>
 /// </remarks>
@@ -36,7 +53,10 @@ public static class Conv1dCausal
     /// Concatenated <c>[conv_state | xBC]</c> buffer with shape <c>[d_conv-1+T, channels]</c>,
     /// row-major. Must contain at least <c>(d_conv-1+T) * channels</c> elements.
     /// </param>
-    /// <param name="weight">Per-channel conv kernel, shape <c>[d_conv, channels]</c> row-major.</param>
+    /// <param name="weight">
+    /// Per-channel conv kernel, GGUF shape <c>[d_conv, channels]</c> stored channel-major —
+    /// element <c>(k, c)</c> at flat index <c>c * d_conv + k</c>.
+    /// </param>
     /// <param name="bias">Per-channel bias, length <c>channels</c>.</param>
     /// <param name="output">Destination buffer, shape <c>[T, channels]</c> row-major.</param>
     /// <param name="dConv">Convolution kernel width (typically 4).</param>
@@ -89,25 +109,23 @@ public static class Conv1dCausal
         int channels,
         int seqLen)
     {
-        // Per-time-step outer loop, per-channel inner loop.
-        // Inputs and outputs are time-major, so channel loops walk contiguous memory,
-        // which matches the depthwise weight layout [k, channels].
+        // Channel-major weight layout: w(k, c) at c*dConv + k means each channel's taps
+        // are contiguous. Iterate time outer, channel outer, kernel-tap inner so the hot
+        // inner loop walks the 4 tap weights of a single channel sequentially.
         for (int t = 0; t < seqLen; t++)
         {
             Span<float> outRow = output.Slice(t * channels, channels);
 
-            // Initialise with bias.
-            bias[..channels].CopyTo(outRow);
-
-            // Accumulate kernel contributions: output[t, c] += sum_k input[t+k, c] * weight[k, c].
-            for (int k = 0; k < dConv; k++)
+            for (int c = 0; c < channels; c++)
             {
-                int inRowStart = (t + k) * channels;
-                int wRowStart = k * channels;
-                for (int c = 0; c < channels; c++)
+                int wBase = c * dConv;
+                float acc = bias[c];
+                // Walk the kernel taps; input[(t+k), c] = input[(t+k)*channels + c].
+                for (int k = 0; k < dConv; k++)
                 {
-                    outRow[c] += input[inRowStart + c] * weight[wRowStart + c];
+                    acc += input[(t + k) * channels + c] * weight[wBase + k];
                 }
+                outRow[c] = acc;
             }
         }
     }
