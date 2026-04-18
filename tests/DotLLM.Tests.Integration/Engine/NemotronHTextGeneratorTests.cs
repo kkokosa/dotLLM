@@ -4,6 +4,7 @@ using DotLLM.Core.Tensors;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace DotLLM.Tests.Integration.Engine;
 
@@ -17,6 +18,9 @@ namespace DotLLM.Tests.Integration.Engine;
 public class NemotronHTextGeneratorTests
 {
     private const string ModelPathEnvVar = "DOTLLM_NEMOTRON_H_GGUF";
+    private readonly ITestOutputHelper _output;
+
+    public NemotronHTextGeneratorTests(ITestOutputHelper output) => _output = output;
 
     private static string? TryResolveModelPath()
     {
@@ -91,5 +95,58 @@ public class NemotronHTextGeneratorTests
         Assert.InRange(argmax, 0, config.VocabSize - 1);
         Assert.True(TensorPrimitives.Max(lastLogits) > TensorPrimitives.Min(lastLogits),
             "Last-token logits are constant — likely a broken sub-layer.");
+    }
+
+    [SkippableFact]
+    public void Forward_RealPrompt_ArgmaxDecodesToNonEmptyString()
+    {
+        string? path = TryResolveModelPath();
+        Skip.If(path is null, $"Set {ModelPathEnvVar} to a Nemotron-H GGUF to run this test.");
+
+        using var gguf = GgufFile.Open(path!);
+        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
+        using var model = NemotronHTransformerModel.LoadFromGguf(gguf, config);
+        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+
+        int[] promptIds = tokenizer.Encode("The capital of France is");
+        Assert.NotEmpty(promptIds);
+
+        int[] positions = new int[promptIds.Length];
+        for (int i = 0; i < positions.Length; i++) positions[i] = i;
+
+        using ITensor logits = model.Forward(promptIds, positions, deviceId: 0);
+
+        int seqLen = promptIds.Length;
+        Assert.Equal(seqLen, logits.Shape[0]);
+        Assert.Equal(config.VocabSize, logits.Shape[1]);
+
+        ReadOnlySpan<float> allLogits;
+        unsafe
+        {
+            allLogits = new ReadOnlySpan<float>((void*)logits.DataPointer, seqLen * config.VocabSize);
+        }
+        var lastRow = allLogits.Slice((seqLen - 1) * config.VocabSize, config.VocabSize);
+
+        // Argmax over last row.
+        int argmax = 0;
+        float best = lastRow[0];
+        for (int i = 1; i < lastRow.Length; i++)
+        {
+            if (lastRow[i] > best) { best = lastRow[i]; argmax = i; }
+        }
+
+        string decoded = tokenizer.DecodeToken(argmax);
+
+        // Surface the predicted token for eyeballing — "Paris" or " Paris" means the model
+        // is actually doing its job end-to-end, a random-looking token means there's still
+        // a math bug somewhere even though logits are finite.
+        _output.WriteLine($"Prompt tokens: [{string.Join(",", promptIds)}]");
+        _output.WriteLine($"Predicted next token: id={argmax} decoded={decoded.Replace("\n", "\\n")}");
+        _output.WriteLine($"Last-row logit range: [{TensorPrimitives.Min(lastRow):F2}, {TensorPrimitives.Max(lastRow):F2}]");
+
+        Assert.False(string.IsNullOrEmpty(decoded),
+            $"Argmax token id {argmax} decoded to empty string.");
+        Assert.True(best - TensorPrimitives.Min(lastRow) > 1.0f,
+            "Last-row logit spread under 1.0 — model output is near-uniform (broken sub-layer).");
     }
 }
