@@ -22,6 +22,7 @@ internal sealed unsafe class NemotronHForwardState : IDisposable
     private readonly int _dConv;
     private readonly int _dInner;
     private readonly int _nHead;
+    private readonly int _bcDim; // n_group * d_state — per-token width of each of B and C.
 
     private int _currentSeqLen;
 
@@ -41,6 +42,9 @@ internal sealed unsafe class NemotronHForwardState : IDisposable
     public nint ConvInput;
     public nint XBC;
     public nint DtBuffer;
+    public nint SsmX;   // [T, d_inner] — x split out of xBC, fed to Mamba2SelectiveScan and reused in D*x skip.
+    public nint SsmB;   // [T, n_group, d_state]
+    public nint SsmC;   // [T, n_group, d_state]
     public nint SsmY;
 
     public long AllocatedBytes
@@ -60,6 +64,8 @@ internal sealed unsafe class NemotronHForwardState : IDisposable
             floats += (_dConv - 1 + s) * _convDim;         // ConvInput
             floats += s * _convDim;                        // XBC
             floats += s * _nHead;                          // DtBuffer
+            floats += s * _dInner;                         // SsmX
+            floats += s * _bcDim * 2;                      // SsmB, SsmC
             floats += s * _dInner;                         // SsmY
             long bytes = floats * sizeof(float);
             bytes += s * _inputScratchRowBytes;            // InputQ8Scratch (byte-sized)
@@ -77,7 +83,9 @@ internal sealed unsafe class NemotronHForwardState : IDisposable
         int convDim,
         int dConv,
         int dInner,
-        int nHead)
+        int nHead,
+        int nGroup,
+        int dState)
     {
         _hiddenSize = hiddenSize;
         _maxIntermediateSize = maxIntermediateSize;
@@ -89,6 +97,7 @@ internal sealed unsafe class NemotronHForwardState : IDisposable
         _dConv = dConv;
         _dInner = dInner;
         _nHead = nHead;
+        _bcDim = nGroup * dState;
 
         int scratchBase = Math.Max(Math.Max(hiddenSize, maxIntermediateSize), dInner);
         int q8_0RowBytes = (scratchBase / 32) * 34;
@@ -123,6 +132,9 @@ internal sealed unsafe class NemotronHForwardState : IDisposable
         ConvInput = AllocFloats((long)(_dConv - 1 + cap) * _convDim);
         XBC = AllocFloats((long)cap * _convDim);
         DtBuffer = AllocFloats((long)cap * _nHead);
+        SsmX = AllocFloats((long)cap * _dInner);
+        SsmB = AllocFloats((long)cap * _bcDim);
+        SsmC = AllocFloats((long)cap * _bcDim);
         SsmY = AllocFloats((long)cap * _dInner);
 
         _currentSeqLen = cap;
@@ -150,6 +162,9 @@ internal sealed unsafe class NemotronHForwardState : IDisposable
         FreeIfNonZero(ref ConvInput);
         FreeIfNonZero(ref XBC);
         FreeIfNonZero(ref DtBuffer);
+        FreeIfNonZero(ref SsmX);
+        FreeIfNonZero(ref SsmB);
+        FreeIfNonZero(ref SsmC);
         FreeIfNonZero(ref SsmY);
     }
 

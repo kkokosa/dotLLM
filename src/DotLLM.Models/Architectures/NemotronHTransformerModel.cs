@@ -121,7 +121,9 @@ public sealed unsafe class NemotronHTransformerModel : IModel
             convDim: _ssm.ConvDim,
             dConv: _ssm.DConv,
             dInner: _ssm.DInner,
-            nHead: _ssm.NHead);
+            nHead: _ssm.NHead,
+            nGroup: _ssm.NGroup,
+            dState: _ssm.DState);
 
         _ssmCache = new SsmStateCache(_ssm, _numSsmLayers);
     }
@@ -570,7 +572,11 @@ public sealed unsafe class NemotronHTransformerModel : IModel
         float* convInput = (float*)_state.ConvInput;
         float* xbc = (float*)_state.XBC;
         float* dtBuf = (float*)_state.DtBuffer;
+        float* xBuf = (float*)_state.SsmX;
+        float* bBuf = (float*)_state.SsmB;
+        float* cBuf = (float*)_state.SsmC;
         float* yBuf = (float*)_state.SsmY;
+        int bcDim = nGroup * dState;
 
         // 1. ssm_in GEMM
         Gemm(ssmW.InWeight, ssmW.InQuantType, normOut, zxbcdt,
@@ -620,60 +626,49 @@ public sealed unsafe class NemotronHTransformerModel : IModel
             TensorPrimitives.Add(src, ssmW.DtBias, dst);
         }
 
-        // 6. Selective scan — pack contiguous x/B/C scratch (xbc rows interleave them).
+        // 6. Selective scan — pack contiguous x/B/C into long-lived state buffers.
+        // xbc row layout is [x (dInner) | B (bcDim) | C (bcDim)]; the scan kernel wants each
+        // of those as its own contiguous [T, ...] buffer, so split them per token.
         int xElems = seqLen * dInner;
-        int bElems = seqLen * nGroup * dState;
-        int cElems = seqLen * nGroup * dState;
+        int bcElems = seqLen * bcDim;
 
-        float[] xScratch = ArrayPool<float>.Shared.Rent(xElems);
-        float[] bScratch = ArrayPool<float>.Shared.Rent(bElems);
-        float[] cScratch = ArrayPool<float>.Shared.Rent(cElems);
-        try
+        for (int t = 0; t < seqLen; t++)
         {
-            for (int t = 0; t < seqLen; t++)
+            ReadOnlySpan<float> row = new(xbc + t * convDim, convDim);
+            row.Slice(0, dInner).CopyTo(new Span<float>(xBuf + t * dInner, dInner));
+            row.Slice(dInner, bcDim).CopyTo(new Span<float>(bBuf + t * bcDim, bcDim));
+            row.Slice(dInner + bcDim, bcDim).CopyTo(new Span<float>(cBuf + t * bcDim, bcDim));
+        }
+
+        var ssmState = _ssmCache.GetSsmState(ssmOrdinal);
+
+        Mamba2SelectiveScan.Execute(
+            state: ssmState,
+            x: new ReadOnlySpan<float>(xBuf, xElems),
+            dt: new ReadOnlySpan<float>(dtBuf, seqLen * nHead),
+            a: ssmW.A,
+            b: new ReadOnlySpan<float>(bBuf, bcElems),
+            c: new ReadOnlySpan<float>(cBuf, bcElems),
+            y: new Span<float>(yBuf, xElems),
+            nHead: nHead,
+            headDim: headDim,
+            dState: dState,
+            nGroup: nGroup,
+            seqLen: seqLen);
+
+        // 7. y += x * D[h] (broadcast D per head across head_dim)
+        for (int t = 0; t < seqLen; t++)
+        {
+            int tBase = t * dInner;
+            for (int h = 0; h < nHead; h++)
             {
-                ReadOnlySpan<float> row = new(xbc + t * convDim, convDim);
-                row.Slice(0, dInner).CopyTo(xScratch.AsSpan(t * dInner, dInner));
-                row.Slice(dInner, nGroup * dState).CopyTo(bScratch.AsSpan(t * nGroup * dState, nGroup * dState));
-                row.Slice(dInner + nGroup * dState, nGroup * dState).CopyTo(cScratch.AsSpan(t * nGroup * dState, nGroup * dState));
-            }
-
-            var ssmState = _ssmCache.GetSsmState(ssmOrdinal);
-
-            Mamba2SelectiveScan.Execute(
-                state: ssmState,
-                x: xScratch.AsSpan(0, xElems),
-                dt: new ReadOnlySpan<float>(dtBuf, seqLen * nHead),
-                a: ssmW.A,
-                b: bScratch.AsSpan(0, bElems),
-                c: cScratch.AsSpan(0, cElems),
-                y: new Span<float>(yBuf, xElems),
-                nHead: nHead,
-                headDim: headDim,
-                dState: dState,
-                nGroup: nGroup,
-                seqLen: seqLen);
-
-            // 7. y += x * D[h] (broadcast D per head across head_dim)
-            for (int t = 0; t < seqLen; t++)
-            {
-                int tBase = t * dInner;
-                for (int h = 0; h < nHead; h++)
+                float dh = ssmW.D[h];
+                int rowBase = tBase + h * headDim;
+                for (int iHead = 0; iHead < headDim; iHead++)
                 {
-                    float dh = ssmW.D[h];
-                    int rowBase = tBase + h * headDim;
-                    for (int iHead = 0; iHead < headDim; iHead++)
-                    {
-                        yBuf[rowBase + iHead] += xScratch[rowBase + iHead] * dh;
-                    }
+                    yBuf[rowBase + iHead] += xBuf[rowBase + iHead] * dh;
                 }
             }
-        }
-        finally
-        {
-            ArrayPool<float>.Shared.Return(xScratch);
-            ArrayPool<float>.Shared.Return(bScratch);
-            ArrayPool<float>.Shared.Return(cScratch);
         }
 
         // 8. SwiGLU gating: y = SiLU(z) * y, z = zxbcdt[:, 0..dInner)
