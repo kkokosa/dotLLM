@@ -415,6 +415,9 @@ public sealed unsafe class NemotronHTransformerModel : IModel
 
         EmbedTokens(tokenIds, hidden, hiddenSize);
 
+        if (NemotronHDiagnostics.TraceLayers)
+            NemotronHDiagnostics.DumpStats("embed[last]", hidden + (seqLen - 1) * hiddenSize, hiddenSize);
+
         var kinds = _layout.LayerKind;
         for (int layer = 0; layer < _layers.Length; layer++)
         {
@@ -430,18 +433,22 @@ public sealed unsafe class NemotronHTransformerModel : IModel
                     new Span<float>(normOut + t * hiddenSize, hiddenSize));
             }
 
+            char kindTag;
             switch (kinds[layer])
             {
                 case HybridLayerKind.Ffn:
                     ForwardFfnBody(lw.Ffn!, seqLen, hiddenSize, normOut, ffnMid, inputQ8Scratch);
+                    kindTag = 'F';
                     break;
                 case HybridLayerKind.Attention:
                     ForwardAttentionBody(lw.Attention!, layer, seqLen, positions,
                         normOut, q, k, v, attnOut,
                         numHeads, numKvHeads, headDim, kvCache);
+                    kindTag = 'A';
                     break;
                 case HybridLayerKind.Ssm:
                     ForwardSsmBody(lw.Ssm!, layer, seqLen, hiddenSize, normOut, eps);
+                    kindTag = 'S';
                     break;
                 default:
                     throw new InvalidOperationException(
@@ -455,6 +462,9 @@ public sealed unsafe class NemotronHTransformerModel : IModel
                     new ReadOnlySpan<float>(normOut + t * hiddenSize, hiddenSize),
                     new Span<float>(hidden + t * hiddenSize, hiddenSize));
             }
+
+            if (NemotronHDiagnostics.TraceLayers)
+                NemotronHDiagnostics.DumpStats($"L{layer:D2}{kindTag}[last]", hidden + (seqLen - 1) * hiddenSize, hiddenSize);
         }
 
         for (int t = 0; t < seqLen; t++)
@@ -555,6 +565,7 @@ public sealed unsafe class NemotronHTransformerModel : IModel
     private void ForwardSsmBody(NemotronHSsmWeights ssmW, int absoluteLayerIndex, int seqLen,
                                 int hiddenSize, float* normOut, float eps)
     {
+        bool traceSsm = NemotronHDiagnostics.IsSsmTraced(absoluteLayerIndex);
         int ssmOrdinal = _ssmLayerOrdinal[absoluteLayerIndex];
 
         int dInner = _ssm.DInner;
@@ -577,9 +588,24 @@ public sealed unsafe class NemotronHTransformerModel : IModel
         float* yBuf = (float*)_state.SsmY;
         int bcDim = nGroup * dState;
 
+        if (traceSsm)
+            NemotronHDiagnostics.DumpStats($"L{absoluteLayerIndex:D2}S ssm.normOut[last]",
+                normOut + (seqLen - 1) * hiddenSize, hiddenSize);
+
         // 1. ssm_in GEMM
         Gemm(ssmW.InWeight, ssmW.InQuantType, normOut, zxbcdt,
              inProjDim, hiddenSize, seqLen, preQuantizedInput: null);
+
+        if (traceSsm)
+        {
+            int off = (seqLen - 1) * inProjDim;
+            NemotronHDiagnostics.DumpStats($"L{absoluteLayerIndex:D2}S ssm.z[last]",
+                zxbcdt + off, dInner);
+            NemotronHDiagnostics.DumpStats($"L{absoluteLayerIndex:D2}S ssm.xBC[last]",
+                zxbcdt + off + dInner, convDim);
+            NemotronHDiagnostics.DumpStats($"L{absoluteLayerIndex:D2}S ssm.dt[last]",
+                zxbcdt + off + 2 * dInner + 2 * nGroup * dState, nHead);
+        }
 
         // 2. conv_input = concat(conv_state, xBC rows from zxbcdt)
         var convState = _ssmCache.GetConvState(ssmOrdinal);
@@ -606,6 +632,10 @@ public sealed unsafe class NemotronHTransformerModel : IModel
         SiLu.Execute(
             new ReadOnlySpan<float>(xbc, xbcElems),
             new Span<float>(xbc, xbcElems));
+
+        if (traceSsm)
+            NemotronHDiagnostics.DumpStats($"L{absoluteLayerIndex:D2}S ssm.xbc_post_silu[last]",
+                xbc + (seqLen - 1) * convDim, convDim);
 
         // 4. Save last (d_conv-1) rows of conv_input (pre-SiLU) back into conv_state.
         for (int r = 0; r < dConv - 1; r++)
@@ -655,6 +685,10 @@ public sealed unsafe class NemotronHTransformerModel : IModel
             nGroup: nGroup,
             seqLen: seqLen);
 
+        if (traceSsm)
+            NemotronHDiagnostics.DumpStats($"L{absoluteLayerIndex:D2}S ssm.y_post_scan[last]",
+                yBuf + (seqLen - 1) * dInner, dInner);
+
         // 7. y += x * D[h] (broadcast D per head across head_dim)
         for (int t = 0; t < seqLen; t++)
         {
@@ -670,6 +704,10 @@ public sealed unsafe class NemotronHTransformerModel : IModel
             }
         }
 
+        if (traceSsm)
+            NemotronHDiagnostics.DumpStats($"L{absoluteLayerIndex:D2}S ssm.y_post_D[last]",
+                yBuf + (seqLen - 1) * dInner, dInner);
+
         // 8. SwiGLU gating: y = SiLU(z) * y, z = zxbcdt[:, 0..dInner)
         for (int t = 0; t < seqLen; t++)
         {
@@ -677,6 +715,10 @@ public sealed unsafe class NemotronHTransformerModel : IModel
             var yRow = new Span<float>(yBuf + t * dInner, dInner);
             FusedOps.SwiGLU(z, yRow, yRow);
         }
+
+        if (traceSsm)
+            NemotronHDiagnostics.DumpStats($"L{absoluteLayerIndex:D2}S ssm.y_post_swiglu[last]",
+                yBuf + (seqLen - 1) * dInner, dInner);
 
         // 9. Group RMSNorm
         for (int t = 0; t < seqLen; t++)
@@ -692,9 +734,17 @@ public sealed unsafe class NemotronHTransformerModel : IModel
             }
         }
 
+        if (traceSsm)
+            NemotronHDiagnostics.DumpStats($"L{absoluteLayerIndex:D2}S ssm.y_post_groupnorm[last]",
+                yBuf + (seqLen - 1) * dInner, dInner);
+
         // 10. ssm_out projection into normOut
         Gemm(ssmW.OutWeight, ssmW.OutQuantType, yBuf, normOut,
              hiddenSize, dInner, seqLen, preQuantizedInput: null);
+
+        if (traceSsm)
+            NemotronHDiagnostics.DumpStats($"L{absoluteLayerIndex:D2}S ssm.out[last]",
+                normOut + (seqLen - 1) * hiddenSize, hiddenSize);
     }
 
     private void EmbedTokens(ReadOnlySpan<int> tokenIds, float* hidden, int hiddenSize)
