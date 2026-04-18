@@ -1,3 +1,6 @@
+using System.Buffers;
+using System.Numerics.Tensors;
+using System.Runtime.CompilerServices;
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
@@ -20,8 +23,12 @@ namespace DotLLM.Models.Architectures;
 /// implemented in stages — see DESIGN.md and the per-branch TODOs inside
 /// <see cref="Forward(ReadOnlySpan{int}, ReadOnlySpan{int}, int, IKvCache?)"/>.
 /// </summary>
-public sealed class NemotronHTransformerModel : IModel
+public sealed unsafe class NemotronHTransformerModel : IModel
 {
+    private const int Q8_0BlockBytes = 34;
+    private const int Q8_0GroupSize = 32;
+    private const int Q8_1GroupSize = 32;
+
     private readonly GgufFile _gguf; // keep alive
     private readonly NemotronHLayerWeights[] _layers;
     private readonly float[] _outputNormWeight;
@@ -36,12 +43,13 @@ public sealed class NemotronHTransformerModel : IModel
 
     private readonly HybridLayerLayout _layout;
     private readonly MambaSsmConfig _ssm;
+    private readonly NemotronHForwardState _state;
 
     /// <inheritdoc/>
     public ModelConfig Config { get; }
 
     /// <inheritdoc/>
-    public long ComputeMemoryBytes => 0; // scratch buffers not yet allocated (Forward unimplemented)
+    public long ComputeMemoryBytes => _state.AllocatedBytes;
 
     private NemotronHTransformerModel(
         ModelConfig config,
@@ -63,6 +71,18 @@ public sealed class NemotronHTransformerModel : IModel
         _outputInputDim = outputInputDim;
         _layout = config.HybridLayout!;
         _ssm = config.SsmConfig!.Value;
+
+        int maxIntermediate = 0;
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            var ffn = _layers[i].Ffn;
+            if (ffn is not null && ffn.UpOutputDim > maxIntermediate)
+                maxIntermediate = ffn.UpOutputDim;
+        }
+        // Intermediate scratch must be non-zero even for all-SSM debug builds.
+        if (maxIntermediate == 0) maxIntermediate = config.HiddenSize;
+
+        _state = new NemotronHForwardState(config.HiddenSize, maxIntermediate, config.VocabSize);
     }
 
     /// <summary>
@@ -284,43 +304,237 @@ public sealed class NemotronHTransformerModel : IModel
         => Forward(tokenIds, positions, deviceId, kvCache: null);
 
     /// <inheritdoc/>
+    [SkipLocalsInit]
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
                            int deviceId, IKvCache? kvCache)
     {
-        // Touch fields so the compiler and readers see they are live and the
-        // loader side is fully exercised even before the forward pass lands.
-        _ = _tokenEmbedWeight;
-        _ = _tokenEmbedQuantType;
-        _ = _outputWeight;
-        _ = _outputQuantType;
-        _ = _outputOutputDim;
-        _ = _outputInputDim;
-        _ = _outputNormWeight;
-        _ = _layers;
-        _ = _layout;
-        _ = _ssm;
-        _ = tokenIds;
-        _ = positions;
-        _ = deviceId;
-        _ = kvCache;
+        _ = _ssm;       // consumed by stage 7
+        _ = kvCache;    // consumed by stage 6
 
-        // TODO(feature/mamba-3 stage 5): implement FFN-only forward.
-        // TODO(feature/mamba-3 stage 6): implement GQA attention sub-layer.
-        // TODO(feature/mamba-3 stage 7): implement Mamba2 selective scan + conv1d + group RMSNorm
-        //     and wire the full hybrid dispatch. See DESIGN.md section 5 and
-        //     llama.cpp src/models/mamba-base.cpp :: build_mamba2_layer for the reference.
-        throw new NotImplementedException(
-            "NemotronHTransformerModel.Forward is not yet implemented. " +
-            "Weight loading and dispatch scaffolding are in place; see DESIGN.md and " +
-            "the TODOs in this method for the remaining stages.");
+        int seqLen = tokenIds.Length;
+        int hiddenSize = Config.HiddenSize;
+        int vocabSize = Config.VocabSize;
+        float eps = Config.NormEpsilon;
+
+        int maxSeq = Config.MaxSequenceLength;
+        for (int i = 0; i < positions.Length; i++)
+        {
+            if ((uint)positions[i] >= (uint)maxSeq)
+                throw new ArgumentOutOfRangeException(nameof(positions),
+                    $"Position {positions[i]} at index {i} exceeds max sequence length {maxSeq}.");
+        }
+
+        _state.EnsureCapacity(seqLen);
+
+        float* hidden = (float*)_state.HiddenState;
+        float* residual = (float*)_state.Residual;
+        float* normOut = (float*)_state.NormOutput;
+        float* ffnMid = (float*)_state.FfnIntermediate;
+        float* logits = (float*)_state.Logits;
+        byte* inputQ8Scratch = (byte*)_state.InputQ8Scratch;
+
+        EmbedTokens(tokenIds, hidden, hiddenSize);
+
+        var kinds = _layout.LayerKind;
+        for (int layer = 0; layer < _layers.Length; layer++)
+        {
+            var lw = _layers[layer];
+            switch (kinds[layer])
+            {
+                case HybridLayerKind.Ffn:
+                    ForwardFfnLayer(lw, seqLen, hiddenSize, eps,
+                                    hidden, residual, normOut, ffnMid, inputQ8Scratch);
+                    break;
+                case HybridLayerKind.Ssm:
+                case HybridLayerKind.Attention:
+                    throw new NotImplementedException(
+                        $"Nemotron-H {kinds[layer]} layer (index {layer}) — " +
+                        "stage 6/7 of feature/mamba-3");
+                default:
+                    throw new InvalidOperationException(
+                        $"Unknown HybridLayerKind {kinds[layer]} at layer {layer}.");
+            }
+        }
+
+        for (int t = 0; t < seqLen; t++)
+        {
+            RmsNorm.Execute(
+                new ReadOnlySpan<float>(hidden + t * hiddenSize, hiddenSize),
+                _outputNormWeight, eps,
+                new Span<float>(hidden + t * hiddenSize, hiddenSize));
+        }
+
+        Gemm(_outputWeight, _outputQuantType, hidden, logits,
+             _outputOutputDim, _outputInputDim, seqLen, preQuantizedInput: null);
+
+        var shape = new TensorShape(seqLen, vocabSize);
+        var result = UnmanagedTensor.Allocate(shape, DType.Float32, deviceId);
+        new Span<float>(logits, seqLen * vocabSize).CopyTo(
+            new Span<float>((void*)result.DataPointer, seqLen * vocabSize));
+
+        return result;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ForwardFfnLayer(NemotronHLayerWeights lw, int seqLen, int hiddenSize, float eps,
+                                 float* hidden, float* residual, float* normOut, float* ffnMid,
+                                 byte* inputQ8Scratch)
+    {
+        var ffn = lw.Ffn!;
+        int intermediateSize = ffn.UpOutputDim;
+
+        new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
+
+        for (int t = 0; t < seqLen; t++)
+        {
+            RmsNorm.Execute(
+                new ReadOnlySpan<float>(hidden + t * hiddenSize, hiddenSize),
+                lw.AttnNormWeight, eps,
+                new Span<float>(normOut + t * hiddenSize, hiddenSize));
+        }
+
+        // Pre-quantize normed input once because Q-typed matmuls expect a packed input representation.
+        byte* preQuantUp = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, ffn.UpQuantType);
+        Gemm(ffn.UpWeight, ffn.UpQuantType, normOut, ffnMid,
+             ffn.UpOutputDim, ffn.UpInputDim, seqLen, preQuantUp);
+
+        for (int t = 0; t < seqLen; t++)
+        {
+            ReluSquared.Execute(
+                new ReadOnlySpan<float>(ffnMid + t * intermediateSize, intermediateSize),
+                new Span<float>(ffnMid + t * intermediateSize, intermediateSize));
+        }
+
+        byte* preQuantDown = QuantizeInput(ffnMid, inputQ8Scratch, intermediateSize, seqLen, ffn.DownQuantType);
+        Gemm(ffn.DownWeight, ffn.DownQuantType, ffnMid, normOut,
+             ffn.DownOutputDim, ffn.DownInputDim, seqLen, preQuantDown);
+
+        for (int t = 0; t < seqLen; t++)
+        {
+            Add.Execute(
+                new ReadOnlySpan<float>(residual + t * hiddenSize, hiddenSize),
+                new ReadOnlySpan<float>(normOut + t * hiddenSize, hiddenSize),
+                new Span<float>(hidden + t * hiddenSize, hiddenSize));
+        }
+    }
+
+    private void EmbedTokens(ReadOnlySpan<int> tokenIds, float* hidden, int hiddenSize)
+    {
+        nint embPtr = _tokenEmbedWeight;
+        var qt = _tokenEmbedQuantType;
+
+        for (int t = 0; t < tokenIds.Length; t++)
+        {
+            int tokenId = tokenIds[t];
+            if ((uint)tokenId >= (uint)Config.VocabSize)
+                throw new ArgumentOutOfRangeException(nameof(tokenIds),
+                    $"Token ID {tokenId} at position {t} is out of range [0, {Config.VocabSize}).");
+
+            float* dest = hidden + t * hiddenSize;
+            var destSpan = new Span<float>(dest, hiddenSize);
+
+            if (qt == QuantizationType.F32)
+            {
+                float* src = (float*)embPtr + (long)tokenId * hiddenSize;
+                new ReadOnlySpan<float>(src, hiddenSize).CopyTo(destSpan);
+            }
+            else if (qt == QuantizationType.F16)
+            {
+                Half* src = (Half*)embPtr + (long)tokenId * hiddenSize;
+                TensorPrimitives.ConvertToSingle(new ReadOnlySpan<Half>(src, hiddenSize), destSpan);
+            }
+            else
+            {
+                long rowBytes = Dequantize.RowByteSize(hiddenSize, qt);
+                nint rowPtr = embPtr + (nint)((long)tokenId * rowBytes);
+                Dequantize.ToFloat32(rowPtr, hiddenSize, qt, destSpan);
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Gemm(nint weights, QuantizationType qt, float* b, float* c,
+                              int m, int k, int n, byte* preQuantizedInput)
+    {
+        if (qt == QuantizationType.Q8_0)
+            MatMul.GemmQ8_0((byte*)weights, b, c, m, k, n, preQuantizedInput);
+        else if (qt == QuantizationType.Q5_0)
+            MatMul.GemmQ5_0((byte*)weights, b, c, m, k, n, preQuantizedInput);
+        else if (qt == QuantizationType.Q4_K)
+            MatMul.GemmQ4_K((byte*)weights, b, c, m, k, n, preQuantizedInput);
+        else if (qt == QuantizationType.Q5_K)
+            MatMul.GemmQ5_K((byte*)weights, b, c, m, k, n, preQuantizedInput);
+        else if (qt == QuantizationType.Q6_K)
+            MatMul.GemmQ6_K((byte*)weights, b, c, m, k, n, preQuantizedInput);
+        else if (qt == QuantizationType.F32)
+            MatMul.GemmF32((float*)weights, b, c, m, k, n);
+        else if (qt == QuantizationType.F16)
+            MatMul.GemmF16(weights, b, c, m, k, n);
+        else
+            GemmDequantFallback(weights, qt, b, c, m, k, n);
+    }
+
+    private static void GemmDequantFallback(nint weights, QuantizationType qt, float* b, float* c,
+                                            int m, int k, int n)
+    {
+        long rowBytes = Dequantize.RowByteSize(k, qt);
+        float[] rowBuf = ArrayPool<float>.Shared.Rent(k);
+        try
+        {
+            var rowSpan = rowBuf.AsSpan(0, k);
+            for (int t = 0; t < n; t++)
+            {
+                var xSpan = new ReadOnlySpan<float>(b + t * k, k);
+                for (int i = 0; i < m; i++)
+                {
+                    Dequantize.ToFloat32(weights + i * (nint)rowBytes, k, qt, rowSpan);
+                    c[t * m + i] = TensorPrimitives.Dot(new ReadOnlySpan<float>(rowBuf, 0, k), xSpan);
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(rowBuf);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static byte* QuantizeInput(float* input, byte* scratch, int dim, int seqLen, QuantizationType qt)
+    {
+        if (qt == QuantizationType.Q4_K || qt == QuantizationType.Q5_K || qt == QuantizationType.Q6_K)
+        {
+            int blockCount = dim / 256;
+            int q8kRowBytes = blockCount * MatMul.Q8_K_BlockBytes;
+            for (int t = 0; t < seqLen; t++)
+                MatMul.QuantizeF32ToQ8_K(input + t * dim, scratch + t * q8kRowBytes, dim);
+            return scratch;
+        }
+
+        if (qt == QuantizationType.Q5_0)
+        {
+            int blockCount = dim / Q8_1GroupSize;
+            int q8_1RowBytes = blockCount * MatMul.Q8_1BlockBytes;
+            for (int t = 0; t < seqLen; t++)
+                MatMul.QuantizeF32ToQ8_1(input + t * dim, scratch + t * q8_1RowBytes, dim);
+            return scratch;
+        }
+
+        if (qt == QuantizationType.Q8_0)
+        {
+            int blockCount = dim / Q8_0GroupSize;
+            int q8RowBytes = blockCount * Q8_0BlockBytes;
+            for (int t = 0; t < seqLen; t++)
+                MatMul.QuantizeF32ToQ8_0(input + t * dim, scratch + t * q8RowBytes, dim);
+            return scratch;
+        }
+
+        return null;
     }
 
     /// <inheritdoc/>
     public void Dispose()
     {
-        // No owned unmanaged resources yet — _gguf is owned by the caller and
-        // weights live in its mmap region. Scratch buffers will be added when
-        // Forward is implemented.
+        _state.Dispose();
         GC.SuppressFinalize(this);
     }
 
