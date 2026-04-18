@@ -12,5 +12,10 @@ public enum ActivationFunction
     GELU,
 
     /// <summary>GELU with tanh approximation.</summary>
-    GELUTanh
+    GELUTanh,
+
+    /// <summary>
+    /// Squared ReLU: <c>y = max(0, x)^2</c>. Used by Nemotron-H FFN layers.
+    /// </summary>
+    ReluSquared
 }

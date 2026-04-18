@@ -70,6 +70,52 @@ internal sealed class DebugGgufConfigCommand : Command<DebugGgufConfigCommand.Se
 
         AnsiConsole.Write(table);
 
+        if (config.SsmConfig is { } ssm)
+        {
+            AnsiConsole.WriteLine();
+            AnsiConsole.Write(new Rule("[bold yellow]Mamba SSM Config[/]").LeftJustified());
+            AnsiConsole.WriteLine();
+
+            var ssmTable = new Table().Border(TableBorder.Rounded);
+            ssmTable.AddColumn("Property");
+            ssmTable.AddColumn("Value");
+
+            ssmTable.AddRow("DConv", ssm.DConv.ToString());
+            ssmTable.AddRow("DInner", ssm.DInner.ToString());
+            ssmTable.AddRow("DState", ssm.DState.ToString());
+            ssmTable.AddRow("NGroup", ssm.NGroup.ToString());
+            ssmTable.AddRow("NHead", ssm.NHead.ToString());
+            ssmTable.AddRow("HeadDim (derived)", ssm.HeadDim.ToString());
+            ssmTable.AddRow("InputProjectionDim (derived)", ssm.InputProjectionDim.ToString());
+            ssmTable.AddRow("ConvDim (derived)", ssm.ConvDim.ToString());
+
+            AnsiConsole.Write(ssmTable);
+        }
+
+        if (config.HybridLayout is { } hybrid)
+        {
+            AnsiConsole.WriteLine();
+            AnsiConsole.Write(new Rule("[bold yellow]Hybrid Layer Layout[/]").LeftJustified());
+            AnsiConsole.WriteLine();
+
+            int ssmCount = 0, attnCount = 0, ffnCount = 0;
+            foreach (var k in hybrid.LayerKind)
+            {
+                if (k == Core.Models.HybridLayerKind.Ssm) ssmCount++;
+                else if (k == Core.Models.HybridLayerKind.Attention) attnCount++;
+                else if (k == Core.Models.HybridLayerKind.Ffn) ffnCount++;
+            }
+            AnsiConsole.MarkupLine(
+                $"SSM layers: [green]{ssmCount}[/] | Attention layers: [green]{attnCount}[/] | FFN layers: [green]{ffnCount}[/] | total {hybrid.LayerKind.Length}");
+            AnsiConsole.MarkupLine(
+                $"Layout: {string.Join("", hybrid.LayerKind.Select(k => k switch {
+                    Core.Models.HybridLayerKind.Ssm => 'S',
+                    Core.Models.HybridLayerKind.Attention => 'A',
+                    Core.Models.HybridLayerKind.Ffn => 'F',
+                    _ => '?'
+                }))}");
+        }
+
         if (config.RoPEConfig is { } rope)
         {
             AnsiConsole.WriteLine();

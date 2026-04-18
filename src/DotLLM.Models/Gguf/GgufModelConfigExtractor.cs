@@ -23,9 +23,29 @@ public static class GgufModelConfigExtractor
 
         int hiddenSize = (int)metadata.GetUInt32($"{arch}.embedding_length");
         int numLayers = (int)metadata.GetUInt32($"{arch}.block_count");
-        int intermediateSize = (int)metadata.GetUInt32($"{arch}.feed_forward_length");
         int numAttentionHeads = (int)metadata.GetUInt32($"{arch}.attention.head_count");
-        int numKvHeads = (int)metadata.GetUInt32OrDefault($"{arch}.attention.head_count_kv", (uint)numAttentionHeads);
+
+        // Hybrid models (Nemotron-H) store head_count_kv and feed_forward_length as
+        // per-layer Int32 arrays whose entries are zero for layers of the wrong kind.
+        // Build a HybridLayerLayout in that case; for pure-Transformer architectures
+        // both keys are scalar UInt32.
+        HybridLayerLayout? hybridLayout = TryExtractHybridLayout(metadata, arch, numLayers);
+
+        int intermediateSize;
+        int numKvHeads;
+        if (hybridLayout is not null)
+        {
+            // Use the *attention-layer* values as the canonical scalar config so existing
+            // attention/KV-cache code paths see meaningful sizes. Fall back to zeros only
+            // when the model has no attention layers at all (unsupported here).
+            numKvHeads = MaxNonZero(hybridLayout.HeadCountKv, numAttentionHeads);
+            intermediateSize = MaxNonZero(hybridLayout.FeedForwardLength, 0);
+        }
+        else
+        {
+            intermediateSize = (int)metadata.GetUInt32($"{arch}.feed_forward_length");
+            numKvHeads = (int)metadata.GetUInt32OrDefault($"{arch}.attention.head_count_kv", (uint)numAttentionHeads);
+        }
 
         // Head dimension: prefer explicit GGUF key (needed for models like Qwen3 where
         // head_dim != hidden_size / num_heads), fall back to derived value.
@@ -47,6 +67,7 @@ public static class GgufModelConfigExtractor
             chatTemplate = null;
 
         RoPEConfig? ropeConfig = ExtractRoPEConfig(metadata, arch, headDim, architecture);
+        MambaSsmConfig? ssmConfig = TryExtractSsmConfig(metadata, arch);
 
         return new ModelConfig
         {
@@ -60,11 +81,89 @@ public static class GgufModelConfigExtractor
             HeadDim = headDim,
             MaxSequenceLength = maxSeqLen,
             NormEpsilon = normEps,
+            ActivationFunction = architecture == Architecture.NemotronH
+                ? ActivationFunction.ReluSquared
+                : ActivationFunction.SiLU,
             RoPEConfig = ropeConfig,
             PositionEncodingType = ropeConfig.HasValue ? PositionEncodingType.RoPE : PositionEncodingType.None,
             SlidingWindowSize = slidingWindowSize,
+            HybridLayout = hybridLayout,
+            SsmConfig = ssmConfig,
             ChatTemplate = chatTemplate,
         };
+    }
+
+    private static HybridLayerLayout? TryExtractHybridLayout(GgufMetadata metadata, string arch, int numLayers)
+    {
+        string kvKey = $"{arch}.attention.head_count_kv";
+        string ffKey = $"{arch}.feed_forward_length";
+
+        if (!metadata.TryGetValue(kvKey, out var kvEntry) || kvEntry.Type != GgufValueType.Array) return null;
+        if (!metadata.TryGetValue(ffKey, out var ffEntry) || ffEntry.Type != GgufValueType.Array) return null;
+
+        // Both keys are per-layer Int32 arrays in hybrid models (Nemotron-H).
+        int[] headCountKv = metadata.GetInt32Array(kvKey);
+        int[] feedForwardLength = metadata.GetInt32Array(ffKey);
+
+        if (headCountKv.Length != numLayers)
+            throw new InvalidDataException(
+                $"'{kvKey}' array length {headCountKv.Length} does not match block_count {numLayers}.");
+        if (feedForwardLength.Length != numLayers)
+            throw new InvalidDataException(
+                $"'{ffKey}' array length {feedForwardLength.Length} does not match block_count {numLayers}.");
+
+        var kinds = new HybridLayerKind[numLayers];
+        for (int i = 0; i < numLayers; i++)
+        {
+            bool hasAttn = headCountKv[i] > 0;
+            bool hasFfn = feedForwardLength[i] > 0;
+            kinds[i] = (hasAttn, hasFfn) switch
+            {
+                (true, false) => HybridLayerKind.Attention,
+                (false, true) => HybridLayerKind.Ffn,
+                (false, false) => HybridLayerKind.Ssm,
+                (true, true) => throw new InvalidDataException(
+                    $"Layer {i} has both non-zero head_count_kv and feed_forward_length; hybrid block kinds must be exclusive.")
+            };
+        }
+
+        return new HybridLayerLayout
+        {
+            LayerKind = kinds,
+            HeadCountKv = headCountKv,
+            FeedForwardLength = feedForwardLength,
+        };
+    }
+
+    private static MambaSsmConfig? TryExtractSsmConfig(GgufMetadata metadata, string arch)
+    {
+        string innerKey = $"{arch}.ssm.inner_size";
+        if (!metadata.ContainsKey(innerKey)) return null;
+
+        int dConv = (int)metadata.GetUInt32($"{arch}.ssm.conv_kernel");
+        int dInner = (int)metadata.GetUInt32(innerKey);
+        int dState = (int)metadata.GetUInt32($"{arch}.ssm.state_size");
+        int nGroup = (int)metadata.GetUInt32OrDefault($"{arch}.ssm.group_count", 1);
+        int nHead = (int)metadata.GetUInt32($"{arch}.ssm.time_step_rank");
+
+        if (dInner % nHead != 0)
+            throw new InvalidDataException(
+                $"SSM inner_size {dInner} not divisible by time_step_rank {nHead}.");
+        if (dInner % nGroup != 0)
+            throw new InvalidDataException(
+                $"SSM inner_size {dInner} not divisible by group_count {nGroup}.");
+        if (nHead % nGroup != 0)
+            throw new InvalidDataException(
+                $"SSM time_step_rank {nHead} not divisible by group_count {nGroup}.");
+
+        return new MambaSsmConfig(dConv, dInner, dState, nGroup, nHead);
+    }
+
+    private static int MaxNonZero(int[] values, int fallback)
+    {
+        int max = 0;
+        foreach (int v in values) if (v > max) max = v;
+        return max > 0 ? max : fallback;
     }
 
     private static Architecture ParseArchitecture(string archString)
@@ -76,6 +175,7 @@ public static class GgufModelConfigExtractor
             "phi" or "phi2" or "phi3" => Architecture.Phi,
             "qwen" or "qwen2" or "qwen3" => Architecture.Qwen,
             "deepseek" or "deepseek2" => Architecture.DeepSeek,
+            "nemotron_h" => Architecture.NemotronH,
             _ => throw new InvalidDataException($"Unsupported GGUF architecture: '{archString}'.")
         };
     }

@@ -27,13 +27,21 @@ public static unsafe class FusedOps
     /// Uses tiled <see cref="TensorPrimitives.Sigmoid"/> for exact precision, with the
     /// sigmoid intermediate staying in L1 via a small stack buffer. Eliminates one full
     /// memory pass over intermediateSize compared to separate SiLU + Multiply calls.
+    /// Safe to call when <paramref name="up"/> aliases <paramref name="result"/>
+    /// (the common in-place pattern <c>SwiGLU(gate, y, y)</c>).
     /// </summary>
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static void SwiGLU(ReadOnlySpan<float> gate, ReadOnlySpan<float> up, Span<float> result)
     {
         int length = gate.Length;
+
+        // If up aliases result, the second Multiply below would compute SiLU(gate)² (reading
+        // and writing the same buffer) instead of SiLU(gate) * up. Snapshot up per tile.
+        bool upAliases = up.Overlaps(result);
+
         Span<float> sigBuf = stackalloc float[SwiGLUTileSize];
+        Span<float> upBuf = stackalloc float[SwiGLUTileSize];
 
         int i = 0;
         for (; i + SwiGLUTileSize <= length; i += SwiGLUTileSize)
@@ -42,9 +50,12 @@ public static unsafe class FusedOps
             var uTile = up.Slice(i, SwiGLUTileSize);
             var rTile = result.Slice(i, SwiGLUTileSize);
 
+            if (upAliases) uTile.CopyTo(upBuf);
+            ReadOnlySpan<float> uReadable = upAliases ? (ReadOnlySpan<float>)upBuf : uTile;
+
             TensorPrimitives.Sigmoid(gTile, sigBuf);
             TensorPrimitives.Multiply(gTile, sigBuf, rTile);
-            TensorPrimitives.Multiply((ReadOnlySpan<float>)rTile, uTile, rTile);
+            TensorPrimitives.Multiply((ReadOnlySpan<float>)rTile, uReadable, rTile);
         }
 
         // Tail
@@ -55,10 +66,14 @@ public static unsafe class FusedOps
             var uTile = up.Slice(i, remaining);
             var rTile = result.Slice(i, remaining);
             var sigTail = sigBuf.Slice(0, remaining);
+            var upTail = upBuf.Slice(0, remaining);
+
+            if (upAliases) uTile.CopyTo(upTail);
+            ReadOnlySpan<float> uReadable = upAliases ? (ReadOnlySpan<float>)upTail : uTile;
 
             TensorPrimitives.Sigmoid(gTile, sigTail);
             TensorPrimitives.Multiply(gTile, sigTail, rTile);
-            TensorPrimitives.Multiply((ReadOnlySpan<float>)rTile, uTile, rTile);
+            TensorPrimitives.Multiply((ReadOnlySpan<float>)rTile, uReadable, rTile);
         }
     }
 

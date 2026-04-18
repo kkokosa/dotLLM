@@ -63,6 +63,18 @@ public record ModelConfig
     /// <summary>MLA configuration. Only set for DeepSeek-style MLA attention.</summary>
     public MlaConfig? MlaConfig { get; init; }
 
+    /// <summary>
+    /// Per-layer sub-layer layout for hybrid SSM+Transformer models (e.g. Nemotron-H).
+    /// Null for pure-Transformer architectures.
+    /// </summary>
+    public HybridLayerLayout? HybridLayout { get; init; }
+
+    /// <summary>
+    /// Mamba2 SSM configuration shared by all SSM layers in a hybrid model.
+    /// Null when the model has no SSM layers.
+    /// </summary>
+    public MambaSsmConfig? SsmConfig { get; init; }
+
     /// <summary>Jinja2 chat template from model metadata. Null if not present.</summary>
     public string? ChatTemplate { get; init; }
 }

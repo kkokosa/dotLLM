@@ -199,8 +199,15 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             int gpuLayers = ResolveGpuLayers(settings, config);
             if (gpuLayers <= 0)
             {
-                model = TransformerModel.LoadFromGguf(gguf, config,
-                    new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly));
+                if (config.Architecture == Architecture.NemotronH)
+                {
+                    model = NemotronHTransformerModel.LoadFromGguf(gguf, config);
+                }
+                else
+                {
+                    model = TransformerModel.LoadFromGguf(gguf, config,
+                        new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly));
+                }
             }
             else if (gpuLayers >= config.NumLayers)
             {

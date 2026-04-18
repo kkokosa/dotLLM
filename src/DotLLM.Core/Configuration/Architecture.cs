@@ -18,5 +18,11 @@ public enum Architecture
     Qwen,
 
     /// <summary>DeepSeek family.</summary>
-    DeepSeek
+    DeepSeek,
+
+    /// <summary>
+    /// NVIDIA Nemotron-H — hybrid Mamba2 SSM + Transformer attention/MLP per layer.
+    /// Used by the Nemotron-3 family. GGUF architecture string: <c>nemotron_h</c>.
+    /// </summary>
+    NemotronH
 }
