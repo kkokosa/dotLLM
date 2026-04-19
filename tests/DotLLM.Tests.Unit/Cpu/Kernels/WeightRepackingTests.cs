@@ -218,9 +218,15 @@ public sealed unsafe class WeightRepackingTests
             MatMul.ComputeRowsQ8_0Interleaved((byte*)repacked.Ptr, xQ8, intResult,
                 repacked.FullGroupCount, repacked.TailRows, blockCount);
 
-            // Compare — near-equal (FP32 accumulation order may differ across SIMD paths)
+            // Compare with explicit absolute tolerance because different SIMD paths can
+            // land on opposite sides of a decimal rounding midpoint on some platforms.
             for (int i = 0; i < m; i++)
-                Assert.Equal(refResult[i], intResult[i], precision: 3); // ~1e-3 tolerance (FP32 accumulation order differs across SIMD paths)
+            {
+                float expected = refResult[i];
+                float actual = intResult[i];
+                Assert.True(Math.Abs(expected - actual) <= 1e-3f,
+                    $"Row {i}: expected {expected}, actual {actual}, diff {Math.Abs(expected - actual)}");
+            }
         }
         finally
         {
