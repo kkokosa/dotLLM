@@ -11,10 +11,6 @@ namespace DotLLM.Cpu.Kernels;
 /// </summary>
 public static unsafe partial class KvQuantize
 {
-    private static readonly Vector256<byte> Q4_0InterleaveMask = Vector256.Create(
-        (byte)0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23,
-        8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
-
     /// <summary>Q8_0 block: 2 bytes (Half scale) + 32 bytes (int8 values) = 34 bytes.</summary>
     public const int Q8_0BlockBytes = 34;
 
@@ -315,9 +311,10 @@ public static unsafe partial class KvQuantize
             Vector128<byte> hiNibbles = Vector128.ShiftRightLogical(packed.AsUInt16(), 4).AsByte() & loMask;
 
             ref float blockDstRef = ref Unsafe.AsRef<float>(blockDst);
-            Vector256<byte> interleavedBytes = Vector256.ShuffleNative(
-                Vector256.Create(loNibbles, hiNibbles),
-                Q4_0InterleaveMask);
+            Vector256<byte> combinedNibbles = Vector256.Create(loNibbles, hiNibbles);
+            Vector256<ushort> lo16 = Vector256.WidenLower(combinedNibbles);
+            Vector256<ushort> hi16 = Vector256.WidenUpper(combinedNibbles);
+            Vector256<byte> interleavedBytes = (lo16 | Vector256.ShiftLeft(hi16, 8)).AsByte();
             Vector256<sbyte> interleaved = interleavedBytes.AsSByte();
             Vector256<short> ints16Lo = Vector256.WidenLower(interleaved);
             Vector256<short> ints16Hi = Vector256.WidenUpper(interleaved);
