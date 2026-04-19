@@ -150,7 +150,7 @@ public unsafe class KernelBenchmarks
     {
         if (!Avx2.IsSupported) return 0f;
         int blockCount = K / Q8_0GroupSize;
-        return MatMul.VecDotQ8_0Avx2((byte*)_weightsQ8, (byte*)_xQ8, blockCount);
+        return MatMul.VecDotQ8_0Vector256((byte*)_weightsQ8, (byte*)_xQ8, blockCount);
     }
 
     [Benchmark]

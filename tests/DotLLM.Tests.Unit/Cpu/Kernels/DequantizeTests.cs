@@ -1,5 +1,5 @@
 using System.Runtime.InteropServices;
-using System.Runtime.Intrinsics.X86;
+using System.Runtime.Intrinsics;
 using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Kernels;
 using Xunit;
@@ -217,9 +217,9 @@ public sealed unsafe class DequantizeTests
 
             Dequantize.DequantizeQ8_0Scalar(ptr, totalElements, scalarDest);
 
-            if (Avx2.IsSupported)
+            if (Vector256.IsHardwareAccelerated)
             {
-                Dequantize.DequantizeQ8_0Avx2(ptr, totalElements, simdDest);
+                Dequantize.DequantizeQ8_0Vector256(ptr, totalElements, simdDest);
 
                 for (int i = 0; i < totalElements; i++)
                     Assert.Equal(scalarDest[i], simdDest[i], 1e-5f);
@@ -304,15 +304,15 @@ public sealed unsafe class DequantizeTests
 
             Dequantize.DequantizeQ5_0Scalar(ptr, totalElements, scalarDest);
 
-            if (Avx2.IsSupported)
+            if (Vector256.IsHardwareAccelerated)
             {
-                Dequantize.DequantizeQ5_0Avx2(ptr, totalElements, simdDest);
+                Dequantize.DequantizeQ5_0Vector256(ptr, totalElements, simdDest);
 
                 for (int i = 0; i < totalElements; i++)
                     Assert.Equal(scalarDest[i], simdDest[i], 1e-5f);
             }
 
-            // Also verify the public dispatch path matches scalar (exercises the Avx2.IsSupported branch).
+            // Also verify the public dispatch path matches scalar (exercises the vectorized dispatch branch).
             float[] dispatchDest = new float[totalElements];
             Dequantize.ToFloat32(ptr, totalElements, QuantizationType.Q5_0, dispatchDest);
 

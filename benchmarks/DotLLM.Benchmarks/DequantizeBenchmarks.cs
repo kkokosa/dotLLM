@@ -109,7 +109,7 @@ public unsafe class DequantizeBenchmarks
 
     [Benchmark]
     public void Q5_0_Avx2()
-        => Dequantize.DequantizeQ5_0Avx2(_q5_0Src, ElementCount, _dest);
+        => Dequantize.DequantizeQ5_0Vector256(_q5_0Src, ElementCount, _dest);
 
     [Benchmark]
     public void F32_Passthrough()

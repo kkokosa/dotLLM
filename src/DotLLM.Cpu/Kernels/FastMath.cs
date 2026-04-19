@@ -2,7 +2,6 @@ using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 
 namespace DotLLM.Cpu.Kernels;
 
@@ -67,11 +66,11 @@ public static class FastMath
         ref float src = ref MemoryMarshal.GetReference(input);
         ref float dst = ref MemoryMarshal.GetReference(output);
 
-        if (Avx512F.IsSupported)
-            return ExpSumAndStoreAvx512(ref src, ref dst, length, offset);
+        if (Vector512.IsHardwareAccelerated)
+            return ExpSumAndStoreVector512(ref src, ref dst, length, offset);
 
-        if (Avx2.IsSupported)
-            return ExpSumAndStoreAvx2(ref src, ref dst, length, offset);
+        if (Vector256.IsHardwareAccelerated)
+            return ExpSumAndStoreVector256(ref src, ref dst, length, offset);
 
         return ExpSumAndStoreScalar(ref src, ref dst, length, offset);
     }
@@ -91,10 +90,10 @@ public static class FastMath
         TensorPrimitives.Multiply(result, 1.0f / sum, result);
     }
 
-    // ──────────────────── AVX-512 path ────────────────────
+    // ──────────────────── Vector512 path ────────────────────
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float ExpSumAndStoreAvx512(ref float src, ref float dst, int length, float offset)
+    private static float ExpSumAndStoreVector512(ref float src, ref float dst, int length, float offset)
     {
         var offsetVec = Vector512.Create(offset);
         var c0Vec = Vector512.Create(C0);
@@ -108,13 +107,12 @@ public static class FastMath
         for (; i < vecLen; i += 16)
         {
             var x = Vector512.LoadUnsafe(ref src, i);
-            var shifted = Avx512F.Add(x, offsetVec);
-            shifted = Avx512F.Max(shifted, minVec);
-            var y = Avx512F.FusedMultiplyAdd(shifted, c0Vec, c1Vec);
-            var bits = Avx512F.ConvertToVector512Int32WithTruncation(y);
+            var shifted = Vector512.MaxNative(Vector512.Add(x, offsetVec), minVec);
+            var y = Vector512.FusedMultiplyAdd(shifted, c0Vec, c1Vec);
+            var bits = Vector512.ConvertToInt32Native(y);
             var exp = bits.AsSingle();
             Vector512.StoreUnsafe(exp, ref dst, i);
-            sumVec = Avx512F.Add(sumVec, exp);
+            sumVec = Vector512.Add(sumVec, exp);
         }
 
         float sum = Vector512.Sum(sumVec);
@@ -133,10 +131,10 @@ public static class FastMath
         return sum;
     }
 
-    // ──────────────────── AVX2 path ────────────────────
+    // ──────────────────── Vector256 path ────────────────────
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float ExpSumAndStoreAvx2(ref float src, ref float dst, int length, float offset)
+    private static float ExpSumAndStoreVector256(ref float src, ref float dst, int length, float offset)
     {
         var offsetVec = Vector256.Create(offset);
         var c0Vec = Vector256.Create(C0);
@@ -150,17 +148,12 @@ public static class FastMath
         for (; i < vecLen; i += 8)
         {
             var x = Vector256.LoadUnsafe(ref src, i);
-            var shifted = Avx.Add(x, offsetVec);
-            shifted = Avx.Max(shifted, minVec);
-            Vector256<float> y;
-            if (Fma.IsSupported)
-                y = Fma.MultiplyAdd(shifted, c0Vec, c1Vec);
-            else
-                y = Avx.Add(Avx.Multiply(shifted, c0Vec), c1Vec);
-            var bits = Avx.ConvertToVector256Int32WithTruncation(y);
+            var shifted = Vector256.MaxNative(Vector256.Add(x, offsetVec), minVec);
+            var y = Vector256.FusedMultiplyAdd(shifted, c0Vec, c1Vec);
+            var bits = Vector256.ConvertToInt32Native(y);
             var exp = bits.AsSingle();
             Vector256.StoreUnsafe(exp, ref dst, i);
-            sumVec = Avx.Add(sumVec, exp);
+            sumVec = Vector256.Add(sumVec, exp);
         }
 
         float sum = Vector256.Sum(sumVec);

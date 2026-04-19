@@ -38,6 +38,10 @@
     <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Using Include="DotLLM.Core.Tensors.ITensor" Alias="ITensor" />
+  </ItemGroup>
+
   <ItemGroup Condition="'$(IsPackable)' != 'false'">
     <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Condition="Exists('$(MSBuildThisFileDirectory)README.md')" />
     <None Include="$(MSBuildThisFileDirectory)docs\icon.png" Pack="true" PackagePath="\" Condition="Exists('$(MSBuildThisFileDirectory)docs\icon.png')" />

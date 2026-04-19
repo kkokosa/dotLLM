@@ -1,4 +1,4 @@
-using System.Runtime.Intrinsics.X86;
+using System.Runtime.Intrinsics;
 using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Kernels;
 using DotLLM.Models.Gguf;
@@ -39,8 +39,8 @@ public sealed class DequantizeIntegrationTests
     [Fact]
     public void Q8_0_ScalarMatchesSimd_RealTensorData()
     {
-        if (!Avx2.IsSupported)
-            return; // Nothing to compare on non-AVX2 machines.
+        if (!Vector256.IsHardwareAccelerated)
+            return; // Nothing to compare when portable vector acceleration is unavailable.
 
         using var gguf = GgufFile.Open(_fixture.FilePath);
 
@@ -55,7 +55,7 @@ public sealed class DequantizeIntegrationTests
         float[] avx2Dest = new float[elementCount];
 
         Dequantize.DequantizeQ8_0Scalar(tensorPtr, elementCount, scalarDest);
-        Dequantize.DequantizeQ8_0Avx2(tensorPtr, elementCount, avx2Dest);
+        Dequantize.DequantizeQ8_0Vector256(tensorPtr, elementCount, avx2Dest);
 
         for (int i = 0; i < elementCount; i++)
         {

@@ -74,7 +74,7 @@ public sealed unsafe class MatMulKQuantTests
         fixed (byte* dScalar = destScalar, dAvx2 = destAvx2)
         {
             MatMul.QuantizeF32ToQ8_KScalar(sp, dScalar, k);
-            MatMul.QuantizeF32ToQ8_KAvx2(sp, dAvx2, k);
+            MatMul.QuantizeF32ToQ8_KVector256(sp, dAvx2, k);
 
             // Scales must match exactly
             for (int b = 0; b < k / Q8_K_GroupSize; b++)
@@ -166,7 +166,7 @@ public sealed unsafe class MatMulKQuantTests
         try
         {
             float scalar = MatMul.VecDotQ4_K_Q8_KScalar((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
-            float avx2 = MatMul.VecDotQ4_K_Q8_KAvx2((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
+            float avx2 = MatMul.VecDotQ4_K_Q8_KVector256((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
 
             Assert.Equal(scalar, avx2, MathF.Abs(scalar) * 0.01f + 0.1f);
         }
@@ -232,7 +232,7 @@ public sealed unsafe class MatMulKQuantTests
                 Unsafe.WriteUnaligned((byte*)qkPtr + b * Q6_K_BlockBytes + 208, (Half)0.01f);
 
             float scalar = MatMul.VecDotQ6_K_Q8_KScalar((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
-            float avx2 = MatMul.VecDotQ6_K_Q8_KAvx2((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
+            float avx2 = MatMul.VecDotQ6_K_Q8_KVector256((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
 
             Assert.Equal(scalar, avx2, MathF.Abs(scalar) * 0.01f + 0.1f);
         }
@@ -293,7 +293,7 @@ public sealed unsafe class MatMulKQuantTests
         try
         {
             float scalar = MatMul.VecDotQ5_K_Q8_KScalar((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
-            float avx2 = MatMul.VecDotQ5_K_Q8_KAvx2((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
+            float avx2 = MatMul.VecDotQ5_K_Q8_KVector256((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
 
             Assert.Equal(scalar, avx2, MathF.Abs(scalar) * 0.01f + 0.1f);
         }

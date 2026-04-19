@@ -2,7 +2,6 @@ using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
 
 namespace DotLLM.Cpu.Kernels;
@@ -25,11 +24,15 @@ public static class RoPE
     private const int StackAllocThreshold = 8192;
 
     /// <summary>
-    /// AVX2 deinterleave permutation indices: lower lane [0,2,4,6] gathers evens,
-    /// upper lane [1,3,5,7] gathers odds. Stored as RVA static data to avoid
-    /// re-materialization at each inlined call site.
+    /// Deinterleave permutation indices: lower lane [0,2,4,6] gathers evens,
+    /// upper lane [1,3,5,7] gathers odds.
     /// </summary>
-    private static ReadOnlySpan<int> DeinterleaveIndices => [0, 2, 4, 6, 1, 3, 5, 7];
+    private static readonly Vector256<int> DeinterleaveIndexVector = Vector256.Create(0, 2, 4, 6, 1, 3, 5, 7);
+
+    /// <summary>
+    /// Interleave permutation indices: [even0, odd0, even1, odd1, ...].
+    /// </summary>
+    private static readonly Vector256<int> InterleaveIndexVector = Vector256.Create(0, 4, 1, 5, 2, 6, 3, 7);
 
     /// <summary>
     /// Pre-computes cos/sin frequency tables for RoPE. Tables are indexed as
@@ -123,7 +126,7 @@ public static class RoPE
         int halfDim = headDim / 2;
         int i = 0;
 
-        if (Avx2.IsSupported && halfDim >= 4)
+        if (Vector256.IsHardwareAccelerated && halfDim >= 4)
         {
             ref float vecRef = ref MemoryMarshal.GetReference(vec);
             ref float cosRef = ref Unsafe.AsRef(in MemoryMarshal.GetReference(cos));
@@ -131,8 +134,6 @@ public static class RoPE
 
             // Process 4 dimension pairs (8 floats) per iteration.
             // Deinterleave even/odd via a single permute, apply rotation, re-interleave.
-            var deinterleaveIdx = Vector256.Create(DeinterleaveIndices);
-
             for (; i + 4 <= halfDim; i += 4)
             {
                 int vecOffset = i * 2;
@@ -141,35 +142,23 @@ public static class RoPE
                 var interleaved = Vector256.LoadUnsafe(ref Unsafe.Add(ref vecRef, vecOffset));
 
                 // Single permute — extract lower (evens) and upper (odds) from same result.
-                var permuted = Avx2.PermuteVar8x32(interleaved.AsSingle(), deinterleaveIdx);
+                var permuted = Vector256.ShuffleNative(interleaved, DeinterleaveIndexVector);
                 var even = permuted.GetLower(); // [e0, e1, e2, e3]
                 var odd  = permuted.GetUpper(); // [o0, o1, o2, o3]
 
                 // Load cos/sin for these 4 pairs
                 var cosVec = Vector128.LoadUnsafe(ref Unsafe.Add(ref cosRef, i));
                 var sinVec = Vector128.LoadUnsafe(ref Unsafe.Add(ref sinRef, i));
+                var negSinVec = -sinVec;
 
-                // Rotation: even' = even*cos - odd*sin = -(odd*sin) + even*cos
-                //           odd'  = even*sin + odd*cos
-                Vector128<float> newEven, newOdd;
-                if (Fma.IsSupported)
-                {
-                    // MultiplyAddNegated(a, b, c) = -(a*b) + c = c - a*b
-                    // even' = -(odd * sin) + (even * cos)
-                    newEven = Fma.MultiplyAddNegated(odd, sinVec, even * cosVec);
-                    // odd'  = (even * sin) + (odd * cos)
-                    newOdd  = Fma.MultiplyAdd(even, sinVec, odd * cosVec);
-                }
-                else
-                {
-                    newEven = even * cosVec - odd * sinVec;
-                    newOdd  = even * sinVec + odd * cosVec;
-                }
+                // Rotation: even' = even*cos - odd*sin, odd' = even*sin + odd*cos.
+                var newEven = Vector128.FusedMultiplyAdd(odd, negSinVec, even * cosVec);
+                var newOdd = Vector128.FusedMultiplyAdd(even, sinVec, odd * cosVec);
 
                 // Re-interleave: [ne0, no0, ne1, no1, ne2, no2, ne3, no3]
-                var lo = Sse.UnpackLow(newEven, newOdd);   // [ne0, no0, ne1, no1]
-                var hi = Sse.UnpackHigh(newEven, newOdd);  // [ne2, no2, ne3, no3]
-                var result = Vector256.Create(lo, hi);
+                var result = Vector256.ShuffleNative(
+                    Vector256.Create(newEven, newOdd),
+                    InterleaveIndexVector);
 
                 result.StoreUnsafe(ref Unsafe.Add(ref vecRef, vecOffset));
             }
@@ -214,7 +203,7 @@ public static class RoPE
         int halfDim = headDim / 2;
         int i = 0;
 
-        if (Avx2.IsSupported && halfDim >= 8)
+        if (Vector256.IsHardwareAccelerated && halfDim >= 8)
         {
             ref float vecRef = ref MemoryMarshal.GetReference(vec);
             ref float cosRef = ref Unsafe.AsRef(in MemoryMarshal.GetReference(cos));
@@ -229,17 +218,8 @@ public static class RoPE
                 var cosVec = Vector256.LoadUnsafe(ref Unsafe.Add(ref cosRef, i));
                 var sinVec = Vector256.LoadUnsafe(ref Unsafe.Add(ref sinRef, i));
 
-                Vector256<float> newEven, newOdd;
-                if (Fma.IsSupported)
-                {
-                    newEven = Fma.MultiplyAddNegated(odd, sinVec, even * cosVec);
-                    newOdd  = Fma.MultiplyAdd(even, sinVec, odd * cosVec);
-                }
-                else
-                {
-                    newEven = even * cosVec - odd * sinVec;
-                    newOdd  = even * sinVec + odd * cosVec;
-                }
+                var newEven = Vector256.FusedMultiplyAdd(-odd, sinVec, even * cosVec);
+                var newOdd = Vector256.FusedMultiplyAdd(even, sinVec, odd * cosVec);
 
                 newEven.StoreUnsafe(ref Unsafe.Add(ref vecRef, i));
                 newOdd.StoreUnsafe(ref Unsafe.Add(ref vecRef, i + halfDim));

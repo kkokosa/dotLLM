@@ -88,7 +88,7 @@ public sealed unsafe class MatMulQ8_1Tests
                 src[i] = (rng.NextSingle() - 0.5f) * 10f;
 
             MatMul.QuantizeF32ToQ8_1Scalar(src, destScalar, elementCount);
-            MatMul.QuantizeF32ToQ8_1Avx2(src, destAvx2, elementCount);
+            MatMul.QuantizeF32ToQ8_1Vector256(src, destAvx2, elementCount);
 
             for (int b = 0; b < blockCount; b++)
             {
@@ -182,7 +182,7 @@ public sealed unsafe class MatMulQ8_1Tests
         try
         {
             float scalar = MatMul.VecDotQ5_0Q8_1Scalar((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
-            float avx2 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
+            float avx2 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
 
             Assert.Equal(scalar, avx2, MathF.Abs(scalar) * 1e-5f + 1e-4f);
         }
@@ -210,13 +210,13 @@ public sealed unsafe class MatMulQ8_1Tests
         nint q8 = AllocRandomQ8_1Blocks(blockCount, rng);
         try
         {
-            float r0 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)w0, (byte*)q8, blockCount);
-            float r1 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)w1, (byte*)q8, blockCount);
-            float r2 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)w2, (byte*)q8, blockCount);
-            float r3 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)w3, (byte*)q8, blockCount);
+            float r0 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)w0, (byte*)q8, blockCount);
+            float r1 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)w1, (byte*)q8, blockCount);
+            float r2 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)w2, (byte*)q8, blockCount);
+            float r3 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)w3, (byte*)q8, blockCount);
 
             float* results = stackalloc float[4];
-            MatMul.VecDotQ5_0Q8_1Avx2_4Rows((byte*)w0, (byte*)w1, (byte*)w2, (byte*)w3,
+            MatMul.VecDotQ5_0Q8_1Vector256_4Rows((byte*)w0, (byte*)w1, (byte*)w2, (byte*)w3,
                 (byte*)q8, blockCount, results);
 
             // Allow float rounding tolerance: single-row uses 2-block unrolling, 4-row does not
@@ -252,7 +252,7 @@ public sealed unsafe class MatMulQ8_1Tests
         try
         {
             float scalar = MatMul.VecDotQ5_0Q8_1Scalar((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
-            float avx2 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
+            float avx2 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
 
             Assert.Equal(scalar, avx2, MathF.Abs(scalar) * 1e-5f + 1e-4f);
         }

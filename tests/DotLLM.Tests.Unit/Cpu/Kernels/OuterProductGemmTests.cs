@@ -126,7 +126,7 @@ public sealed unsafe class OuterProductGemmTests
                 weights, xPtrs[0], xPtrs[1], xPtrs[2],
                 cScalar, blockCount, m);
 
-            MatMul.OuterProductQ8_0Avx2_4x3(
+            MatMul.OuterProductQ8_0Vector256_4x3(
                 weights, xPtrs[0], xPtrs[1], xPtrs[2],
                 cAvx2, blockCount, m);
 

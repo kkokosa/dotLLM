@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Runtime.Intrinsics.X86;
+using System.Runtime.Intrinsics;
 using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Kernels;
 using Xunit;
@@ -141,7 +141,7 @@ public sealed unsafe class DequantizeKQuantTests
     [Fact]
     public void Q6_K_ScalarMatchesAvx2_RandomBlocks()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int blockCount = 8;
         const int totalElements = blockCount * KQuantGroupSize;
@@ -163,7 +163,7 @@ public sealed unsafe class DequantizeKQuantTests
             float[] avx2Dest = new float[totalElements];
 
             Dequantize.DequantizeQ6_KScalar(ptr, totalElements, scalarDest);
-            Dequantize.DequantizeQ6_KAvx2(ptr, totalElements, avx2Dest);
+            Dequantize.DequantizeQ6_KVector256(ptr, totalElements, avx2Dest);
 
             for (int i = 0; i < totalElements; i++)
                 Assert.Equal(scalarDest[i], avx2Dest[i], 1e-4f);
@@ -240,7 +240,7 @@ public sealed unsafe class DequantizeKQuantTests
     [Fact]
     public void Q4_K_ScalarMatchesAvx2_RandomBlocks()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int blockCount = 8;
         const int totalElements = blockCount * KQuantGroupSize;
@@ -262,7 +262,7 @@ public sealed unsafe class DequantizeKQuantTests
             float[] avx2Dest = new float[totalElements];
 
             Dequantize.DequantizeQ4_KScalar(ptr, totalElements, scalarDest);
-            Dequantize.DequantizeQ4_KAvx2(ptr, totalElements, avx2Dest);
+            Dequantize.DequantizeQ4_KVector256(ptr, totalElements, avx2Dest);
 
             for (int i = 0; i < totalElements; i++)
                 Assert.Equal(scalarDest[i], avx2Dest[i], 1e-4f);
@@ -315,7 +315,7 @@ public sealed unsafe class DequantizeKQuantTests
     [Fact]
     public void Q5_K_ScalarMatchesAvx2_RandomBlocks()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int blockCount = 8;
         const int totalElements = blockCount * KQuantGroupSize;
@@ -337,7 +337,7 @@ public sealed unsafe class DequantizeKQuantTests
             float[] avx2Dest = new float[totalElements];
 
             Dequantize.DequantizeQ5_KScalar(ptr, totalElements, scalarDest);
-            Dequantize.DequantizeQ5_KAvx2(ptr, totalElements, avx2Dest);
+            Dequantize.DequantizeQ5_KVector256(ptr, totalElements, avx2Dest);
 
             for (int i = 0; i < totalElements; i++)
                 Assert.Equal(scalarDest[i], avx2Dest[i], 1e-4f);

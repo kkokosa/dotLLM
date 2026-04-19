@@ -2,7 +2,6 @@ using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
 
 namespace DotLLM.Cpu.Kernels;
@@ -113,9 +112,9 @@ public static unsafe partial class Dequantize
                 $"Q8_0 element count must be a multiple of {Q8_0GroupSize}, got {elementCount}",
                 nameof(elementCount));
 
-        if (Avx2.IsSupported)
+        if (Vector256.IsHardwareAccelerated)
         {
-            DequantizeQ8_0Avx2(src, elementCount, dest);
+            DequantizeQ8_0Vector256(src, elementCount, dest);
         }
         else
         {
@@ -159,9 +158,9 @@ public static unsafe partial class Dequantize
                 $"Q5_0 element count must be a multiple of {Q5_0GroupSize}, got {elementCount}",
                 nameof(elementCount));
 
-        if (Avx2.IsSupported)
+        if (Vector256.IsHardwareAccelerated)
         {
-            DequantizeQ5_0Avx2(src, elementCount, dest);
+            DequantizeQ5_0Vector256(src, elementCount, dest);
         }
         else
         {
@@ -207,16 +206,16 @@ public static unsafe partial class Dequantize
         }
     }
 
-    // ──────────────────── Q5_0 AVX2 ────────────────────
+    // ──────────────────── Q5_0 Vector256 ────────────────────
 
     /// <summary>
-    /// AVX2-accelerated Q5_0 dequantization. Processes one 32-element block per iteration:
+    /// Vector256-accelerated Q5_0 dequantization. Processes one 32-element block per iteration:
     /// unpacks low/high nibbles into a 256-bit vector, ORs in the 5th bit from <c>qh</c> via
     /// <see cref="MatMul.ExtractQ5HighBits"/>, subtracts 16 to recover the signed value, then
     /// widens sbyte→short→int→float and multiplies by the broadcast scale.
     /// </summary>
     [SkipLocalsInit]
-    internal static void DequantizeQ5_0Avx2(nint src, long elementCount, Span<float> dest)
+    internal static void DequantizeQ5_0Vector256(nint src, long elementCount, Span<float> dest)
     {
         long blockCount = elementCount / Q5_0GroupSize;
         byte* blockBase = (byte*)src;
@@ -239,35 +238,31 @@ public static unsafe partial class Dequantize
                 Vector128<byte> qsRaw = Unsafe.ReadUnaligned<Vector128<byte>>(blockBase + 6);
 
                 // Unpack nibbles: low 4 bits → elements 0..15, high 4 bits → elements 16..31.
-                Vector128<byte> lo128 = Sse2.And(qsRaw, nibbleMask);
-                Vector128<byte> hi128 = Sse2.And(
-                    Sse2.ShiftRightLogical(qsRaw.AsUInt16(), 4).AsByte(),
+                Vector128<byte> lo128 = Vector128.BitwiseAnd(qsRaw, nibbleMask);
+                Vector128<byte> hi128 = Vector128.BitwiseAnd(
+                    Vector128.ShiftRightLogical(qsRaw.AsUInt16(), 4).AsByte(),
                     nibbleMask);
 
                 // Combine halves, OR in the 5th bit (0x10 per set bit), subtract 16 to center.
-                Vector256<byte> q5vals = Avx2.Or(
+                Vector256<byte> q5vals = Vector256.BitwiseOr(
                     Vector256.Create(lo128, hi128),
                     MatMul.ExtractQ5HighBits(qh));
-                Vector256<sbyte> centered = Avx2.Subtract(q5vals.AsSByte(), sixteen);
+                Vector256<sbyte> centered = Vector256.Subtract(q5vals.AsSByte(), sixteen);
 
                 // Widen sbyte → short → int and convert to float × scale.
-                Vector256<short> shortsLo = Avx2.ConvertToVector256Int16(centered.GetLower());
-                Vector256<short> shortsHi = Avx2.ConvertToVector256Int16(centered.GetUpper());
+                Vector256<short> shortsLo = Vector256.WidenLower(centered);
+                Vector256<short> shortsHi = Vector256.WidenUpper(centered);
 
-                Vector256<int> ints0 = Avx2.ConvertToVector256Int32(shortsLo.GetLower());
-                Vector256<int> ints1 = Avx2.ConvertToVector256Int32(shortsLo.GetUpper());
-                Vector256<int> ints2 = Avx2.ConvertToVector256Int32(shortsHi.GetLower());
-                Vector256<int> ints3 = Avx2.ConvertToVector256Int32(shortsHi.GetUpper());
+                Vector256<int> ints0 = Vector256.WidenLower(shortsLo);
+                Vector256<int> ints1 = Vector256.WidenUpper(shortsLo);
+                Vector256<int> ints2 = Vector256.WidenLower(shortsHi);
+                Vector256<int> ints3 = Vector256.WidenUpper(shortsHi);
 
-                Vector256<float> f0 = Avx.Multiply(Avx.ConvertToVector256Single(ints0), vScale);
-                Vector256<float> f1 = Avx.Multiply(Avx.ConvertToVector256Single(ints1), vScale);
-                Vector256<float> f2 = Avx.Multiply(Avx.ConvertToVector256Single(ints2), vScale);
-                Vector256<float> f3 = Avx.Multiply(Avx.ConvertToVector256Single(ints3), vScale);
-
-                Avx.Store(outPtr, f0);
-                Avx.Store(outPtr + 8, f1);
-                Avx.Store(outPtr + 16, f2);
-                Avx.Store(outPtr + 24, f3);
+                ref float outRef = ref Unsafe.AsRef<float>(outPtr);
+                (Vector256.ConvertToSingle(ints0) * vScale).StoreUnsafe(ref outRef);
+                (Vector256.ConvertToSingle(ints1) * vScale).StoreUnsafe(ref Unsafe.Add(ref outRef, 8));
+                (Vector256.ConvertToSingle(ints2) * vScale).StoreUnsafe(ref Unsafe.Add(ref outRef, 16));
+                (Vector256.ConvertToSingle(ints3) * vScale).StoreUnsafe(ref Unsafe.Add(ref outRef, 24));
 
                 outPtr += Q5_0GroupSize;
                 blockBase += Q5_0BlockBytes;
@@ -275,14 +270,14 @@ public static unsafe partial class Dequantize
         }
     }
 
-    // ──────────────────── Q8_0 AVX2 ────────────────────
+    // ──────────────────── Q8_0 Vector256 ────────────────────
 
     /// <summary>
-    /// AVX2-accelerated Q8_0 dequantization. Processes one 32-element block per iteration
+    /// Vector256-accelerated Q8_0 dequantization. Processes one 32-element block per iteration
     /// using SIMD widen (sbyte → short → int → float) and broadcast multiply.
     /// </summary>
     [SkipLocalsInit]
-    internal static void DequantizeQ8_0Avx2(nint src, long elementCount, Span<float> dest)
+    internal static void DequantizeQ8_0Vector256(nint src, long elementCount, Span<float> dest)
     {
         long blockCount = elementCount / Q8_0GroupSize;
         byte* blockBase = (byte*)src;
@@ -301,29 +296,21 @@ public static unsafe partial class Dequantize
                 Vector256<sbyte> bytes = Unsafe.ReadUnaligned<Vector256<sbyte>>(blockBase + 2);
 
                 // Widen sbyte → short: lower 16 and upper 16.
-                Vector128<sbyte> bytesLo = bytes.GetLower();
-                Vector128<sbyte> bytesHi = bytes.GetUpper();
-
-                Vector256<short> shortsLo = Avx2.ConvertToVector256Int16(bytesLo);
-                Vector256<short> shortsHi = Avx2.ConvertToVector256Int16(bytesHi);
+                Vector256<short> shortsLo = Vector256.WidenLower(bytes);
+                Vector256<short> shortsHi = Vector256.WidenUpper(bytes);
 
                 // Widen short → int (4 groups of 8).
-                Vector256<int> ints0 = Avx2.ConvertToVector256Int32(shortsLo.GetLower());
-                Vector256<int> ints1 = Avx2.ConvertToVector256Int32(shortsLo.GetUpper());
-                Vector256<int> ints2 = Avx2.ConvertToVector256Int32(shortsHi.GetLower());
-                Vector256<int> ints3 = Avx2.ConvertToVector256Int32(shortsHi.GetUpper());
+                Vector256<int> ints0 = Vector256.WidenLower(shortsLo);
+                Vector256<int> ints1 = Vector256.WidenUpper(shortsLo);
+                Vector256<int> ints2 = Vector256.WidenLower(shortsHi);
+                Vector256<int> ints3 = Vector256.WidenUpper(shortsHi);
 
                 // Convert int → float and multiply by scale.
-                Vector256<float> f0 = Avx.Multiply(Avx.ConvertToVector256Single(ints0), vScale);
-                Vector256<float> f1 = Avx.Multiply(Avx.ConvertToVector256Single(ints1), vScale);
-                Vector256<float> f2 = Avx.Multiply(Avx.ConvertToVector256Single(ints2), vScale);
-                Vector256<float> f3 = Avx.Multiply(Avx.ConvertToVector256Single(ints3), vScale);
-
-                // Store 4×8 = 32 floats.
-                Avx.Store(outPtr, f0);
-                Avx.Store(outPtr + 8, f1);
-                Avx.Store(outPtr + 16, f2);
-                Avx.Store(outPtr + 24, f3);
+                ref float outRef = ref Unsafe.AsRef<float>(outPtr);
+                (Vector256.ConvertToSingle(ints0) * vScale).StoreUnsafe(ref outRef);
+                (Vector256.ConvertToSingle(ints1) * vScale).StoreUnsafe(ref Unsafe.Add(ref outRef, 8));
+                (Vector256.ConvertToSingle(ints2) * vScale).StoreUnsafe(ref Unsafe.Add(ref outRef, 16));
+                (Vector256.ConvertToSingle(ints3) * vScale).StoreUnsafe(ref Unsafe.Add(ref outRef, 24));
 
                 outPtr += Q8_0GroupSize;
                 blockBase += Q8_0BlockBytes;
