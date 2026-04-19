@@ -400,7 +400,7 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        return HorizontalSumVector256(acc) - sumMin;
+        return Vector256.Sum(acc) - sumMin;
     }
 
     /// <summary>
@@ -485,7 +485,7 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        return HorizontalSumVector256(acc) - sumBias;
+        return Vector256.Sum(acc) - sumBias;
     }
 
     /// <summary>
@@ -561,7 +561,7 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        return HorizontalSumVector256(acc) - sumMin;
+        return Vector256.Sum(acc) - sumMin;
     }
 
     // ──────────────────── True 4-row kernels with shared Q8_K activation loading ──────────────
@@ -676,10 +676,10 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        results[0] = HorizontalSumVector256(acc0) - sumMin0;
-        results[1] = HorizontalSumVector256(acc1) - sumMin1;
-        results[2] = HorizontalSumVector256(acc2) - sumMin2;
-        results[3] = HorizontalSumVector256(acc3) - sumMin3;
+        results[0] = Vector256.Sum(acc0) - sumMin0;
+        results[1] = Vector256.Sum(acc1) - sumMin1;
+        results[2] = Vector256.Sum(acc2) - sumMin2;
+        results[3] = Vector256.Sum(acc3) - sumMin3;
     }
 
     /// <summary>
@@ -817,10 +817,10 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        results[0] = HorizontalSumVector256(acc0) - sumMin0;
-        results[1] = HorizontalSumVector256(acc1) - sumMin1;
-        results[2] = HorizontalSumVector256(acc2) - sumMin2;
-        results[3] = HorizontalSumVector256(acc3) - sumMin3;
+        results[0] = Vector256.Sum(acc0) - sumMin0;
+        results[1] = Vector256.Sum(acc1) - sumMin1;
+        results[2] = Vector256.Sum(acc2) - sumMin2;
+        results[3] = Vector256.Sum(acc3) - sumMin3;
     }
 
     /// <summary>
@@ -991,10 +991,10 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        results[0] = HorizontalSumVector256(acc0) - sumBias0;
-        results[1] = HorizontalSumVector256(acc1) - sumBias1;
-        results[2] = HorizontalSumVector256(acc2) - sumBias2;
-        results[3] = HorizontalSumVector256(acc3) - sumBias3;
+        results[0] = Vector256.Sum(acc0) - sumBias0;
+        results[1] = Vector256.Sum(acc1) - sumBias1;
+        results[2] = Vector256.Sum(acc2) - sumBias2;
+        results[3] = Vector256.Sum(acc3) - sumBias3;
     }
 
     // ──────────────────── ComputeRows for K-quants ────────────────────

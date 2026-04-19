@@ -267,10 +267,10 @@ public static unsafe partial class MatMul
             }
         }
 
-        results[0] = HorizontalSumVector256(acc0);
-        results[1] = HorizontalSumVector256(acc1);
-        results[2] = HorizontalSumVector256(acc2);
-        results[3] = HorizontalSumVector256(acc3);
+        results[0] = Vector256.Sum(acc0);
+        results[1] = Vector256.Sum(acc1);
+        results[2] = Vector256.Sum(acc2);
+        results[3] = Vector256.Sum(acc3);
     }
 
     /// <summary>
@@ -400,7 +400,7 @@ public static unsafe partial class MatMul
             acc = Vector256.FusedMultiplyAdd(scale, fsum, acc);
         }
 
-        return HorizontalSumVector256(acc);
+        return Vector256.Sum(acc);
     }
 
     /// <summary>
@@ -466,10 +466,10 @@ public static unsafe partial class MatMul
             }
         }
 
-        results[0] = HorizontalSumVector256(acc0);
-        results[1] = HorizontalSumVector256(acc1);
-        results[2] = HorizontalSumVector256(acc2);
-        results[3] = HorizontalSumVector256(acc3);
+        results[0] = Vector256.Sum(acc0);
+        results[1] = Vector256.Sum(acc1);
+        results[2] = Vector256.Sum(acc2);
+        results[3] = Vector256.Sum(acc3);
     }
 
     // ──────────────────── Vector512 optimized ────────────────────
@@ -517,7 +517,7 @@ public static unsafe partial class MatMul
             acc = Vector512.FusedMultiplyAdd(fsum512, scale, acc);
         }
 
-        float result = HorizontalSumVector512(acc);
+        float result = Vector512.Sum(acc);
 
         // Handle an odd trailing block via the Vector256 single-block path.
         if (block < blockCount)
@@ -532,7 +532,7 @@ public static unsafe partial class MatMul
             Vector256<sbyte> vb = Unsafe.ReadUnaligned<Vector256<sbyte>>(bBlock + 2);
             Vector256<float> fsum = Vector256.ConvertToSingle(DotProductSByte32(va, vb));
 
-            result += da * db * HorizontalSumVector256(fsum);
+            result += da * db * Vector256.Sum(fsum);
         }
 
         return result;
@@ -571,10 +571,10 @@ public static unsafe partial class MatMul
             ProcessVector512DualBlock(w3, block, vx0, vx1, dx0, dx1, ref acc3);
         }
 
-        results[0] = HorizontalSumVector512(acc0);
-        results[1] = HorizontalSumVector512(acc1);
-        results[2] = HorizontalSumVector512(acc2);
-        results[3] = HorizontalSumVector512(acc3);
+        results[0] = Vector512.Sum(acc0);
+        results[1] = Vector512.Sum(acc1);
+        results[2] = Vector512.Sum(acc2);
+        results[3] = Vector512.Sum(acc3);
 
         // Handle an odd trailing block via Vector256.
         if (block < blockCount)
@@ -628,7 +628,7 @@ public static unsafe partial class MatMul
         float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
         Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock + 2);
         Vector256<float> fsum = Vector256.ConvertToSingle(DotProductSByte32(vw, vx));
-        return dx * dw * HorizontalSumVector256(fsum);
+        return dx * dw * Vector256.Sum(fsum);
     }
 
     // ──────────────────── Quantization ────────────────────
@@ -1287,9 +1287,9 @@ public static unsafe partial class MatMul
                 a2 = Vector256.FusedMultiplyAdd(Vector256.Create(dx2 * dw), Vector256.ConvertToSingle(isum2), a2);
             }
 
-            c[0 * cStride + r] = HorizontalSumVector256(a0);
-            c[1 * cStride + r] = HorizontalSumVector256(a1);
-            c[2 * cStride + r] = HorizontalSumVector256(a2);
+            c[0 * cStride + r] = Vector256.Sum(a0);
+            c[1 * cStride + r] = Vector256.Sum(a1);
+            c[2 * cStride + r] = Vector256.Sum(a2);
         }
     }
 
@@ -1401,30 +1401,30 @@ public static unsafe partial class MatMul
         }
 
         // Store results: c[token * cStride + row]
-        c[0 * cStride + 0] = HorizontalSumVector512(a0t0);
-        c[0 * cStride + 1] = HorizontalSumVector512(a1t0);
-        c[0 * cStride + 2] = HorizontalSumVector512(a2t0);
-        c[0 * cStride + 3] = HorizontalSumVector512(a3t0);
-        c[1 * cStride + 0] = HorizontalSumVector512(a0t1);
-        c[1 * cStride + 1] = HorizontalSumVector512(a1t1);
-        c[1 * cStride + 2] = HorizontalSumVector512(a2t1);
-        c[1 * cStride + 3] = HorizontalSumVector512(a3t1);
-        c[2 * cStride + 0] = HorizontalSumVector512(a0t2);
-        c[2 * cStride + 1] = HorizontalSumVector512(a1t2);
-        c[2 * cStride + 2] = HorizontalSumVector512(a2t2);
-        c[2 * cStride + 3] = HorizontalSumVector512(a3t2);
-        c[3 * cStride + 0] = HorizontalSumVector512(a0t3);
-        c[3 * cStride + 1] = HorizontalSumVector512(a1t3);
-        c[3 * cStride + 2] = HorizontalSumVector512(a2t3);
-        c[3 * cStride + 3] = HorizontalSumVector512(a3t3);
-        c[4 * cStride + 0] = HorizontalSumVector512(a0t4);
-        c[4 * cStride + 1] = HorizontalSumVector512(a1t4);
-        c[4 * cStride + 2] = HorizontalSumVector512(a2t4);
-        c[4 * cStride + 3] = HorizontalSumVector512(a3t4);
-        c[5 * cStride + 0] = HorizontalSumVector512(a0t5);
-        c[5 * cStride + 1] = HorizontalSumVector512(a1t5);
-        c[5 * cStride + 2] = HorizontalSumVector512(a2t5);
-        c[5 * cStride + 3] = HorizontalSumVector512(a3t5);
+        c[0 * cStride + 0] = Vector512.Sum(a0t0);
+        c[0 * cStride + 1] = Vector512.Sum(a1t0);
+        c[0 * cStride + 2] = Vector512.Sum(a2t0);
+        c[0 * cStride + 3] = Vector512.Sum(a3t0);
+        c[1 * cStride + 0] = Vector512.Sum(a0t1);
+        c[1 * cStride + 1] = Vector512.Sum(a1t1);
+        c[1 * cStride + 2] = Vector512.Sum(a2t1);
+        c[1 * cStride + 3] = Vector512.Sum(a3t1);
+        c[2 * cStride + 0] = Vector512.Sum(a0t2);
+        c[2 * cStride + 1] = Vector512.Sum(a1t2);
+        c[2 * cStride + 2] = Vector512.Sum(a2t2);
+        c[2 * cStride + 3] = Vector512.Sum(a3t2);
+        c[3 * cStride + 0] = Vector512.Sum(a0t3);
+        c[3 * cStride + 1] = Vector512.Sum(a1t3);
+        c[3 * cStride + 2] = Vector512.Sum(a2t3);
+        c[3 * cStride + 3] = Vector512.Sum(a3t3);
+        c[4 * cStride + 0] = Vector512.Sum(a0t4);
+        c[4 * cStride + 1] = Vector512.Sum(a1t4);
+        c[4 * cStride + 2] = Vector512.Sum(a2t4);
+        c[4 * cStride + 3] = Vector512.Sum(a3t4);
+        c[5 * cStride + 0] = Vector512.Sum(a0t5);
+        c[5 * cStride + 1] = Vector512.Sum(a1t5);
+        c[5 * cStride + 2] = Vector512.Sum(a2t5);
+        c[5 * cStride + 3] = Vector512.Sum(a3t5);
 
         // Handle an odd trailing block via Vector256.
         if (block < blockCount)
@@ -1489,7 +1489,7 @@ public static unsafe partial class MatMul
             float dw = HalfBitsToFloat(wb);
             Vector256<sbyte> vw = Unsafe.ReadUnaligned<Vector256<sbyte>>(wb + 2);
             Vector256<float> fsum = Vector256.ConvertToSingle(DotProductSByte32(vw, vxt));
-            c[tokenIdx * cStride + r] += dxt * dw * HorizontalSumVector256(fsum);
+            c[tokenIdx * cStride + r] += dxt * dw * Vector256.Sum(fsum);
         }
     }
 
@@ -2287,28 +2287,6 @@ public static unsafe partial class MatMul
         Vector256<int> low = Vector256.ShiftRightArithmetic(Vector256.ShiftLeft(lanes, 16), 16);
         Vector256<int> high = Vector256.ShiftRightArithmetic(lanes, 16);
         return low + high;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float HorizontalSumVector256(Vector256<float> v)
-    {
-        Vector128<float> sum128 = v.GetLower() + v.GetUpper();
-        Vector128<float> shuf = Vector128.ShuffleNative(sum128, Vector128.Create(2, 3, 0, 1));
-        sum128 += shuf;
-        shuf = Vector128.ShuffleNative(sum128, Vector128.Create(1, 0, 3, 2));
-        sum128 += shuf;
-        return sum128.ToScalar();
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float HorizontalSumVector512(Vector512<float> v)
-    {
-        Vector256<float> sum256 = v.GetLower() + v.GetUpper();
-        Vector256<float> shuf = Vector256.ShuffleNative(sum256, Vector256.Create(2, 3, 0, 1, 6, 7, 4, 5));
-        sum256 += shuf;
-        shuf = Vector256.ShuffleNative(sum256, Vector256.Create(1, 0, 3, 2, 5, 4, 7, 6));
-        sum256 += shuf;
-        return sum256.GetElement(0) + sum256.GetElement(4);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

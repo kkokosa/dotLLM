@@ -233,7 +233,7 @@ public static unsafe partial class MatMul
             offsetSum += d5 * s8;
         }
 
-        return HorizontalSumVector256(acc) - 16.0f * offsetSum;
+        return Vector256.Sum(acc) - 16.0f * offsetSum;
     }
 
     // ──────────────────── Q5_0 × Q8_0 Vector256 (kept for cross-verification) ────────────────────
@@ -270,7 +270,7 @@ public static unsafe partial class MatMul
                 Vector256.ConvertToSingle(adjusted), acc);
         }
 
-        return HorizontalSumVector256(acc);
+        return Vector256.Sum(acc);
     }
 
     // ──────────────────── Q5_0 × Q8_1 4-row variant ────────────────────
@@ -350,10 +350,10 @@ public static unsafe partial class MatMul
             off3 += d3 * s8;
         }
 
-        results[0] = HorizontalSumVector256(acc0) - 16.0f * off0;
-        results[1] = HorizontalSumVector256(acc1) - 16.0f * off1;
-        results[2] = HorizontalSumVector256(acc2) - 16.0f * off2;
-        results[3] = HorizontalSumVector256(acc3) - 16.0f * off3;
+        results[0] = Vector256.Sum(acc0) - 16.0f * off0;
+        results[1] = Vector256.Sum(acc1) - 16.0f * off1;
+        results[2] = Vector256.Sum(acc2) - 16.0f * off2;
+        results[3] = Vector256.Sum(acc3) - 16.0f * off3;
     }
 
     // ──────────────────── ComputeRows for Q5_0 ────────────────────
@@ -489,10 +489,10 @@ public static unsafe partial class MatMul
             }
         }
 
-        results[0] = HorizontalSumVector256(acc0) - 16.0f * off0;
-        results[1] = HorizontalSumVector256(acc1) - 16.0f * off1;
-        results[2] = HorizontalSumVector256(acc2) - 16.0f * off2;
-        results[3] = HorizontalSumVector256(acc3) - 16.0f * off3;
+        results[0] = Vector256.Sum(acc0) - 16.0f * off0;
+        results[1] = Vector256.Sum(acc1) - 16.0f * off1;
+        results[2] = Vector256.Sum(acc2) - 16.0f * off2;
+        results[3] = Vector256.Sum(acc3) - 16.0f * off3;
     }
 
     /// <summary>
@@ -994,18 +994,18 @@ public static unsafe partial class MatMul
             }
         }
 
-        c[0 * cStride + 0] = HorizontalSumVector256(acc00) - 16.0f * off00;
-        c[0 * cStride + 1] = HorizontalSumVector256(acc10) - 16.0f * off10;
-        c[0 * cStride + 2] = HorizontalSumVector256(acc20) - 16.0f * off20;
-        c[0 * cStride + 3] = HorizontalSumVector256(acc30) - 16.0f * off30;
-        c[1 * cStride + 0] = HorizontalSumVector256(acc01) - 16.0f * off01;
-        c[1 * cStride + 1] = HorizontalSumVector256(acc11) - 16.0f * off11;
-        c[1 * cStride + 2] = HorizontalSumVector256(acc21) - 16.0f * off21;
-        c[1 * cStride + 3] = HorizontalSumVector256(acc31) - 16.0f * off31;
-        c[2 * cStride + 0] = HorizontalSumVector256(acc02) - 16.0f * off02;
-        c[2 * cStride + 1] = HorizontalSumVector256(acc12) - 16.0f * off12;
-        c[2 * cStride + 2] = HorizontalSumVector256(acc22) - 16.0f * off22;
-        c[2 * cStride + 3] = HorizontalSumVector256(acc32) - 16.0f * off32;
+        c[0 * cStride + 0] = Vector256.Sum(acc00) - 16.0f * off00;
+        c[0 * cStride + 1] = Vector256.Sum(acc10) - 16.0f * off10;
+        c[0 * cStride + 2] = Vector256.Sum(acc20) - 16.0f * off20;
+        c[0 * cStride + 3] = Vector256.Sum(acc30) - 16.0f * off30;
+        c[1 * cStride + 0] = Vector256.Sum(acc01) - 16.0f * off01;
+        c[1 * cStride + 1] = Vector256.Sum(acc11) - 16.0f * off11;
+        c[1 * cStride + 2] = Vector256.Sum(acc21) - 16.0f * off21;
+        c[1 * cStride + 3] = Vector256.Sum(acc31) - 16.0f * off31;
+        c[2 * cStride + 0] = Vector256.Sum(acc02) - 16.0f * off02;
+        c[2 * cStride + 1] = Vector256.Sum(acc12) - 16.0f * off12;
+        c[2 * cStride + 2] = Vector256.Sum(acc22) - 16.0f * off22;
+        c[2 * cStride + 3] = Vector256.Sum(acc32) - 16.0f * off32;
     }
 
     /// <summary>
