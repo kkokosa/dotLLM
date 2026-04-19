@@ -27,7 +27,7 @@ internal sealed class ModelDeleteCommand : Command<ModelDeleteCommand.Settings>
         public bool Yes { get; set; }
     }
 
-    public override int Execute(CommandContext context, Settings settings)
+    protected override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         var models = HuggingFaceDownloader.ListLocalModels();
 

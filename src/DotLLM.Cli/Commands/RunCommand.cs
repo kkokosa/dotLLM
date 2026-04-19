@@ -170,7 +170,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         public int SpeculativeK { get; set; } = 5;
     }
 
-    public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
+    protected override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(settings.Prompt))
         {

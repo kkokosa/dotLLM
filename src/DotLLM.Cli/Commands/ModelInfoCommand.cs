@@ -18,7 +18,7 @@ internal sealed class ModelInfoCommand : AsyncCommand<ModelInfoCommand.Settings>
         public string RepoId { get; set; } = string.Empty;
     }
 
-    public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
+    protected override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         using var client = new HuggingFaceClient();
 

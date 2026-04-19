@@ -27,7 +27,7 @@ internal sealed class ModelSearchCommand : AsyncCommand<ModelSearchCommand.Setti
         public string Sort { get; set; } = "downloads";
     }
 
-    public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
+    protected override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         using var client = new HuggingFaceClient();
 

@@ -26,7 +26,7 @@ internal sealed class DebugForwardPassCommand : Command<DebugForwardPassCommand.
         public string? Prompt { get; set; }
     }
 
-    public override int Execute(CommandContext context, Settings settings)
+    protected override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         var resolvedPath = GgufFileResolver.Resolve(settings.FilePath);
         if (resolvedPath is null)
