@@ -238,16 +238,12 @@ public static unsafe partial class Dequantize
                 Vector128<byte> qsRaw = Unsafe.ReadUnaligned<Vector128<byte>>(blockBase + 6);
 
                 // Unpack nibbles: low 4 bits → elements 0..15, high 4 bits → elements 16..31.
-                Vector128<byte> lo128 = Vector128.BitwiseAnd(qsRaw, nibbleMask);
-                Vector128<byte> hi128 = Vector128.BitwiseAnd(
-                    Vector128.ShiftRightLogical(qsRaw.AsUInt16(), 4).AsByte(),
-                    nibbleMask);
+                Vector128<byte> lo128 = qsRaw & nibbleMask;
+                Vector128<byte> hi128 = Vector128.ShiftRightLogical(qsRaw.AsUInt16(), 4).AsByte() & nibbleMask;
 
                 // Combine halves, OR in the 5th bit (0x10 per set bit), subtract 16 to center.
-                Vector256<byte> q5vals = Vector256.BitwiseOr(
-                    Vector256.Create(lo128, hi128),
-                    MatMul.ExtractQ5HighBits(qh));
-                Vector256<sbyte> centered = Vector256.Subtract(q5vals.AsSByte(), sixteen);
+                Vector256<byte> q5vals = Vector256.Create(lo128, hi128) | MatMul.ExtractQ5HighBits(qh);
+                Vector256<sbyte> centered = q5vals.AsSByte() - sixteen;
 
                 // Widen sbyte → short → int and convert to float × scale.
                 Vector256<short> shortsLo = Vector256.WidenLower(centered);

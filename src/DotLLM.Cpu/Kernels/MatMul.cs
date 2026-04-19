@@ -2263,8 +2263,8 @@ public static unsafe partial class MatMul
         Vector256<short> right16Lo = Vector256.WidenLower(right);
         Vector256<short> right16Hi = Vector256.WidenUpper(right);
 
-        return PairwiseSumInt16Products(Vector256.Multiply(left16Lo, right16Lo))
-            + PairwiseSumInt16Products(Vector256.Multiply(left16Hi, right16Hi));
+        return PairwiseSumInt16Products(left16Lo * right16Lo)
+            + PairwiseSumInt16Products(left16Hi * right16Hi);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -2275,8 +2275,8 @@ public static unsafe partial class MatMul
         Vector256<short> right16Lo = Vector256.WidenLower(right);
         Vector256<short> right16Hi = Vector256.WidenUpper(right);
 
-        return PairwiseSumInt16Products(Vector256.Multiply(left16Lo, right16Lo))
-            + PairwiseSumInt16Products(Vector256.Multiply(left16Hi, right16Hi));
+        return PairwiseSumInt16Products(left16Lo * right16Lo)
+            + PairwiseSumInt16Products(left16Hi * right16Hi);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

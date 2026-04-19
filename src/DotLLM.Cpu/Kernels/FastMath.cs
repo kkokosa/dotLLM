@@ -107,12 +107,12 @@ public static class FastMath
         for (; i < vecLen; i += 16)
         {
             var x = Vector512.LoadUnsafe(ref src, i);
-            var shifted = Vector512.MaxNative(Vector512.Add(x, offsetVec), minVec);
+            var shifted = Vector512.MaxNative(x + offsetVec, minVec);
             var y = Vector512.FusedMultiplyAdd(shifted, c0Vec, c1Vec);
             var bits = Vector512.ConvertToInt32Native(y);
             var exp = bits.AsSingle();
             Vector512.StoreUnsafe(exp, ref dst, i);
-            sumVec = Vector512.Add(sumVec, exp);
+            sumVec += exp;
         }
 
         float sum = Vector512.Sum(sumVec);
@@ -148,12 +148,12 @@ public static class FastMath
         for (; i < vecLen; i += 8)
         {
             var x = Vector256.LoadUnsafe(ref src, i);
-            var shifted = Vector256.MaxNative(Vector256.Add(x, offsetVec), minVec);
+            var shifted = Vector256.MaxNative(x + offsetVec, minVec);
             var y = Vector256.FusedMultiplyAdd(shifted, c0Vec, c1Vec);
             var bits = Vector256.ConvertToInt32Native(y);
             var exp = bits.AsSingle();
             Vector256.StoreUnsafe(exp, ref dst, i);
-            sumVec = Vector256.Add(sumVec, exp);
+            sumVec += exp;
         }
 
         float sum = Vector256.Sum(sumVec);

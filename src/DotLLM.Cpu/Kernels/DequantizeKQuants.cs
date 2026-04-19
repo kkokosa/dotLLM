@@ -156,27 +156,25 @@ public static unsafe partial class Dequantize
                     Vector256<byte> qlRaw = Unsafe.ReadUnaligned<Vector256<byte>>(ql + qlBase);
                     Vector256<byte> nibbles;
                     if (isUpper)
-                        nibbles = Vector256.BitwiseAnd(
-                            Vector256.ShiftRightLogical(qlRaw.AsUInt16(), 4).AsByte(), mask0F);
+                        nibbles = Vector256.ShiftRightLogical(qlRaw.AsUInt16(), 4).AsByte() & mask0F;
                     else
-                        nibbles = Vector256.BitwiseAnd(qlRaw, mask0F);
+                        nibbles = qlRaw & mask0F;
 
                     // Load 32 qh bytes, extract 2-bit field at qhShift
                     Vector256<byte> qhVec = Unsafe.ReadUnaligned<Vector256<byte>>(qh + qhBase);
                     Vector256<byte> qhBits = qhShift switch
                     {
-                        0 => Vector256.BitwiseAnd(qhVec, mask03),
-                        2 => Vector256.BitwiseAnd(Vector256.ShiftRightLogical(qhVec.AsUInt16(), 2).AsByte(), mask03),
-                        4 => Vector256.BitwiseAnd(Vector256.ShiftRightLogical(qhVec.AsUInt16(), 4).AsByte(), mask03),
-                        _ => Vector256.BitwiseAnd(Vector256.ShiftRightLogical(qhVec.AsUInt16(), 6).AsByte(), mask03),
+                        0 => qhVec & mask03,
+                        2 => Vector256.ShiftRightLogical(qhVec.AsUInt16(), 2).AsByte() & mask03,
+                        4 => Vector256.ShiftRightLogical(qhVec.AsUInt16(), 4).AsByte() & mask03,
+                        _ => Vector256.ShiftRightLogical(qhVec.AsUInt16(), 6).AsByte() & mask03,
                     };
 
                     // Combine: q6 = nibble | (qh2 << 4), mask to 6 bits
-                    Vector256<byte> q6 = Vector256.BitwiseAnd(
-                        Vector256.BitwiseOr(nibbles, Vector256.ShiftLeft(qhBits.AsUInt16(), 4).AsByte()),
-                        Vector256.Create((byte)0x3F));
+                    Vector256<byte> q6 = (nibbles | Vector256.ShiftLeft(qhBits.AsUInt16(), 4).AsByte())
+                        & Vector256.Create((byte)0x3F);
 
-                    Vector256<sbyte> q6signed = Vector256.Subtract(q6.AsSByte(), bias32);
+                    Vector256<sbyte> q6signed = q6.AsSByte() - bias32;
 
                     // Two sub-blocks of 16: lower 128 bits → scales[sub], upper → scales[sub+1]
                     float s0 = d * scales[sub];
@@ -300,9 +298,8 @@ public static unsafe partial class Dequantize
 
                     // Load 32 bytes of qs for this pair
                     Vector256<byte> raw = Unsafe.ReadUnaligned<Vector256<byte>>(qs + (sb / 2) * 32);
-                    Vector256<byte> lo = Vector256.BitwiseAnd(raw, mask0F);
-                    Vector256<byte> hi = Vector256.BitwiseAnd(
-                        Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte(), mask0F);
+                    Vector256<byte> lo = raw & mask0F;
+                    Vector256<byte> hi = Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F;
 
                     // sb: lower nibbles (32 values), sb+1: upper nibbles (32 values)
                     EmitDequantQ4K_32(lo, sc0, mn0, outPtr);
@@ -441,24 +438,23 @@ public static unsafe partial class Dequantize
 
                     // Load 32 bytes of qs for this pair
                     Vector256<byte> raw = Unsafe.ReadUnaligned<Vector256<byte>>(qs + pairIdx * 32);
-                    Vector256<byte> lo = Vector256.BitwiseAnd(raw, mask0F);
-                    Vector256<byte> hi = Vector256.BitwiseAnd(
-                        Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte(), mask0F);
+                    Vector256<byte> lo = raw & mask0F;
+                    Vector256<byte> hi = Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F;
 
                     // Extract 5th bits from qh: bit sb from each byte for lo, bit sb+1 for hi
                     byte bitMask0 = (byte)(1 << sb);
                     Vector256<byte> hasBit0 = Vector256.Equals(
-                        Vector256.BitwiseAnd(qhVec, Vector256.Create(bitMask0)), Vector256.Create(bitMask0));
-                    Vector256<byte> bit5_0 = Vector256.BitwiseAnd(hasBit0, Vector256.Create((byte)16));
+                        qhVec & Vector256.Create(bitMask0), Vector256.Create(bitMask0));
+                    Vector256<byte> bit5_0 = hasBit0 & Vector256.Create((byte)16);
 
                     byte bitMask1 = (byte)(1 << (sb + 1));
                     Vector256<byte> hasBit1 = Vector256.Equals(
-                        Vector256.BitwiseAnd(qhVec, Vector256.Create(bitMask1)), Vector256.Create(bitMask1));
-                    Vector256<byte> bit5_1 = Vector256.BitwiseAnd(hasBit1, Vector256.Create((byte)16));
+                        qhVec & Vector256.Create(bitMask1), Vector256.Create(bitMask1));
+                    Vector256<byte> bit5_1 = hasBit1 & Vector256.Create((byte)16);
 
                     // Combine nibbles with 5th bit
-                    Vector256<byte> q5_sb0 = Vector256.BitwiseOr(lo, bit5_0);
-                    Vector256<byte> q5_sb1 = Vector256.BitwiseOr(hi, bit5_1);
+                    Vector256<byte> q5_sb0 = lo | bit5_0;
+                    Vector256<byte> q5_sb1 = hi | bit5_1;
 
                     // sb: 32 values from lower nibbles + bit, sb+1: 32 values from upper nibbles + bit
                     EmitDequantQ4K_32(q5_sb0, sc0, mn0, outPtr);

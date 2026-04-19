@@ -133,10 +133,10 @@ public static unsafe partial class MatMul
         // Shuffle: replicate byte0→positions 0-7, byte1→8-15, byte2→16-23, byte3→24-31
         Vector256<byte> qhBytes = Vector256.ShuffleNative(qhVec, Q5_0_QhShuffleMask);
         // AND with bit mask to isolate each bit, then CMPEQ to get 0xFF or 0x00
-        Vector256<byte> bits = Vector256.BitwiseAnd(qhBytes, Q5_0_BitMask);
+        Vector256<byte> bits = qhBytes & Q5_0_BitMask;
         Vector256<byte> bitSet = Vector256.Equals(bits, Q5_0_BitMask);
         // AND with 0x10 to convert 0xFF→0x10 (16), 0x00→0x00
-        return Vector256.BitwiseAnd(bitSet, Vector256.Create((byte)0x10));
+        return bitSet & Vector256.Create((byte)0x10);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -145,7 +145,7 @@ public static unsafe partial class MatMul
         Vector128<byte> nibbleMask = Vector128.Create((byte)0x0F);
         Vector128<byte> lo = qsRaw & nibbleMask;
         Vector128<byte> hi = Vector128.ShiftRightLogical(qsRaw.AsUInt16(), 4).AsByte() & nibbleMask;
-        return Vector256.BitwiseOr(Vector256.Create(lo, hi), ExtractQ5HighBits(qh));
+        return Vector256.Create(lo, hi) | ExtractQ5HighBits(qh);
     }
 
     /// <summary>

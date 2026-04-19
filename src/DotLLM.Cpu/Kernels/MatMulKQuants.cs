@@ -387,12 +387,8 @@ public static unsafe partial class MatMul
                 Vector256<sbyte> q8Lo = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8qs + j * 64);
                 Vector256<sbyte> q8Hi = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8qs + j * 64 + 32);
 
-                sumi += Vector256.Multiply(
-                    DotProductByte32SByte32(loNib, q8Lo),
-                    Vector256.Create((int)scBuf[j * 2]));
-                sumi += Vector256.Multiply(
-                    DotProductByte32SByte32(hiNib, q8Hi),
-                    Vector256.Create((int)scBuf[j * 2 + 1]));
+                sumi += DotProductByte32SByte32(loNib, q8Lo) * Vector256.Create((int)scBuf[j * 2]);
+                sumi += DotProductByte32SByte32(hiNib, q8Hi) * Vector256.Create((int)scBuf[j * 2 + 1]);
             }
 
             acc = Vector256.FusedMultiplyAdd(
@@ -476,8 +472,8 @@ public static unsafe partial class MatMul
                     Vector256.Create(Vector128<byte>.Zero, q6u.GetUpper()),
                     Vector256.Create(Vector128<sbyte>.Zero, q8Vals.GetUpper()));
 
-                sumi += Vector256.Multiply(dotLo, Vector256.Create((int)scales[sub]));
-                sumi += Vector256.Multiply(dotHi, Vector256.Create((int)scales[sub + 1]));
+                sumi += dotLo * Vector256.Create((int)scales[sub]);
+                sumi += dotHi * Vector256.Create((int)scales[sub + 1]);
             }
 
             acc = Vector256.FusedMultiplyAdd(
@@ -552,12 +548,8 @@ public static unsafe partial class MatMul
                 Vector256<sbyte> q8Lo = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8qs + j * 64);
                 Vector256<sbyte> q8Hi = Unsafe.ReadUnaligned<Vector256<sbyte>>(q8qs + j * 64 + 32);
 
-                sumi += Vector256.Multiply(
-                    DotProductByte32SByte32(loQ5, q8Lo),
-                    Vector256.Create((int)scBuf[j * 2]));
-                sumi += Vector256.Multiply(
-                    DotProductByte32SByte32(hiQ5, q8Hi),
-                    Vector256.Create((int)scBuf[j * 2 + 1]));
+                sumi += DotProductByte32SByte32(loQ5, q8Lo) * Vector256.Create((int)scBuf[j * 2]);
+                sumi += DotProductByte32SByte32(hiQ5, q8Hi) * Vector256.Create((int)scBuf[j * 2 + 1]);
             }
 
             acc = Vector256.FusedMultiplyAdd(
@@ -647,42 +639,30 @@ public static unsafe partial class MatMul
                 // Row 0
                 {
                     Vector256<byte> raw = Unsafe.ReadUnaligned<Vector256<byte>>(qs0p + j * 32);
-                    sumi0 += Vector256.Multiply(
-                        DotProductByte32SByte32(raw & mask0F, q8Lo),
-                        Vector256.Create((int)sc0[j * 2]));
-                    sumi0 += Vector256.Multiply(
-                        DotProductByte32SByte32(Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F, q8Hi),
-                        Vector256.Create((int)sc0[j * 2 + 1]));
+                    sumi0 += DotProductByte32SByte32(raw & mask0F, q8Lo) * Vector256.Create((int)sc0[j * 2]);
+                    sumi0 += DotProductByte32SByte32(Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F, q8Hi)
+                        * Vector256.Create((int)sc0[j * 2 + 1]);
                 }
                 // Row 1
                 {
                     Vector256<byte> raw = Unsafe.ReadUnaligned<Vector256<byte>>(qs1p + j * 32);
-                    sumi1 += Vector256.Multiply(
-                        DotProductByte32SByte32(raw & mask0F, q8Lo),
-                        Vector256.Create((int)sc1[j * 2]));
-                    sumi1 += Vector256.Multiply(
-                        DotProductByte32SByte32(Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F, q8Hi),
-                        Vector256.Create((int)sc1[j * 2 + 1]));
+                    sumi1 += DotProductByte32SByte32(raw & mask0F, q8Lo) * Vector256.Create((int)sc1[j * 2]);
+                    sumi1 += DotProductByte32SByte32(Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F, q8Hi)
+                        * Vector256.Create((int)sc1[j * 2 + 1]);
                 }
                 // Row 2
                 {
                     Vector256<byte> raw = Unsafe.ReadUnaligned<Vector256<byte>>(qs2p + j * 32);
-                    sumi2 += Vector256.Multiply(
-                        DotProductByte32SByte32(raw & mask0F, q8Lo),
-                        Vector256.Create((int)sc2[j * 2]));
-                    sumi2 += Vector256.Multiply(
-                        DotProductByte32SByte32(Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F, q8Hi),
-                        Vector256.Create((int)sc2[j * 2 + 1]));
+                    sumi2 += DotProductByte32SByte32(raw & mask0F, q8Lo) * Vector256.Create((int)sc2[j * 2]);
+                    sumi2 += DotProductByte32SByte32(Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F, q8Hi)
+                        * Vector256.Create((int)sc2[j * 2 + 1]);
                 }
                 // Row 3
                 {
                     Vector256<byte> raw = Unsafe.ReadUnaligned<Vector256<byte>>(qs3p + j * 32);
-                    sumi3 += Vector256.Multiply(
-                        DotProductByte32SByte32(raw & mask0F, q8Lo),
-                        Vector256.Create((int)sc3[j * 2]));
-                    sumi3 += Vector256.Multiply(
-                        DotProductByte32SByte32(Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F, q8Hi),
-                        Vector256.Create((int)sc3[j * 2 + 1]));
+                    sumi3 += DotProductByte32SByte32(raw & mask0F, q8Lo) * Vector256.Create((int)sc3[j * 2]);
+                    sumi3 += DotProductByte32SByte32(Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F, q8Hi)
+                        * Vector256.Create((int)sc3[j * 2 + 1]);
                 }
             }
 
@@ -801,29 +781,29 @@ public static unsafe partial class MatMul
                 {
                     ExtractQ5Pair(qs0p, j, qhVec0, loBitMask, hiBitMask, mask0F,
                         out var lo5, out var hi5);
-                    sumi0 += Vector256.Multiply(DotProductByte32SByte32(lo5, q8Lo), Vector256.Create((int)sc0[j * 2]));
-                    sumi0 += Vector256.Multiply(DotProductByte32SByte32(hi5, q8Hi), Vector256.Create((int)sc0[j * 2 + 1]));
+                    sumi0 += DotProductByte32SByte32(lo5, q8Lo) * Vector256.Create((int)sc0[j * 2]);
+                    sumi0 += DotProductByte32SByte32(hi5, q8Hi) * Vector256.Create((int)sc0[j * 2 + 1]);
                 }
                 // Row 1
                 {
                     ExtractQ5Pair(qs1p, j, qhVec1, loBitMask, hiBitMask, mask0F,
                         out var lo5, out var hi5);
-                    sumi1 += Vector256.Multiply(DotProductByte32SByte32(lo5, q8Lo), Vector256.Create((int)sc1[j * 2]));
-                    sumi1 += Vector256.Multiply(DotProductByte32SByte32(hi5, q8Hi), Vector256.Create((int)sc1[j * 2 + 1]));
+                    sumi1 += DotProductByte32SByte32(lo5, q8Lo) * Vector256.Create((int)sc1[j * 2]);
+                    sumi1 += DotProductByte32SByte32(hi5, q8Hi) * Vector256.Create((int)sc1[j * 2 + 1]);
                 }
                 // Row 2
                 {
                     ExtractQ5Pair(qs2p, j, qhVec2, loBitMask, hiBitMask, mask0F,
                         out var lo5, out var hi5);
-                    sumi2 += Vector256.Multiply(DotProductByte32SByte32(lo5, q8Lo), Vector256.Create((int)sc2[j * 2]));
-                    sumi2 += Vector256.Multiply(DotProductByte32SByte32(hi5, q8Hi), Vector256.Create((int)sc2[j * 2 + 1]));
+                    sumi2 += DotProductByte32SByte32(lo5, q8Lo) * Vector256.Create((int)sc2[j * 2]);
+                    sumi2 += DotProductByte32SByte32(hi5, q8Hi) * Vector256.Create((int)sc2[j * 2 + 1]);
                 }
                 // Row 3
                 {
                     ExtractQ5Pair(qs3p, j, qhVec3, loBitMask, hiBitMask, mask0F,
                         out var lo5, out var hi5);
-                    sumi3 += Vector256.Multiply(DotProductByte32SByte32(lo5, q8Lo), Vector256.Create((int)sc3[j * 2]));
-                    sumi3 += Vector256.Multiply(DotProductByte32SByte32(hi5, q8Hi), Vector256.Create((int)sc3[j * 2 + 1]));
+                    sumi3 += DotProductByte32SByte32(lo5, q8Lo) * Vector256.Create((int)sc3[j * 2]);
+                    sumi3 += DotProductByte32SByte32(hi5, q8Hi) * Vector256.Create((int)sc3[j * 2 + 1]);
                 }
             }
 
@@ -960,8 +940,8 @@ public static unsafe partial class MatMul
                     Vector256<int> dotHi = DotProductByte32SByte32(
                         Vector256.Create(Vector128<byte>.Zero, q6u.GetUpper()),
                         Vector256.Create(Vector128<sbyte>.Zero, q8Vals.GetUpper()));
-                    sumi0 += Vector256.Multiply(dotLo, Vector256.Create((int)s0[sub]));
-                    sumi0 += Vector256.Multiply(dotHi, Vector256.Create((int)s0[sub + 1]));
+                    sumi0 += dotLo * Vector256.Create((int)s0[sub]);
+                    sumi0 += dotHi * Vector256.Create((int)s0[sub + 1]);
                 }
                 // Row 1
                 {
@@ -972,8 +952,8 @@ public static unsafe partial class MatMul
                     Vector256<int> dotHi = DotProductByte32SByte32(
                         Vector256.Create(Vector128<byte>.Zero, q6u.GetUpper()),
                         Vector256.Create(Vector128<sbyte>.Zero, q8Vals.GetUpper()));
-                    sumi1 += Vector256.Multiply(dotLo, Vector256.Create((int)s1[sub]));
-                    sumi1 += Vector256.Multiply(dotHi, Vector256.Create((int)s1[sub + 1]));
+                    sumi1 += dotLo * Vector256.Create((int)s1[sub]);
+                    sumi1 += dotHi * Vector256.Create((int)s1[sub + 1]);
                 }
                 // Row 2
                 {
@@ -984,8 +964,8 @@ public static unsafe partial class MatMul
                     Vector256<int> dotHi = DotProductByte32SByte32(
                         Vector256.Create(Vector128<byte>.Zero, q6u.GetUpper()),
                         Vector256.Create(Vector128<sbyte>.Zero, q8Vals.GetUpper()));
-                    sumi2 += Vector256.Multiply(dotLo, Vector256.Create((int)s2[sub]));
-                    sumi2 += Vector256.Multiply(dotHi, Vector256.Create((int)s2[sub + 1]));
+                    sumi2 += dotLo * Vector256.Create((int)s2[sub]);
+                    sumi2 += dotHi * Vector256.Create((int)s2[sub + 1]);
                 }
                 // Row 3
                 {
@@ -996,8 +976,8 @@ public static unsafe partial class MatMul
                     Vector256<int> dotHi = DotProductByte32SByte32(
                         Vector256.Create(Vector128<byte>.Zero, q6u.GetUpper()),
                         Vector256.Create(Vector128<sbyte>.Zero, q8Vals.GetUpper()));
-                    sumi3 += Vector256.Multiply(dotLo, Vector256.Create((int)s3[sub]));
-                    sumi3 += Vector256.Multiply(dotHi, Vector256.Create((int)s3[sub + 1]));
+                    sumi3 += dotLo * Vector256.Create((int)s3[sub]);
+                    sumi3 += dotHi * Vector256.Create((int)s3[sub + 1]);
                 }
             }
 
