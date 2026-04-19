@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Cpu.Kernels;
 using Xunit;
@@ -109,7 +110,7 @@ public sealed unsafe class MatMulTests
     [Fact]
     public void VecDotQ8_0_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         var rng = new Random(42);
@@ -146,7 +147,7 @@ public sealed unsafe class MatMulTests
     [InlineData(344)]
     public void VecDotQ8_0_OptimizedAvx2_MatchesScalar(int blockCount)
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         var rng = new Random(42);
@@ -216,7 +217,7 @@ public sealed unsafe class MatMulTests
     [InlineData(344)]
     public void VecDotQ8_0_4Row_MatchesSingleRow(int blockCount)
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         var rng = new Random(42);
@@ -266,7 +267,7 @@ public sealed unsafe class MatMulTests
     [Fact]
     public void VecDotQ8_0_AllZeroScales()
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         const int blockCount = 4;
@@ -306,7 +307,7 @@ public sealed unsafe class MatMulTests
     [Fact]
     public void VecDotQ8_0_MaxValues()
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         const int blockCount = 4;
@@ -349,7 +350,7 @@ public sealed unsafe class MatMulTests
     [InlineData(7)]
     public void VecDotQ8_0_OddBlockCount(int blockCount)
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         var rng = new Random(42);
@@ -446,7 +447,7 @@ public sealed unsafe class MatMulTests
     [Fact]
     public void QuantizeF32ToQ8_0_Avx2_MatchesScalar()
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         var rng = new Random(42);

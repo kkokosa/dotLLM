@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Kernels;
@@ -59,7 +60,7 @@ public sealed unsafe class MatMulKQuantTests
     [Fact]
     public void QuantizeF32ToQ8_K_Avx2MatchesScalar()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int k = 512; // 2 blocks
         var rng = new Random(42);
@@ -156,7 +157,7 @@ public sealed unsafe class MatMulKQuantTests
     [Fact]
     public void VecDotQ4_K_Q8_K_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int superBlockCount = 4;
         var rng = new Random(42);
@@ -219,7 +220,7 @@ public sealed unsafe class MatMulKQuantTests
     [Fact]
     public void VecDotQ6_K_Q8_K_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int superBlockCount = 4;
         var rng = new Random(42);
@@ -283,7 +284,7 @@ public sealed unsafe class MatMulKQuantTests
     [Fact]
     public void VecDotQ5_K_Q8_K_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int superBlockCount = 4;
         var rng = new Random(42);

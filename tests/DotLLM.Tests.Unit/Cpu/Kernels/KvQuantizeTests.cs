@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using DotLLM.Cpu.Kernels;
 using Xunit;
 
@@ -40,7 +41,7 @@ public sealed unsafe class KvQuantizeTests
     [Fact]
     public void Q4_0_Avx2_MatchesScalar()
     {
-        if (!System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return; // Skip on non-AVX2 hardware
 
         float[] input = GenerateTestData(BlockSize * 8);
@@ -80,7 +81,7 @@ public sealed unsafe class KvQuantizeTests
     [Fact]
     public void Q4_0_Dequant_Avx2_MatchesScalar()
     {
-        if (!System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         float[] input = GenerateTestData(BlockSize * 4);
@@ -138,7 +139,7 @@ public sealed unsafe class KvQuantizeTests
     [Fact]
     public void Q8_0_Dequant_Avx2_MatchesScalar()
     {
-        if (!System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         float[] input = GenerateTestData(BlockSize * 4);

@@ -404,7 +404,7 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        return Vector256.Sum(acc) - sumMin;
+        return HorizontalSumVector256(acc) - sumMin;
     }
 
     /// <summary>
@@ -489,7 +489,7 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        return Vector256.Sum(acc) - sumBias;
+        return HorizontalSumVector256(acc) - sumBias;
     }
 
     /// <summary>
@@ -569,7 +569,7 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        return Vector256.Sum(acc) - sumMin;
+        return HorizontalSumVector256(acc) - sumMin;
     }
 
     // ──────────────────── True 4-row kernels with shared Q8_K activation loading ──────────────
@@ -696,10 +696,10 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        results[0] = Vector256.Sum(acc0) - sumMin0;
-        results[1] = Vector256.Sum(acc1) - sumMin1;
-        results[2] = Vector256.Sum(acc2) - sumMin2;
-        results[3] = Vector256.Sum(acc3) - sumMin3;
+        results[0] = HorizontalSumVector256(acc0) - sumMin0;
+        results[1] = HorizontalSumVector256(acc1) - sumMin1;
+        results[2] = HorizontalSumVector256(acc2) - sumMin2;
+        results[3] = HorizontalSumVector256(acc3) - sumMin3;
     }
 
     /// <summary>
@@ -837,10 +837,10 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        results[0] = Vector256.Sum(acc0) - sumMin0;
-        results[1] = Vector256.Sum(acc1) - sumMin1;
-        results[2] = Vector256.Sum(acc2) - sumMin2;
-        results[3] = Vector256.Sum(acc3) - sumMin3;
+        results[0] = HorizontalSumVector256(acc0) - sumMin0;
+        results[1] = HorizontalSumVector256(acc1) - sumMin1;
+        results[2] = HorizontalSumVector256(acc2) - sumMin2;
+        results[3] = HorizontalSumVector256(acc3) - sumMin3;
     }
 
     /// <summary>
@@ -1011,10 +1011,10 @@ public static unsafe partial class MatMul
             q8k += Q8_K_BlockBytes;
         }
 
-        results[0] = Vector256.Sum(acc0) - sumBias0;
-        results[1] = Vector256.Sum(acc1) - sumBias1;
-        results[2] = Vector256.Sum(acc2) - sumBias2;
-        results[3] = Vector256.Sum(acc3) - sumBias3;
+        results[0] = HorizontalSumVector256(acc0) - sumBias0;
+        results[1] = HorizontalSumVector256(acc1) - sumBias1;
+        results[2] = HorizontalSumVector256(acc2) - sumBias2;
+        results[3] = HorizontalSumVector256(acc3) - sumBias3;
     }
 
     // ──────────────────── ComputeRows for K-quants ────────────────────
@@ -1809,8 +1809,46 @@ public static unsafe partial class MatMul
         ref var ctx = ref Unsafe.AsRef<ComputeRowsR4Ctx>((void*)ctxPtr);
         PartitionRows(ctx.M, threadIdx, threadCount, out int start, out int count);
         if (count == 0) return;
-        ComputeKQuantR4Range(ref ctx, start, count, Q6_K_BlockBytes,
-            &VecDotQ6_K_Q8_K_4Rows, &VecDotQ6_K_Q8_KVector256, &VecDotQ6_K_Q8_KScalar);
+
+        int groupBytes = 4 * ctx.BlockCount * Q6_K_BlockBytes;
+        int rowBytes = ctx.BlockCount * Q6_K_BlockBytes;
+        int end = start + count;
+
+        int startGroup = start / 4;
+        int endGroup = Math.Min(end / 4, ctx.FullGroups);
+
+        for (int g = startGroup; g < endGroup; g++)
+        {
+            byte* groupBase = ctx.RepackedWeights + (long)g * groupBytes;
+            if (Vector256.IsHardwareAccelerated)
+            {
+                VecDotQ6_K_Q8_K_4RowsStrided(
+                    groupBase,
+                    groupBase + Q6_K_BlockBytes,
+                    groupBase + 2 * Q6_K_BlockBytes,
+                    groupBase + 3 * Q6_K_BlockBytes,
+                    4 * Q6_K_BlockBytes,
+                    ctx.XQ, ctx.BlockCount,
+                    ctx.Result + g * 4);
+            }
+            else
+            {
+                for (int r = 0; r < 4; r++)
+                    ctx.Result[g * 4 + r] = VecDotKQuantScalarR4(groupBase, r, ctx.XQ,
+                        ctx.BlockCount, Q6_K_BlockBytes, &VecDotQ6_K_Q8_KScalar);
+            }
+        }
+
+        if (ctx.TailRows > 0 && end > ctx.FullGroups * 4)
+        {
+            int tailStart = Math.Max(start, ctx.FullGroups * 4) - ctx.FullGroups * 4;
+            int tailEnd = Math.Min(end, ctx.M) - ctx.FullGroups * 4;
+            byte* tailBase = ctx.RepackedWeights + (long)ctx.FullGroups * groupBytes;
+            for (int r = tailStart; r < tailEnd; r++)
+                ctx.Result[ctx.FullGroups * 4 + r] = Vector256.IsHardwareAccelerated
+                    ? VecDotQ6_K_Q8_KVector256(tailBase + (long)r * rowBytes, ctx.XQ, ctx.BlockCount)
+                    : VecDotQ6_K_Q8_KScalar(tailBase + (long)r * rowBytes, ctx.XQ, ctx.BlockCount);
+        }
     }
 
     /// <summary>

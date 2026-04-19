@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Kernels;
@@ -100,7 +101,7 @@ public sealed unsafe class OuterProductGemmTests
     [InlineData(128)]  // 4096/32
     public void OuterProductAvx2_4x3_MatchesScalar(int blockCount)
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         var rng = new Random(42);
