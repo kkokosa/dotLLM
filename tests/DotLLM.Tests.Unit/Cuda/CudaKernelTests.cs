@@ -24,7 +24,7 @@ public class CudaKernelTests : IDisposable
         _stream = CudaStream.Create();
 
         // Find PTX directory
-        string ptxDir = FindPtxDir();
+        var ptxDir = FindPtxDir();
         if (ptxDir != null)
             _kernels = new CudaKernels(ptxDir);
     }
