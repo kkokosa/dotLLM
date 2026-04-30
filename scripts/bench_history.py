@@ -19,6 +19,7 @@ import atexit
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -216,10 +217,17 @@ def get_commits(last: int | None, from_hash: str | None, branch: str | None) -> 
 # Existing results cleanup
 # ---------------------------------------------------------------------------
 
+def _result_index_key(path: str) -> tuple[int, str]:
+    """Sort key that orders result files by numeric index (check_2 before check_10)."""
+    stem = Path(path).stem
+    m = re.search(r"_(\d+)$", stem)
+    return (int(m.group(1)) if m else -1, stem)
+
+
 def _find_existing_results(name: str, output_dir: str) -> list[str]:
     """Find existing result files matching the name pattern."""
     pattern = os.path.join(output_dir, f"{name}_*.json")
-    return sorted(glob.glob(pattern))
+    return sorted(glob.glob(pattern), key=_result_index_key)
 
 
 def _prompt_delete_existing(name: str, output_dir: str) -> None:
@@ -250,6 +258,18 @@ def _prompt_delete_existing(name: str, output_dir: str) -> None:
 # Git metadata patching
 # ---------------------------------------------------------------------------
 
+def _commit_date(commit_hash: str) -> str:
+    """Return the author date of a commit as YYYY-MM-DD, or '' on failure."""
+    try:
+        out = subprocess.check_output(
+            ["git", "log", "-1", "--format=%ad", "--date=short", commit_hash],
+            text=True, encoding="utf-8",
+        ).strip()
+        return out
+    except (subprocess.CalledProcessError, OSError):
+        return ""
+
+
 def _patch_git_metadata(output_file: str, commit: CommitInfo) -> None:
     """Patch the exported JSON so git.commit/branch/dirty reflect the actual commit."""
     try:
@@ -259,6 +279,9 @@ def _patch_git_metadata(output_file: str, commit: CommitInfo) -> None:
         data["git"]["commit"] = commit.full_hash
         data["git"]["branch"] = "detached"
         data["git"]["dirty"] = False
+        cdate = _commit_date(commit.full_hash)
+        if cdate:
+            data["git"]["commit_date"] = cdate
         with open(output_file, "w") as f:
             json.dump(data, f, indent=2)
     except (json.JSONDecodeError, OSError):
@@ -429,7 +452,7 @@ except ImportError:
 def _find_result_files(name: str, output_dir: str) -> list[str]:
     """Find result files for a run name, sorted by index."""
     pattern = os.path.join(output_dir, f"{name}_*.json")
-    files = sorted(glob.glob(pattern))
+    files = sorted(glob.glob(pattern), key=_result_index_key)
     return files
 
 
@@ -483,7 +506,8 @@ def _load_trend_rows(
             continue
 
         label = raw.get("label", Path(fpath).stem)
-        date = raw.get("timestamp", "")[:10]
+        git_meta = raw.get("git") or {}
+        date = git_meta.get("commit_date") or raw.get("timestamp", "")[:10]
 
         for r in raw.get("results", []):
             eng = r.get("engine", "dotLLM")
