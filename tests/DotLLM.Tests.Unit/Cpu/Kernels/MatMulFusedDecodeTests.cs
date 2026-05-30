@@ -84,6 +84,15 @@ public sealed unsafe class MatMulFusedDecodeTests : IDisposable
         RunFusedDecode3Test(m, m, m, k, QuantizationType.Q8_0, QuantizationType.Q4_K, QuantizationType.Q4_K);
     }
 
+    [Theory]
+    [InlineData(256, 256)]
+    [InlineData(128, 512)]
+    public void FusedDecodeGemv3_BF16_MatchesIndividual(int m, int k)
+    {
+        // BF16 projections (no pre-quantization, dispatches directly to GemvBF16)
+        RunFusedDecode3Test(m, m, m, k, QuantizationType.BF16, QuantizationType.BF16, QuantizationType.BF16);
+    }
+
     // ──────────────────── FusedDecodeGemv2 Tests ────────────────────
 
     [Theory]
@@ -108,6 +117,15 @@ public sealed unsafe class MatMulFusedDecodeTests : IDisposable
     {
         // Gate=Q8_0, Up=Q4_K — cross-family, dispatches separately
         RunFusedDecode2Test(m, m, k, QuantizationType.Q8_0, QuantizationType.Q4_K);
+    }
+
+    [Theory]
+    [InlineData(256, 256)]
+    [InlineData(128, 512)]
+    public void FusedDecodeGemv2_BF16_MatchesIndividual(int m, int k)
+    {
+        // BF16 Gate/Up projections
+        RunFusedDecode2Test(m, m, k, QuantizationType.BF16, QuantizationType.BF16);
     }
 
     // ──────────────────── Test runners ────────────────────
@@ -247,6 +265,9 @@ public sealed unsafe class MatMulFusedDecodeTests : IDisposable
             case QuantizationType.Q6_K:
                 MatMul.GemmQ6_K(weights, input, result, m, k, 1, preQuantizedInput: preQuant);
                 break;
+            case QuantizationType.BF16:
+                MatMul.GemmBF16((nint)weights, input, result, m, k, 1);
+                break;
             default:
                 throw new NotSupportedException($"Quant type {qt} not supported in test");
         }
@@ -261,6 +282,7 @@ public sealed unsafe class MatMulFusedDecodeTests : IDisposable
             QuantizationType.Q4_K => AllocKQuantWeights(m, k, Q4_K_BlockBytes, rng),
             QuantizationType.Q5_K => AllocKQuantWeights(m, k, Q5_K_BlockBytes, rng),
             QuantizationType.Q6_K => AllocKQuantWeights(m, k, Q6_K_BlockBytes, rng),
+            QuantizationType.BF16 => AllocBF16Weights(m, k, rng),
             _ => throw new NotSupportedException(),
         };
     }
@@ -292,6 +314,21 @@ public sealed unsafe class MatMulFusedDecodeTests : IDisposable
         int totalBytes = m * rowBytes;
         byte* ptr = (byte*)NativeMemory.AlignedAlloc((nuint)totalBytes, 64);
         FillKQuantWeights(ptr, totalBytes, rng);
+        return ptr;
+    }
+
+    private static byte* AllocBF16Weights(int m, int k, Random rng)
+    {
+        int totalElements = m * k;
+        int totalBytes = totalElements * sizeof(ushort);
+        byte* ptr = (byte*)NativeMemory.AlignedAlloc((nuint)totalBytes, 64);
+        ushort* bf16Ptr = (ushort*)ptr;
+        // Convert float32 to BF16 (upper 16 bits)
+        for (int i = 0; i < totalElements; i++)
+        {
+            float val = rng.NextSingle() * 2f - 1f;
+            bf16Ptr[i] = (ushort)(BitConverter.SingleToInt32Bits(val) >> 16);
+        }
         return ptr;
     }
 

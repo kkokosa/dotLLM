@@ -482,6 +482,8 @@ public sealed unsafe class TransformerModel : IModel
             MatMul.GemvF32((float*)weights, x, y, m, k, _threadPool);
         else if (qt == QuantizationType.F16)
             MatMul.GemvF16(weights, x, y, m, k, _threadPool);
+        else if (qt == QuantizationType.BF16)
+            MatMul.GemvBF16(weights, x, y, m, k, _threadPool);
         else
             GemvDequantFallback(weights, qt, x, y, m, k);
     }
@@ -533,6 +535,8 @@ public sealed unsafe class TransformerModel : IModel
             MatMul.GemmF32((float*)weights, b, c, m, k, n, _threadPool);
         else if (qt == QuantizationType.F16)
             MatMul.GemmF16(weights, b, c, m, k, n, _threadPool);
+        else if (qt == QuantizationType.BF16)
+            MatMul.GemmBF16(weights, b, c, m, k, n, _threadPool);
         else
             GemmDequantFallback(weights, qt, b, c, m, k, n);
     }
@@ -760,6 +764,13 @@ public sealed unsafe class TransformerModel : IModel
                 Half* src = (Half*)embPtr + (long)tokenId * hiddenSize;
                 System.Numerics.Tensors.TensorPrimitives.ConvertToSingle(
                     new ReadOnlySpan<Half>(src, hiddenSize), destSpan);
+            }
+            else if (qt == QuantizationType.BF16)
+            {
+                // BF16: convert each value by shifting left 16 bits to reconstruct float32
+                ushort* src = (ushort*)embPtr + (long)tokenId * hiddenSize;
+                for (int i = 0; i < hiddenSize; i++)
+                    dest[i] = BitConverter.Int32BitsToSingle(src[i] << 16);
             }
             else
             {

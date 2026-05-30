@@ -398,6 +398,11 @@ public static unsafe partial class MatMul
             GemvF16((nint)weights, input, result, m, k, pool);
             return;
         }
+        if (qt == QuantizationType.BF16)
+        {
+            GemvBF16((nint)weights, input, result, m, k, pool);
+            return;
+        }
 
         if (preQuantInput != null)
         {

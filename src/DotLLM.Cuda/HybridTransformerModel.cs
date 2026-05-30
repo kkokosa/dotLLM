@@ -708,6 +708,8 @@ public sealed unsafe class HybridTransformerModel : IModel
             MatMul.GemvF32((float*)weights, x, y, m, k, _threadPool);
         else if (qt == QuantizationType.F16)
             MatMul.GemvF16(weights, x, y, m, k, _threadPool);
+        else if (qt == QuantizationType.BF16)
+            MatMul.GemvBF16(weights, x, y, m, k, _threadPool);
         else
             GemvDequantFallback(weights, qt, x, y, m, k);
     }
@@ -750,6 +752,8 @@ public sealed unsafe class HybridTransformerModel : IModel
             MatMul.GemmF32((float*)weights, b, c, m, k, n, _threadPool);
         else if (qt == QuantizationType.F16)
             MatMul.GemmF16(weights, b, c, m, k, n, _threadPool);
+        else if (qt == QuantizationType.BF16)
+            MatMul.GemmBF16(weights, b, c, m, k, n, _threadPool);
         else
             GemmDequantFallback(weights, qt, b, c, m, k, n);
     }

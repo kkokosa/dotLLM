@@ -348,6 +348,121 @@ public sealed unsafe class DequantizeTests
         }
     }
 
+    // ──────────────────── BF16 ────────────────────
+
+    [Fact]
+    public void BF16_KnownValues_MatchExpected()
+    {
+        // BF16 is upper 16 bits of float32. Create known BF16 values.
+        // 1.0f = 0x3F800000 → BF16 = 0x3F80
+        // -2.0f = 0xC0000000 → BF16 = 0xC000
+        // 0.0f = 0x00000000 → BF16 = 0x0000
+        ushort[] input = [0x3F80, 0xC000, 0x0000, 0x4000]; // 1.0, -2.0, 0.0, 2.0
+        float[] expected = [1.0f, -2.0f, 0.0f, 2.0f];
+
+        nint ptr = (nint)NativeMemory.AlignedAlloc((nuint)(input.Length * sizeof(ushort)), 32);
+        try
+        {
+            input.AsSpan().CopyTo(new Span<ushort>((void*)ptr, input.Length));
+            float[] dest = new float[input.Length];
+
+            Dequantize.ToFloat32(ptr, input.Length, QuantizationType.BF16, dest);
+
+            for (int i = 0; i < expected.Length; i++)
+                Assert.Equal(expected[i], dest[i]);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
+    [Fact]
+    public void BF16_AllZeros_ProducesZeros()
+    {
+        const int count = 64;
+        nint ptr = (nint)NativeMemory.AlignedAlloc((nuint)(count * sizeof(ushort)), 32);
+        try
+        {
+            NativeMemory.Clear((void*)ptr, (nuint)(count * sizeof(ushort)));
+            float[] dest = new float[count];
+
+            Dequantize.ToFloat32(ptr, count, QuantizationType.BF16, dest);
+
+            Assert.All(dest, v => Assert.Equal(0f, v));
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
+    [Fact]
+    public void BF16_NegativeValues_Correct()
+    {
+        // -1.0f = 0xBF800000 → BF16 = 0xBF80
+        // -0.5f = 0xBF000000 → BF16 = 0xBF00
+        // -128.0f = 0xC3000000 → BF16 = 0xC300
+        ushort[] input = [0xBF80, 0xBF00, 0xC300];
+        float[] expected = [-1.0f, -0.5f, -128.0f];
+
+        nint ptr = (nint)NativeMemory.AlignedAlloc((nuint)(input.Length * sizeof(ushort)), 32);
+        try
+        {
+            input.AsSpan().CopyTo(new Span<ushort>((void*)ptr, input.Length));
+            float[] dest = new float[input.Length];
+
+            Dequantize.ToFloat32(ptr, input.Length, QuantizationType.BF16, dest);
+
+            for (int i = 0; i < input.Length; i++)
+                Assert.Equal(expected[i], dest[i]);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
+    [Fact]
+    public void BF16_RoundTrip_FromFloat32()
+    {
+        // Test that converting float32 → BF16 → float32 preserves values (within BF16 precision)
+        float[] original = [1.0f, 2.0f, 0.5f, -4.0f, 100.0f, 0.0f];
+        ushort[] bf16Values = new ushort[original.Length];
+
+        // Convert float32 to BF16 (truncate lower 16 bits)
+        for (int i = 0; i < original.Length; i++)
+        {
+            int bits = BitConverter.SingleToInt32Bits(original[i]);
+            bf16Values[i] = (ushort)(bits >> 16);
+        }
+
+        nint ptr = (nint)NativeMemory.AlignedAlloc((nuint)(bf16Values.Length * sizeof(ushort)), 32);
+        try
+        {
+            bf16Values.AsSpan().CopyTo(new Span<ushort>((void*)ptr, bf16Values.Length));
+            float[] dest = new float[original.Length];
+
+            Dequantize.ToFloat32(ptr, original.Length, QuantizationType.BF16, dest);
+
+            // For these exact values, BF16 should be lossless
+            for (int i = 0; i < original.Length; i++)
+                Assert.Equal(original[i], dest[i]);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
+    [Fact]
+    public void RowByteSize_BF16_ReturnsTwoBytesPerElement()
+    {
+        const int elementCount = 256;
+        long bytes = Dequantize.RowByteSize(elementCount, QuantizationType.BF16);
+        Assert.Equal(elementCount * 2, bytes);
+    }
+
     // ──────────────────── Dispatch ────────────────────
 
     [Fact]

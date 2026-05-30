@@ -131,7 +131,7 @@ internal sealed class CudaWeights : IDisposable
         }
         else
         {
-            // Q4_K, Q5_K, Q6_K, Q4_0 — no per-row embedding kernel; dequant entire table to FP16
+            // BF16, Q4_K, Q5_K, Q6_K, Q4_0 — no per-row embedding kernel; dequant entire table to FP16
             tokenEmbed = UploadAndDequant(cpuWeights.TokenEmbedWeight, tokenEmbedQt,
                 config.VocabSize, config.HiddenSize, allocs, kernels, stream);
             tokenEmbedQt = QuantizationType.F16;
@@ -230,7 +230,7 @@ internal sealed class CudaWeights : IDisposable
     private static nint UploadQuantized(nint hostPtr, QuantizationType qt,
                                           int outputDim, int inputDim, List<nint> allocs)
     {
-        if (qt is QuantizationType.F16 or QuantizationType.F32)
+        if (qt is QuantizationType.F16 or QuantizationType.F32 or QuantizationType.BF16)
             return 0; // Non-quantized weights don't need a separate quantized copy
 
         long quantBytes = Dequantize.RowByteSize(inputDim, qt) * outputDim;
@@ -238,7 +238,7 @@ internal sealed class CudaWeights : IDisposable
     }
 
     /// <summary>Upload quantized weight to GPU, then dequantize to FP16 on device.</summary>
-    private static nint UploadAndDequant(nint hostPtr, QuantizationType qt,
+    private static unsafe nint UploadAndDequant(nint hostPtr, QuantizationType qt,
                                            int outputDim, int inputDim,
                                            List<nint> allocs, CudaKernels kernels, nint stream)
     {
@@ -249,6 +249,31 @@ internal sealed class CudaWeights : IDisposable
             // Already FP16 — just upload
             long bytes = (long)totalElements * sizeof(ushort);
             return AllocAndUpload(hostPtr, bytes, allocs);
+        }
+
+        if (qt == QuantizationType.BF16)
+        {
+            // BF16 has same byte size as FP16, but needs conversion to FP16
+            // For now, upload raw BF16 and convert on device (or keep as BF16 if kernel supports it)
+            // Since we don't have a BF16→FP16 CUDA kernel yet, we'll convert on CPU and upload
+            long bf16Bytes = (long)totalElements * sizeof(ushort);
+            long f16Bytes = (long)totalElements * sizeof(ushort);
+
+            // Allocate host buffer for FP16 conversion
+            var f16Host = new ushort[totalElements];
+            var bf16Ptr = (ushort*)hostPtr;
+            for (int i = 0; i < totalElements; i++)
+            {
+                // BF16 → F32 → F16
+                float f32 = BitConverter.Int32BitsToSingle(bf16Ptr[i] << 16);
+                f16Host[i] = BitConverter.HalfToUInt16Bits((Half)f32);
+            }
+
+            CudaDriverApi.cuMemAlloc_v2(out nint devF16, (nuint)f16Bytes).ThrowOnError();
+            allocs.Add(devF16);
+            fixed (ushort* f16Ptr = f16Host)
+                CudaDriverApi.cuMemcpyHtoD_v2(devF16, (nint)f16Ptr, (nuint)f16Bytes).ThrowOnError();
+            return devF16;
         }
 
         if (qt == QuantizationType.F32)
@@ -308,7 +333,7 @@ internal sealed class CudaWeights : IDisposable
     }
 
     private static bool IsQuantized(QuantizationType qt) =>
-        qt is not QuantizationType.F16 and not QuantizationType.F32;
+        qt is not QuantizationType.F16 and not QuantizationType.F32 and not QuantizationType.BF16;
 
     /// <summary>
     /// Whether to skip the persistent FP16 copy for this quant type.
