@@ -52,6 +52,39 @@ public static class ChatCompletionEndpoint
         var modelId = state.Options.ModelId;
         var generator = state.Generator;
 
+        // Validate prefix_id reference (Step 37): must be registered if supplied.
+        if (!string.IsNullOrWhiteSpace(request.PrefixId))
+        {
+            var mgr = state.PrefixTrieManager;
+            if (mgr is null || mgr.InspectNamedPrefix(request.PrefixId) is null)
+            {
+                httpContext.Response.StatusCode = 400;
+                await httpContext.Response.WriteAsJsonAsync(
+                    new ErrorResponse { Error = $"prefix_id '{request.PrefixId}' is not registered. POST /v1/prompt-cache/{request.PrefixId} first." },
+                    ServerJsonContext.Default.ErrorResponse,
+                    contentType: null,
+                    httpContext.RequestAborted);
+                return;
+            }
+        }
+
+        // Resolve LoRA adapter (if requested) — bad name → 400 with available list
+        DotLLM.Core.Lora.ILoraAdapter? adapter;
+        try
+        {
+            adapter = LoraEndpoints.Resolve(request.LoraAdapter, state);
+        }
+        catch (LoraAdapterNotFoundException ex)
+        {
+            httpContext.Response.StatusCode = 400;
+            await httpContext.Response.WriteAsJsonAsync(
+                new ErrorResponse { Error = ex.Message },
+                ServerJsonContext.Default.ErrorResponse,
+                contentType: null,
+                httpContext.RequestAborted);
+            return;
+        }
+
         // Convert DTOs to engine types
         var messages = RequestConverter.ToMessages(request.Messages);
         var tools = RequestConverter.ToTools(request.Tools);
@@ -91,10 +124,10 @@ public static class ChatCompletionEndpoint
 
         if (request.Stream)
             await HandleStreamingAsync(request, generator, state, httpContext, prompt, options,
-                requestId, modelId, tools, ct);
+                requestId, modelId, tools, adapter, ct);
         else
             await HandleNonStreamingAsync(request, generator, state, httpContext, prompt, options,
-                requestId, modelId, tools, ct);
+                requestId, modelId, tools, adapter, ct);
     }
 
     private static async Task HandleNonStreamingAsync(
@@ -106,13 +139,14 @@ public static class ChatCompletionEndpoint
         DotLLM.Core.Configuration.InferenceOptions options,
         string requestId, string modelId,
         ToolDefinition[]? tools,
+        DotLLM.Core.Lora.ILoraAdapter? adapter,
         CancellationToken ct)
     {
         InferenceResponse? result = null;
 
         await state.ExecuteAsync(async () =>
         {
-            result = generator.Generate(prompt, options);
+            result = generator.Generate(prompt, options, adapter: adapter);
         }, ct);
 
         // Detect tool calls
@@ -183,6 +217,7 @@ public static class ChatCompletionEndpoint
         DotLLM.Core.Configuration.InferenceOptions options,
         string requestId, string modelId,
         ToolDefinition[]? tools,
+        DotLLM.Core.Lora.ILoraAdapter? adapter,
         CancellationToken ct)
     {
         httpContext.Response.ContentType = "text/event-stream";
@@ -208,7 +243,7 @@ public static class ChatCompletionEndpoint
 
         await state.ExecuteAsync(async () =>
         {
-            await foreach (var token in generator.GenerateStreamingTokensAsync(prompt, options, ct))
+            await foreach (var token in generator.GenerateStreamingTokensAsync(prompt, options, ct, adapter))
             {
                 if (token.Text.Length > 0)
                 {

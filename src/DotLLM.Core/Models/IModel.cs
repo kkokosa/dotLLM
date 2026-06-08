@@ -1,4 +1,5 @@
 using DotLLM.Core.Attention;
+using DotLLM.Core.Lora;
 using DotLLM.Core.Tensors;
 
 namespace DotLLM.Core.Models;
@@ -32,4 +33,24 @@ public interface IModel : IDisposable
     /// <param name="kvCache">Optional KV-cache. When null, behaves identically to the uncached forward pass.</param>
     /// <returns>Logits tensor of shape [1, vocab_size] for the last token.</returns>
     ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions, int deviceId, IKvCache? kvCache);
+
+    /// <summary>
+    /// Runs a forward pass with optional KV-cache and an optional LoRA adapter.
+    /// When <paramref name="adapter"/> is non-null and supplies <c>(layer, proj)</c>
+    /// factor pairs that match the current model's projection sites, the runtime
+    /// adds the LoRA delta <c>alpha × (x · B) · A</c> to each adapted projection.
+    /// </summary>
+    /// <param name="tokenIds">Input token IDs for this step.</param>
+    /// <param name="positions">Position indices for each token.</param>
+    /// <param name="deviceId">Target device for computation.</param>
+    /// <param name="kvCache">Optional KV-cache. When null, behaves identically to the uncached forward pass.</param>
+    /// <param name="adapter">
+    /// Optional LoRA adapter. When null, behaves byte-equivalently to the
+    /// adapter-less <see cref="Forward(ReadOnlySpan{int}, ReadOnlySpan{int}, int, IKvCache?)"/>
+    /// overload (default implementation forwards to it).
+    /// </param>
+    /// <returns>Logits tensor of shape [seq, vocab_size] for all input positions.</returns>
+    ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions, int deviceId,
+                    IKvCache? kvCache, ILoraAdapter? adapter)
+        => Forward(tokenIds, positions, deviceId, kvCache);
 }

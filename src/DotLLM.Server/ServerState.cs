@@ -1,5 +1,6 @@
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
+using DotLLM.Core.Lora;
 using DotLLM.Core.Models;
 using DotLLM.Engine;
 using DotLLM.Engine.KvCache;
@@ -40,6 +41,9 @@ public sealed class ServerState : IDisposable
     /// <summary>Prefix cache for prompt caching (null when disabled).</summary>
     public PrefixCache? PrefixCache { get; set; }
 
+    /// <summary>Cross-request prefix trie manager (Step 37). Non-null when paged KV-cache is active.</summary>
+    public PrefixTrieManager? PrefixTrieManager { get; set; }
+
     /// <summary>Whether a model is loaded and ready to accept requests.</summary>
     public bool IsReady { get; set; }
 
@@ -76,6 +80,13 @@ public sealed class ServerState : IDisposable
     public GgufFile? DraftGguf { get; set; }
 
     /// <summary>
+    /// Process-wide LoRA adapter registry (singleton). Set by
+    /// <see cref="ServerStartup"/> and shared between admin endpoints
+    /// (<c>POST /v1/lora/load</c>) and the inference pipeline.
+    /// </summary>
+    public ILoraAdapterRegistry? LoraRegistry { get; set; }
+
+    /// <summary>
     /// Executes a request with sequential access control.
     /// Only one request is processed at a time (Step 35 adds batching).
     /// </summary>
@@ -98,6 +109,8 @@ public sealed class ServerState : IDisposable
         {
             PrefixCache?.Dispose();
             PrefixCache = null;
+            PrefixTrieManager?.Dispose();
+            PrefixTrieManager = null;
             PagedFactory?.Dispose();
             PagedFactory = null;
             DraftModel?.Dispose();
@@ -118,11 +131,13 @@ public sealed class ServerState : IDisposable
     public void Dispose()
     {
         PrefixCache?.Dispose();
+        PrefixTrieManager?.Dispose();
         PagedFactory?.Dispose();
         DraftModel?.Dispose();
         DraftGguf?.Dispose();
         Model?.Dispose();
         CurrentGguf?.Dispose();
+        LoraRegistry?.Dispose();
         _requestGate.Dispose();
     }
 }

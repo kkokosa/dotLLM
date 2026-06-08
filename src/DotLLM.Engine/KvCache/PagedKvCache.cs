@@ -35,6 +35,23 @@ public sealed unsafe class PagedKvCache : IKvCache
     /// <summary>The block table mapping logical positions to physical blocks.</summary>
     internal KvBlockTable BlockTable => _blockTable;
 
+    /// <summary>The block pool backing this cache.</summary>
+    internal KvBlockPool Pool => _pool;
+
+    /// <summary>
+    /// Seeds the cache with shared prefix blocks whose refcounts have already been
+    /// incremented. Bumps the visible length to <paramref name="tokenCount"/>.
+    /// </summary>
+    internal void SeedSharedPrefix(IReadOnlyList<int> blockIds, int tokenCount) =>
+        _blockTable.SeedSharedBlocks(blockIds, tokenCount);
+
+    /// <summary>
+    /// Snapshots block IDs covering the first <paramref name="tokenCount"/> tokens
+    /// (full blocks only). Caller appends to <paramref name="blockIds"/>.
+    /// </summary>
+    internal void SnapshotFullBlocks(int tokenCount, List<int> blockIds) =>
+        _blockTable.SnapshotFullBlocks(tokenCount, blockIds);
+
     /// <summary>
     /// Creates a new paged KV-cache backed by the given block pool.
     /// </summary>

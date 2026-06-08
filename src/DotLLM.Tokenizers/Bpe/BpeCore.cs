@@ -19,6 +19,27 @@ internal interface IBpeEncoding
     int[] EncodeSegment(string text) => Encode(text);
     string Decode(ReadOnlySpan<int> tokenIds);
     string Decode(ReadOnlySpan<int> tokenIds, bool stripBosSpace) => Decode(tokenIds);
+
+    /// <summary>
+    /// Zero-allocation decode into a caller-provided <see cref="Span{Char}"/>. Returns
+    /// <see langword="true"/> on success with the character count in <paramref name="charsWritten"/>,
+    /// or <see langword="false"/> when the destination was too small (contents of
+    /// <paramref name="destination"/> unspecified on failure). The default forwards to the
+    /// allocating <see cref="Decode(ReadOnlySpan{int}, bool)"/> + copy.
+    /// </summary>
+    bool TryDecode(ReadOnlySpan<int> tokenIds, bool stripBosSpace, Span<char> destination, out int charsWritten)
+    {
+        string decoded = Decode(tokenIds, stripBosSpace);
+        if (decoded.Length > destination.Length)
+        {
+            charsWritten = 0;
+            return false;
+        }
+        decoded.AsSpan().CopyTo(destination);
+        charsWritten = decoded.Length;
+        return true;
+    }
+
     string DecodeToken(int tokenId);
 }
 
@@ -107,6 +128,23 @@ internal static class BpeCore
         if (count == 0) return;
         sb.Append(Encoding.UTF8.GetString(buffer!, 0, count));
         count = 0;
+    }
+
+    /// <summary>
+    /// Writes buffered bytes as UTF-8 chars into <paramref name="destination"/> starting at
+    /// <paramref name="cursor"/>, advances <paramref name="cursor"/>, and resets
+    /// <paramref name="count"/>. Returns <see langword="false"/> when the destination is
+    /// too small (cursor and count are unchanged in that case).
+    /// </summary>
+    internal static bool TryFlushByteBuffer(Span<char> destination, ref int cursor, byte[]? buffer, ref int count)
+    {
+        if (count == 0) return true;
+        int needed = Encoding.UTF8.GetCharCount(buffer!, 0, count);
+        if (cursor + needed > destination.Length) return false;
+        int written = Encoding.UTF8.GetChars(buffer.AsSpan(0, count), destination[cursor..]);
+        cursor += written;
+        count = 0;
+        return true;
     }
 
     /// <summary>

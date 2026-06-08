@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Cpu.Kernels;
@@ -155,11 +156,19 @@ internal sealed class TransformerWeights : IDisposable
     /// <summary>R4-interleaved LM head weights. Null until <see cref="RepackWeights"/> is called or if type is not repackable.</summary>
     public WeightRepacking.RepackedWeight? RepackedOutput { get; private set; }
 
+    /// <summary>
+    /// Loader-owned 64-byte-aligned allocations created at load time (e.g.
+    /// bf16 → F32 upcasts for the safetensors path). Freed by
+    /// <see cref="Dispose"/>. Empty for pure-mmap GGUF loads.
+    /// </summary>
+    private readonly List<nint>? _ownedAllocations;
+
     private TransformerWeights(
         nint tokenEmbedWeight, QuantizationType tokenEmbedQuantType, int vocabSize, int hiddenSize,
         TransformerLayerWeights[] layers,
         float[] outputNormWeight,
-        nint outputWeight, QuantizationType outputQuantType, int outputOutputDim, int outputInputDim)
+        nint outputWeight, QuantizationType outputQuantType, int outputOutputDim, int outputInputDim,
+        List<nint>? ownedAllocations = null)
     {
         TokenEmbedWeight = tokenEmbedWeight;
         TokenEmbedQuantType = tokenEmbedQuantType;
@@ -171,6 +180,27 @@ internal sealed class TransformerWeights : IDisposable
         OutputQuantType = outputQuantType;
         OutputOutputDim = outputOutputDim;
         OutputInputDim = outputInputDim;
+        _ownedAllocations = ownedAllocations;
+    }
+
+    /// <summary>
+    /// Factory used by the safetensors loader. Wraps the private constructor
+    /// and accepts the list of owned allocations (bf16→F32 upcast buffers)
+    /// that must be freed when the weights are disposed.
+    /// </summary>
+    internal static TransformerWeights CreateFromSafetensors(
+        nint tokenEmbedWeight, QuantizationType tokenEmbedQt, int vocabSize, int hiddenSize,
+        TransformerLayerWeights[] layers,
+        float[] outputNormWeight,
+        nint outputWeight, QuantizationType outputQt, int outputM, int outputK,
+        List<nint> ownedAllocations)
+    {
+        return new TransformerWeights(
+            tokenEmbedWeight, tokenEmbedQt, vocabSize, hiddenSize,
+            layers,
+            outputNormWeight,
+            outputWeight, outputQt, outputM, outputK,
+            ownedAllocations);
     }
 
     /// <summary>
@@ -261,8 +291,8 @@ internal sealed class TransformerWeights : IDisposable
         return WeightRepacking.RepackR4(ptr, qt, m, k);
     }
 
-    /// <summary>Frees all R4-interleaved weight buffers.</summary>
-    public void Dispose()
+    /// <summary>Frees all R4-interleaved weight buffers and any owned aligned allocations.</summary>
+    public unsafe void Dispose()
     {
         if (RepackedLayers is not null)
         {
@@ -272,6 +302,16 @@ internal sealed class TransformerWeights : IDisposable
         }
         RepackedOutput?.Dispose();
         RepackedOutput = null;
+
+        if (_ownedAllocations is not null)
+        {
+            foreach (var ptr in _ownedAllocations)
+            {
+                if (ptr != nint.Zero)
+                    NativeMemory.AlignedFree((void*)ptr);
+            }
+            _ownedAllocations.Clear();
+        }
     }
 
     private static TransformerLayerWeights LoadLayer(

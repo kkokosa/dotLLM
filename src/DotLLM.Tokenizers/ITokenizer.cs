@@ -26,6 +26,46 @@ public interface ITokenizer
     /// <returns>Decoded text.</returns>
     string Decode(ReadOnlySpan<int> tokenIds, bool stripBosSpace) => Decode(tokenIds);
 
+    /// <summary>
+    /// Attempts to decode a sequence of token IDs into the caller-provided destination span
+    /// without allocating an intermediate <see cref="string"/>. Returns <see langword="true"/>
+    /// when the decoded text fit in <paramref name="destination"/> (with the character count
+    /// written to <paramref name="charsWritten"/>), or <see langword="false"/> when the
+    /// destination was too small.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The default interface method forwards to <see cref="Decode(ReadOnlySpan{int}, bool)"/>
+    /// and copies into <paramref name="destination"/> — providing the surface for every
+    /// <see cref="ITokenizer"/> implementation, but only the implementations that override
+    /// this method gain the zero-allocation benefit. <see cref="DotLLM.Tokenizers.Bpe.BpeTokenizer"/>
+    /// overrides it for both the tiktoken (Llama-3, GPT-4, Qwen-2) and SentencePiece (Llama-1/2,
+    /// Mistral, TinyLlama) encodings.
+    /// </para>
+    /// <para>
+    /// On a <see langword="false"/> return, the contents of <paramref name="destination"/>
+    /// are unspecified — callers must either retry with a larger buffer or fall back to
+    /// the allocating <see cref="Decode(ReadOnlySpan{int}, bool)"/> overload.
+    /// </para>
+    /// </remarks>
+    /// <param name="tokenIds">Token IDs to decode.</param>
+    /// <param name="stripBosSpace">When <see langword="true"/>, strips the leading space introduced by SentencePiece BOS ▁ prepending.</param>
+    /// <param name="destination">Destination character buffer. May be empty when <paramref name="tokenIds"/> is empty.</param>
+    /// <param name="charsWritten">Number of characters written to <paramref name="destination"/> on success; <c>0</c> on failure.</param>
+    /// <returns><see langword="true"/> if the decoded text fit; otherwise <see langword="false"/>.</returns>
+    bool TryDecode(ReadOnlySpan<int> tokenIds, bool stripBosSpace, Span<char> destination, out int charsWritten)
+    {
+        string decoded = Decode(tokenIds, stripBosSpace);
+        if (decoded.Length > destination.Length)
+        {
+            charsWritten = 0;
+            return false;
+        }
+        decoded.AsSpan().CopyTo(destination);
+        charsWritten = decoded.Length;
+        return true;
+    }
+
     /// <summary>Decodes a single token ID to its string representation.</summary>
     /// <param name="tokenId">Token ID to decode.</param>
     /// <returns>String representation of the token.</returns>

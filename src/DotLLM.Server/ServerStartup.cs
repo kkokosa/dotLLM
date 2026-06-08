@@ -1,5 +1,6 @@
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
+using DotLLM.Core.Lora;
 using DotLLM.Core.Models;
 using DotLLM.Engine;
 using DotLLM.Engine.KvCache;
@@ -58,7 +59,17 @@ public static class ServerStartup
     {
         Options = options,
         IsReady = false,
+        LoraRegistry = CreateLoraRegistry(),
     };
+
+    /// <summary>
+    /// Builds the process-wide LoRA adapter registry. The factory delegate
+    /// uses <see cref="PeftAdapterLoader.LoadFromDirectory"/> so adapters can
+    /// be loaded from disk via <c>POST /v1/lora/load</c>.
+    /// </summary>
+    public static ILoraAdapterRegistry CreateLoraRegistry()
+        => new LoraAdapterRegistry(
+            (name, path) => PeftAdapterLoader.LoadFromDirectory(name, path, baseConfig: null));
 
     /// <summary>
     /// Loads a model from the given GGUF path and returns a fully populated <see cref="ServerState"/>.
@@ -116,6 +127,7 @@ public static class ServerStartup
 
         Func<ModelConfig, int, IKvCache>? kvFactory = null;
         PagedKvCacheFactory? pagedFactory = null;
+        PrefixTrieManager? prefixTrieManager = null;
         if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
         {
             if (options.UsePaged)
@@ -135,7 +147,9 @@ public static class ServerStartup
             pagedFactory = new PagedKvCacheFactory(
                 config.NumLayers, config.NumKvHeads, config.HeadDim);
             kvFactory = (cfg, size) => pagedFactory.Create(size);
-            Console.WriteLine("[dotllm] Using paged KV-cache (block-based allocation)");
+            // Cross-request prefix cache (Step 37). Enabled in tandem with paged.
+            prefixTrieManager = new PrefixTrieManager(pagedFactory);
+            Console.WriteLine("[dotllm] Using paged KV-cache (block-based allocation) with cross-request prefix cache");
         }
         else if (options.UsePaged && kvConfig.IsQuantized)
         {
@@ -185,7 +199,8 @@ public static class ServerStartup
         }
 
         var generator = new TextGenerator(model, tokenizer, kvFactory, prefixCache,
-            draftModel: draftModel, speculativeCandidates: options.SpeculativeCandidates);
+            draftModel: draftModel, speculativeCandidates: options.SpeculativeCandidates,
+            prefixTrieManager: prefixTrieManager);
 
         // Warm-up: JIT pre-compilation + CUDA kernel loading
         WarmupRunner.Run(generator, tokenizer, options.Warmup);
@@ -200,6 +215,7 @@ public static class ServerStartup
             KvCacheFactory = kvFactory,
             PagedFactory = pagedFactory,
             PrefixCache = prefixCache,
+            PrefixTrieManager = prefixTrieManager,
             IsReady = true,
             Model = model,
             Tokenizer = tokenizer,
@@ -210,6 +226,7 @@ public static class ServerStartup
             DraftModel = draftModel,
             DraftModelPath = draftModelPath,
             DraftGguf = draftGguf,
+            LoraRegistry = CreateLoraRegistry(),
         };
     }
 

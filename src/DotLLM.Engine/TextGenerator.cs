@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Constraints;
+using DotLLM.Core.Lora;
 using DotLLM.Core.Models;
 using DotLLM.Core.Sampling;
 using DotLLM.Core.Tensors;
@@ -12,6 +13,8 @@ using DotLLM.Engine.KvCache;
 using DotLLM.Engine.PromptCache;
 using DotLLM.Engine.Samplers;
 using DotLLM.Engine.Samplers.StopConditions;
+using DotLLM.Engine.Strategies;
+using DotLLM.Telemetry;
 using DotLLM.Tokenizers;
 
 namespace DotLLM.Engine;
@@ -26,9 +29,11 @@ public sealed class TextGenerator
     private readonly ITokenizer _tokenizer;
     private readonly Func<ModelConfig, int, Core.Attention.IKvCache>? _kvCacheFactory;
     private readonly PrefixCache? _prefixCache;
+    private readonly PrefixTrieManager? _prefixTrieManager;
     private readonly IModel? _draftModel;
     private readonly Func<ModelConfig, int, Core.Attention.IKvCache>? _draftKvCacheFactory;
     private readonly int _speculativeCandidates;
+    private readonly HybridPrefillDecodeStrategy? _hybridStrategy;
 
     /// <summary>
     /// Creates a new text generator.
@@ -42,21 +47,43 @@ public sealed class TextGenerator
     /// <param name="draftModel">Optional draft model for speculative decoding.</param>
     /// <param name="draftKvCacheFactory">Optional factory for creating the draft model's KV-cache.</param>
     /// <param name="speculativeCandidates">Number of draft tokens per speculative step (K). Default 5.</param>
+    /// <param name="prefixTrieManager">Optional cross-request prefix trie manager (Step 37).
+    /// Takes precedence over <paramref name="prefixCache"/> when supplied — multiple sessions
+    /// share KV blocks via the trie.</param>
+    /// <param name="hybridStrategy">Optional CPU-prefill / GPU-decode hybrid strategy. When set
+    /// and the prompt length is below the strategy's crossover threshold, prefill runs on the
+    /// strategy's CPU model and the KV state is handed off to <paramref name="model"/> (the
+    /// decode model) before the decode loop. When the prompt exceeds the threshold, or when
+    /// the strategy is null, the existing single-backend path runs unchanged.</param>
     public TextGenerator(IModel model, ITokenizer tokenizer,
                           Func<ModelConfig, int, Core.Attention.IKvCache>? kvCacheFactory = null,
                           PrefixCache? prefixCache = null,
                           IModel? draftModel = null,
                           Func<ModelConfig, int, Core.Attention.IKvCache>? draftKvCacheFactory = null,
-                          int speculativeCandidates = 5)
+                          int speculativeCandidates = 5,
+                          PrefixTrieManager? prefixTrieManager = null,
+                          HybridPrefillDecodeStrategy? hybridStrategy = null)
     {
         _model = model;
         _tokenizer = tokenizer;
         _kvCacheFactory = kvCacheFactory;
         _prefixCache = prefixCache;
+        _prefixTrieManager = prefixTrieManager;
         _draftModel = draftModel;
         _draftKvCacheFactory = draftKvCacheFactory;
         _speculativeCandidates = speculativeCandidates;
+        _hybridStrategy = hybridStrategy;
+
+        if (hybridStrategy is not null
+            && !ReferenceEquals(hybridStrategy.DecodeModel, model))
+        {
+            throw new ArgumentException(
+                "When a HybridPrefillDecodeStrategy is supplied, its DecodeModel must be the same "
+                + "instance as the TextGenerator's primary model (which runs the decode loop).",
+                nameof(hybridStrategy));
+        }
     }
+
 
     /// <summary>
     /// Generates text from the given prompt using the specified options.
@@ -64,361 +91,162 @@ public sealed class TextGenerator
     /// <param name="prompt">Input text prompt.</param>
     /// <param name="options">Inference options controlling sampling and stopping. Null uses defaults.</param>
     /// <param name="onTokenGenerated">Optional callback invoked after each token is generated, receiving the token ID.</param>
+    /// <param name="adapter">Optional LoRA adapter to apply during the forward passes (Phase 4c).</param>
     /// <returns>The inference response with generated text, metadata, and timings.</returns>
+    /// <remarks>
+    /// Synchronous wrapper over <see cref="GenerateCoreAsync"/>. The core never <c>await</c>s a
+    /// non-completed task (every <c>MoveNextAsync</c> completes inline because all model / sampler
+    /// calls are CPU/GPU-synchronous), so the blocking drain pattern is safe — it never schedules
+    /// a continuation on the thread pool. Accumulates ids and logprobs via side-effect parameters
+    /// so the core's existing keep/remove semantics on stop conditions are preserved byte-identical
+    /// without reconstruction logic in this wrapper.
+    /// </remarks>
     public InferenceResponse Generate(string prompt, InferenceOptions? options = null,
-        Action<int>? onTokenGenerated = null)
+        Action<int>? onTokenGenerated = null,
+        ILoraAdapter? adapter = null)
     {
         options ??= new InferenceOptions();
-
-        int[] promptIds = _tokenizer.Encode(prompt);
-        int promptLen = promptIds.Length;
         int maxTokens = options.MaxTokens;
-        int vocabSize = _model.Config.VocabSize;
 
-        // Guard: empty prompt — use BOS token as seed
-        if (promptLen == 0)
-        {
-            promptIds = [_tokenizer.BosTokenId];
-            promptLen = 1;
-        }
-
-        // Guard: MaxTokens=0 — return immediately, no generation
+        // Guard: MaxTokens=0 — return immediately, no generation. Pre-encode to honour the
+        // PromptTokenCount contract (matches the empty-prompt → BOS-seed guard inside the core).
         if (maxTokens <= 0)
         {
+            int[] promptIdsEarly = _tokenizer.Encode(prompt);
+            int promptLenEarly = promptIdsEarly.Length == 0 ? 1 : promptIdsEarly.Length;
             return new InferenceResponse
             {
                 GeneratedTokenIds = [],
                 Text = string.Empty,
                 FinishReason = FinishReason.Length,
-                PromptTokenCount = promptLen,
+                PromptTokenCount = promptLenEarly,
                 GeneratedTokenCount = 0
             };
         }
 
-        // Build sampling pipeline
-        var pipeline = new SamplerPipeline(options);
-
-        // Logprobs capture setup
         bool captureLogprobs = options.Logprobs;
-        int topLogprobs = Math.Clamp(options.TopLogprobs, 0, 20);
-        List<TokenLogprobInfo>? logprobsList = captureLogprobs ? new List<TokenLogprobInfo>(maxTokens) : null;
+        var generatedIds = new List<int>(maxTokens);
+        var logprobsList = captureLogprobs ? new List<TokenLogprobInfo>(maxTokens) : null;
 
-        // Build decoding constraint for structured output
-        IDecodingConstraint? constraint = options.ResponseFormat switch
-        {
-            ResponseFormat.JsonObject => new JsonConstraint(_tokenizer),
-            ResponseFormat.JsonSchema js => new JsonSchemaConstraint(_tokenizer, js.Schema),
-            ResponseFormat.Regex rx => new RegexConstraint(_tokenizer, rx.Pattern),
-            ResponseFormat.Grammar gr => new GrammarConstraint(_tokenizer, gr.GbnfGrammar),
-            _ => null
-        };
+        // Stop-conditions list is replicated here so the wrapper can pass it to
+        // BuildResponseFromTimings for character-level suffix trimming on stop-string matches.
+        // The core builds its own identical list via the same helper; the two lists are
+        // semantically equivalent.
+        var stopConditions = BuildStopConditions(options, maxTokens);
 
-        // Build stop conditions — use explicit list if provided, otherwise default set
-        List<IStopCondition> stopConditions;
-        if (options.StopConditions is not null)
-        {
-            stopConditions = new List<IStopCondition>(options.StopConditions);
-        }
-        else
-        {
-            stopConditions = new List<IStopCondition>
-            {
-                new EosStopCondition(_tokenizer.EosTokenId),
-                new MaxTokensStopCondition(maxTokens)
-            };
-            // TODO: Trim matched suffix only, not entire token (see PR #24 review)
-            foreach (string seq in options.StopSequences)
-                stopConditions.Add(new StopStringCondition(seq));
-        }
+        FinishReason finishReason = FinishReason.Length;
+        InferenceTimings? terminalTimings = null;
 
-        // Resolve KV-cache: reuse from prefix cache or allocate fresh
-        var (kvCache, cachedTokenCount, ownsKvCache) = ResolveKvCache(promptIds, promptLen, maxTokens);
-
-        // Stop-check scratch buffer: rented up-front and returned in the outer finally to preserve
-        // the zero-GC-pressure guarantee on the inference hot path.
-        int stopTailSize = ComputeStopTailSize(stopConditions);
-        char[] stopScratch = ArrayPool<char>.Shared.Rent(stopTailSize);
-
+        var enumerator = GenerateCoreAsync(prompt, options, generatedIds, logprobsList,
+            CancellationToken.None, adapter).GetAsyncEnumerator();
         try
         {
-            var generatedIds = new List<int>(maxTokens);
-            var finishReason = FinishReason.Length;
-            long prefillTicks = 0;
-            long decodeTicks = 0;
-            long samplerTicks = 0;
-            int cacheSize = kvCache.MaxLength;
-
-            // Incremental detokenizer keeps stop-check cost O(1) amortized per token
-            // instead of decoding the entire generated sequence each step (O(n²)).
-            var detok = new IncrementalDetokenizer(_tokenizer, initialCapacity: Math.Max(64, maxTokens * 4));
-
-            // Local helper: snapshot log-softmax before sampling (which modifies logits in-place),
-            // sample a token, then build logprob info.
-            (int tokenId, TokenLogprobInfo? logprob) SampleWithLogprobs(Span<float> logitSpan)
+            while (enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult())
             {
-                float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
-                int tokenId = pipeline.Sample(logitSpan, generatedIds);
-                TokenLogprobInfo? info = null;
-                if (lsBuf != null)
+                var token = enumerator.Current;
+
+                // onTokenGenerated parity: invoked iff the token survives into the visible output.
+                // StopInclude (FinishReason.Length) and natural-end (FinishReason.Length) tokens are
+                // kept; Stop tokens are either kept in generatedIds (stop-string match) or removed
+                // (EOS-like) by the core itself — but in either case the callback was historically
+                // NOT invoked, so we mirror that: skip the callback iff FinishReason==Stop.
+                if (token.FinishReason != FinishReason.Stop)
+                    onTokenGenerated?.Invoke(token.TokenId);
+
+                if (token.FinishReason is { } fr)
                 {
-                    info = LogprobsCapture.BuildInfo(lsBuf.AsSpan(0, vocabSize), vocabSize, tokenId, topLogprobs, _tokenizer);
-                    ArrayPool<float>.Shared.Return(lsBuf);
-                }
-                return (tokenId, info);
-            }
-
-            // Prefill: run only new suffix tokens through the model
-            int prefillStart = cachedTokenCount;
-            int prefillLen = promptLen - prefillStart;
-
-            int firstTokenId;
-            long ts0 = Stopwatch.GetTimestamp();
-
-            if (prefillLen > 0)
-            {
-                // Prefill suffix tokens — span slice avoids array allocation
-                ReadOnlySpan<int> suffixTokens = promptIds.AsSpan(prefillStart);
-                int[] positionsArray = ArrayPool<int>.Shared.Rent(prefillLen);
-                try
-                {
-                    Span<int> positions = positionsArray.AsSpan(0, prefillLen);
-                    for (int i = 0; i < prefillLen; i++)
-                        positions[i] = prefillStart + i;
-
-                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
-                    {
-                        long ts1 = Stopwatch.GetTimestamp();
-                        prefillTicks = ts1 - ts0;
-
-                        unsafe
-                        {
-                            long samplerStart = Stopwatch.GetTimestamp();
-                            // GPU/hybrid models return [1, vocabSize] (last token only);
-                            // CPU model returns [seqLen, vocabSize]. Use actual shape to index.
-                            float* logitPtr = (float*)prefillLogits.DataPointer;
-                            int logitRows = prefillLogits.Shape[0];
-                            var logitSpan = new Span<float>(logitPtr + (long)(logitRows - 1) * vocabSize, vocabSize);
-                            if (constraint != null)
-                                TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                            var (tid, lp) = SampleWithLogprobs(logitSpan);
-                            firstTokenId = tid;
-                            if (lp.HasValue) logprobsList!.Add(lp.Value);
-                            samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
-                        }
-                    }
-                }
-                finally
-                {
-                    ArrayPool<int>.Shared.Return(positionsArray);
+                    finishReason = fr;
+                    terminalTimings = token.Timings;
                 }
             }
-            else if (promptLen > 0)
-            {
-                // 100% cache hit — re-forward last prompt token to get logits
-                using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache))
-                {
-                    long ts1 = Stopwatch.GetTimestamp();
-                    prefillTicks = ts1 - ts0;
-
-                    unsafe
-                    {
-                        long samplerStart = Stopwatch.GetTimestamp();
-                        var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
-                        if (constraint != null)
-                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                        var (tid, lp) = SampleWithLogprobs(logitSpan);
-                        firstTokenId = tid;
-                        if (lp.HasValue) logprobsList!.Add(lp.Value);
-                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
-                    }
-                }
-            }
-            else
-            {
-                // Unreachable: empty prompt guard ensures promptLen >= 1
-                throw new InvalidOperationException("Prompt is empty after guard.");
-            }
-
-            constraint?.Advance(firstTokenId);
-
-            // Check stop conditions for first token
-            generatedIds.Add(firstTokenId);
-            detok.Append(firstTokenId);
-
-            var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds,
-                detok.GetTailView(stopTailSize, stopScratch));
-            if (stopResult != StopResult.Continue)
-            {
-                if (stopResult == StopResult.Stop)
-                    generatedIds.RemoveAt(generatedIds.Count - 1);
-                else
-                    onTokenGenerated?.Invoke(firstTokenId);
-
-                finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
-                StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
-                return BuildResponse(promptLen, generatedIds, finishReason,
-                    prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache), cachedTokenCount,
-                    logprobs: logprobsList?.ToArray());
-            }
-
-            onTokenGenerated?.Invoke(firstTokenId);
-
-            int specDrafted = 0, specAccepted = 0;
-
-            // Decode loop (speculative decode disabled when logprobs requested — no per-position logit access;
-            // also disabled when sampling isn't effectively greedy, since non-greedy acceptance is not yet
-            // distributionally correct under the sampler pipeline — see Wave 8 / issue #121).
-            if (_draftModel != null && !captureLogprobs && IsEffectivelyGreedy(options))
-            {
-                // ── Speculative decode loop ──
-                var specDecoder = new SpeculativeDecoder(
-                    greedy: true, seed: options.Seed);
-                Core.Attention.IKvCache draftKvCache = AllocateDraftKvCache(cacheSize);
-                int[] specBuffer = ArrayPool<int>.Shared.Rent(_speculativeCandidates + 1);
-                try
-                {
-                    // Prefill draft model with prompt
-                    PrefillDraftModel(promptIds, draftKvCache);
-
-                    int step = 1;
-                    while (step < maxTokens)
-                    {
-                        int pos = promptLen + step - 1;
-                        if (pos >= cacheSize) break;
-
-                        int remaining = maxTokens - step;
-                        int k = Math.Min(_speculativeCandidates, remaining);
-
-                        var result = specDecoder.DraftAndVerify(
-                            _model, _draftModel, kvCache, draftKvCache,
-                            pipeline, generatedIds, constraint,
-                            pos, vocabSize, _draftModel.Config.VocabSize, k, specBuffer);
-
-                        if (result.AcceptedCount == 0) break;
-
-                        decodeTicks += result.DraftTicks + result.VerifyTicks;
-                        specDrafted += result.DraftedCount;
-
-                        // Constraint is already advanced inside DraftAndVerify — do NOT advance again here.
-                        // Only count tokens that actually make it into output (stop conditions may discard some).
-                        bool shouldBreak = false;
-                        for (int i = 0; i < result.AcceptedCount; i++)
-                        {
-                            int tokenId = specBuffer[i];
-                            generatedIds.Add(tokenId);
-                            detok.Append(tokenId);
-
-                            stopResult = CheckStopConditions(stopConditions, tokenId, generatedIds,
-                                detok.GetTailView(stopTailSize, stopScratch));
-                            if (stopResult != StopResult.Continue)
-                            {
-                                if (stopResult == StopResult.Stop)
-                                    generatedIds.RemoveAt(generatedIds.Count - 1);
-                                else
-                                {
-                                    specAccepted++;
-                                    onTokenGenerated?.Invoke(tokenId);
-                                }
-
-                                finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
-                                shouldBreak = true;
-                                break;
-                            }
-
-                            specAccepted++;
-                            onTokenGenerated?.Invoke(tokenId);
-                            step++;
-                        }
-
-                        if (shouldBreak) break;
-                    }
-                }
-                finally
-                {
-                    draftKvCache.Dispose();
-                    ArrayPool<int>.Shared.Return(specBuffer);
-                }
-            }
-            else
-            {
-                // ── Standard decode loop: one token at a time ──
-                for (int step = 1; step < maxTokens; step++)
-                {
-                    int pos = promptLen + step - 1;
-                    if (pos >= cacheSize)
-                        break;
-
-                    int lastToken = generatedIds[^1];
-                    int nextTokenId;
-
-                    long fwdStart = Stopwatch.GetTimestamp();
-                    using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
-                    {
-                        decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
-
-                        unsafe
-                        {
-                            long samplerStart = Stopwatch.GetTimestamp();
-                            var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
-                            if (constraint != null)
-                                TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                            var (tid, lp) = SampleWithLogprobs(logitSpan);
-                            nextTokenId = tid;
-                            if (lp.HasValue) logprobsList!.Add(lp.Value);
-                            samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
-                        }
-                    }
-
-                    constraint?.Advance(nextTokenId);
-
-                    generatedIds.Add(nextTokenId);
-                    detok.Append(nextTokenId);
-
-                    stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds,
-                        detok.GetTailView(stopTailSize, stopScratch));
-                    if (stopResult != StopResult.Continue)
-                    {
-                        if (stopResult == StopResult.Stop)
-                            generatedIds.RemoveAt(generatedIds.Count - 1);
-                        else
-                            onTokenGenerated?.Invoke(nextTokenId);
-
-                        finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
-                        break;
-                    }
-
-                    onTokenGenerated?.Invoke(nextTokenId);
-                }
-            }
-
-            StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
-            return BuildResponse(promptLen, generatedIds, finishReason,
-                prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache), cachedTokenCount,
-                specDrafted, specAccepted, logprobsList?.ToArray());
         }
         finally
         {
-            ArrayPool<char>.Shared.Return(stopScratch);
-            if (ownsKvCache)
-                kvCache.Dispose();
+            enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
+
+        // PromptTokenCount is carried in the terminal token's timings (set by the core's BuildTimings).
+        int promptLen = terminalTimings?.PrefillTokenCount ?? 0;
+
+        return BuildResponseFromTimings(promptLen, generatedIds, finishReason,
+            terminalTimings, logprobsList?.ToArray(), stopConditions);
     }
 
     /// <summary>
     /// Streams generated tokens as an async enumerable, yielding each token with incremental text,
-    /// finish reason, and timings on the final token.
+    /// finish reason, and timings on the final token. Thin pass-through over <see cref="GenerateCoreAsync"/>.
     /// </summary>
     /// <param name="prompt">Input text prompt.</param>
     /// <param name="options">Inference options controlling sampling and stopping. Null uses defaults.</param>
     /// <param name="cancellationToken">Token to cancel generation cooperatively between decode steps.</param>
+    /// <param name="adapter">Optional LoRA adapter to apply during the forward passes (Phase 4c).</param>
     /// <returns>An async enumerable of <see cref="GenerationToken"/> values.</returns>
-    public async IAsyncEnumerable<GenerationToken> GenerateStreamingTokensAsync(
+    public IAsyncEnumerable<GenerationToken> GenerateStreamingTokensAsync(
         string prompt,
         InferenceOptions? options = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        ILoraAdapter? adapter = null)
     {
         options ??= new InferenceOptions();
+        int maxTokens = options.MaxTokens;
+        // Streaming MaxTokens<=0 historically yields nothing (no terminal token).
+        // The core handles the same guard internally, so the wrapper just passes through.
+        var generatedIds = new List<int>(Math.Max(1, maxTokens));
+        // Streaming doesn't accumulate a logprobs list — per-token logprobs travel via
+        // GenerationToken.Logprobs. Passing null tells the core to skip list bookkeeping.
+        return GenerateCoreAsync(prompt, options, generatedIds, logprobsList: null,
+            cancellationToken, adapter);
+    }
 
+    /// <summary>
+    /// Streams generated text as an async enumerable, yielding incremental text fragments.
+    /// This is a convenience wrapper over <see cref="GenerateStreamingTokensAsync"/>.
+    /// </summary>
+    /// <param name="prompt">Input text prompt.</param>
+    /// <param name="options">Inference options controlling sampling and stopping. Null uses defaults.</param>
+    /// <param name="cancellationToken">Token to cancel generation cooperatively between decode steps.</param>
+    /// <param name="adapter">Optional LoRA adapter to apply during the forward passes (Phase 4c).</param>
+    /// <returns>An async enumerable of incremental text strings.</returns>
+    public async IAsyncEnumerable<string> GenerateStreamingAsync(
+        string prompt,
+        InferenceOptions? options = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
+        ILoraAdapter? adapter = null)
+    {
+        await foreach (var token in GenerateStreamingTokensAsync(prompt, options, cancellationToken, adapter))
+            yield return token.Text;
+    }
+
+    /// <summary>
+    /// Single source of truth for the prefill + decode + stop orchestration. Both the synchronous
+    /// <see cref="Generate"/> and streaming <see cref="GenerateStreamingTokensAsync"/> consume this.
+    /// Yields one <see cref="GenerationToken"/> per visible decoded token; the last yielded token
+    /// carries <see cref="GenerationToken.FinishReason"/> and final <see cref="InferenceTimings"/>.
+    /// </summary>
+    /// <param name="prompt">Input text prompt.</param>
+    /// <param name="options">Inference options controlling sampling and stopping (must be non-null).</param>
+    /// <param name="generatedIds">List that the core populates with the final visible token ids.
+    /// Stop-string matches keep the triggering token; EOS-like matches do not (mirrors today's behaviour).</param>
+    /// <param name="logprobsList">Optional list to accumulate per-token logprobs into. Null when the caller
+    /// only needs the per-yield <see cref="GenerationToken.Logprobs"/> (streaming).</param>
+    /// <param name="cancellationToken">Cooperative cancellation between decode steps.</param>
+    /// <param name="adapter">Optional LoRA adapter applied to every forward pass.</param>
+    /// <returns>An async enumerable that yields one <see cref="GenerationToken"/> per visible decoded token.</returns>
+    /// <remarks>
+    /// All terminal cleanup — <c>StoreInPrefixCache</c>, <c>telemetry.Complete</c>, KV-cache disposal,
+    /// scratch buffer return — happens exactly once in this method's <c>finally</c> block, regardless of
+    /// which terminal branch fired. This eliminates the seven prior <c>StoreInPrefixCache</c> sites in
+    /// the streaming code and fixes the telemetry <c>FinishReason</c> being hard-coded to <c>Length</c>.
+    /// </remarks>
+    [SkipLocalsInit]
+    private async IAsyncEnumerable<GenerationToken> GenerateCoreAsync(
+        string prompt,
+        InferenceOptions options,
+        List<int> generatedIds,
+        List<TokenLogprobInfo>? logprobsList,
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        ILoraAdapter? adapter)
+    {
         int[] promptIds = _tokenizer.Encode(prompt);
         int promptLen = promptIds.Length;
         int maxTokens = options.MaxTokens;
@@ -431,11 +259,14 @@ public sealed class TextGenerator
             promptLen = 1;
         }
 
-        // Guard: MaxTokens=0 — yield nothing
+        // Guard: MaxTokens=0 — yield nothing. The synchronous wrapper short-circuits before
+        // ever invoking the core in this case, so this path is exercised only by streaming.
         if (maxTokens <= 0)
             yield break;
 
         cancellationToken.ThrowIfCancellationRequested();
+
+        var telemetry = new TelemetryRecorder(_model.Config, options);
 
         // Build sampling pipeline
         var pipeline = new SamplerPipeline(options);
@@ -455,46 +286,54 @@ public sealed class TextGenerator
         };
 
         // Build stop conditions
-        List<IStopCondition> stopConditions;
-        if (options.StopConditions is not null)
-        {
-            stopConditions = new List<IStopCondition>(options.StopConditions);
-        }
-        else
-        {
-            stopConditions = new List<IStopCondition>
-            {
-                new EosStopCondition(_tokenizer.EosTokenId),
-                new MaxTokensStopCondition(maxTokens)
-            };
-            foreach (string seq in options.StopSequences)
-                stopConditions.Add(new StopStringCondition(seq));
-        }
+        var stopConditions = BuildStopConditions(options, maxTokens);
 
         // Resolve KV-cache: reuse from prefix cache or allocate fresh
         var (kvCache, cachedTokenCount, ownsKvCache) = ResolveKvCache(promptIds, promptLen, maxTokens);
         long kvBytes = GetKvCacheBytes(kvCache);
+
+        // Hybrid mode: enabled when a strategy is wired up, the prompt is short enough, and we
+        // have a clean cache (no prefix-cache reuse, no speculative draft model).
+        bool useHybrid = _hybridStrategy is not null
+            && _hybridStrategy.ShouldRunHybrid(promptLen)
+            && cachedTokenCount == 0
+            && _draftModel is null;
 
         // Stop-check scratch buffer: rented up-front and returned in the outer finally. try/finally
         // is preserved across yield points by the async-iterator state machine, so Return runs on
         // normal completion, exception, or consumer-side cancellation (Dispose of the enumerator).
         int stopTailSize = ComputeStopTailSize(stopConditions);
         char[] stopScratch = ArrayPool<char>.Shared.Rent(stopTailSize);
+        long prefillTicks = 0;
+        long decodeTicks = 0;
+        long samplerTicks = 0;
+        int specDrafted = 0, specAccepted = 0;
+
+        // Method-scoped finish reason: defaults to Length (natural-end / max-tokens) and is
+        // overwritten by every terminal branch before yield. The outer finally passes it to
+        // telemetry.Complete — fixing the streaming-side bug where Length was always reported.
+        FinishReason finishReason = FinishReason.Length;
+
+        // Incremental detokenizer: O(1) amortized per token for stop-check + streaming delta,
+        // instead of decoding the full generated sequence each step. Lifted outside the try so
+        // the finally can deterministically return its pooled buffers even on cancellation.
+        var detok = new IncrementalDetokenizer(_tokenizer, initialCapacity: Math.Max(64, maxTokens * 4));
 
         try
         {
-            var generatedIds = new List<int>(maxTokens);
-            long prefillTicks = 0;
-            long decodeTicks = 0;
-            long samplerTicks = 0;
             int cacheSize = kvCache.MaxLength;
 
-            // Incremental detokenizer: O(1) amortized per token for stop-check + streaming delta,
-            // instead of decoding the full generated sequence at every step.
-            var detok = new IncrementalDetokenizer(_tokenizer, initialCapacity: Math.Max(64, maxTokens * 4));
+            // Streaming holdback buffer: keeps the last max-stop-string chars un-emitted so a
+            // stop-string match split across multiple tokens can be trimmed character-exactly
+            // before any part of it leaks to the SSE consumer (#121 item #8). No-op when no
+            // StopStringCondition is registered — preserves zero-latency EOS-only behaviour.
+            // For non-streaming callers the holdback simply equals "delta-of-the-moment" plus
+            // a flush at the end, so the same machinery serves both paths correctly.
+            var streamBuffer = new StreamingStopBuffer(stopConditions);
 
             // Local helper: snapshot log-softmax before sampling (which modifies logits in-place),
-            // sample a token, then build logprob info.
+            // sample a token, then build logprob info. Closes over generatedIds / pipeline /
+            // logprobsList / topLogprobs / vocabSize.
             (int tokenId, TokenLogprobInfo? logprob) SampleWithLogprobs(Span<float> logitSpan)
             {
                 float[]? lsBuf = captureLogprobs ? LogprobsCapture.ComputeLogSoftmax(logitSpan) : null;
@@ -516,30 +355,80 @@ public sealed class TextGenerator
             TokenLogprobInfo? firstLogprobInfo = null;
             long ts0 = Stopwatch.GetTimestamp();
 
-            if (prefillLen > 0)
+            using (var prefillSpan = telemetry.StartPrefill())
             {
-                // Span slice avoids array allocation for suffix tokens
-                ReadOnlySpan<int> suffixTokens = promptIds.AsSpan(prefillStart);
-                int[] positionsArray = ArrayPool<int>.Shared.Rent(prefillLen);
-                try
+                if (useHybrid)
                 {
-                    Span<int> positions = positionsArray.AsSpan(0, prefillLen);
-                    for (int i = 0; i < prefillLen; i++)
-                        positions[i] = prefillStart + i;
+                    // ── Hybrid prefill: CPU populates a SimpleKvCache, hand off to kvCache.
+                    var handoff = _hybridStrategy!.RunPrefill(promptIds.AsSpan(0, promptLen), cacheSize);
+                    try
+                    {
+                        _hybridStrategy.Handoff(handoff.HostCache, kvCache);
+                        prefillTicks = handoff.PrefillTicks;
 
-                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
+                        using var sampleSpan = telemetry.StartSample();
+                        long samplerStart = Stopwatch.GetTimestamp();
+                        var logitSpan = handoff.LastLogits.AsSpan(0, vocabSize);
+                        if (constraint != null)
+                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                        (firstTokenId, firstLogprobInfo) = SampleWithLogprobs(logitSpan);
+                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                    }
+                    finally
+                    {
+                        handoff.HostCache.Dispose();
+                    }
+                }
+                else if (prefillLen > 0)
+                {
+                    // Span slice avoids array allocation for suffix tokens
+                    ReadOnlySpan<int> suffixTokens = promptIds.AsSpan(prefillStart);
+                    int[] positionsArray = ArrayPool<int>.Shared.Rent(prefillLen);
+                    try
+                    {
+                        Span<int> positions = positionsArray.AsSpan(0, prefillLen);
+                        for (int i = 0; i < prefillLen; i++)
+                            positions[i] = prefillStart + i;
+
+                        using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache, adapter))
+                        {
+                            long ts1 = Stopwatch.GetTimestamp();
+                            prefillTicks = ts1 - ts0;
+
+                            unsafe
+                            {
+                                using var sampleSpan = telemetry.StartSample();
+                                long samplerStart = Stopwatch.GetTimestamp();
+                                // GPU/hybrid models return [1, vocabSize] (last token only);
+                                // CPU model returns [seqLen, vocabSize]. Use actual shape to index.
+                                float* logitPtr = (float*)prefillLogits.DataPointer;
+                                int logitRows = prefillLogits.Shape[0];
+                                var logitSpan = new Span<float>(logitPtr + (long)(logitRows - 1) * vocabSize, vocabSize);
+                                if (constraint != null)
+                                    TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
+                                (firstTokenId, firstLogprobInfo) = SampleWithLogprobs(logitSpan);
+                                samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        ArrayPool<int>.Shared.Return(positionsArray);
+                    }
+                }
+                else if (promptLen > 0)
+                {
+                    // 100% cache hit — re-forward last prompt token to get logits
+                    using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache, adapter))
                     {
                         long ts1 = Stopwatch.GetTimestamp();
                         prefillTicks = ts1 - ts0;
 
                         unsafe
                         {
+                            using var sampleSpan = telemetry.StartSample();
                             long samplerStart = Stopwatch.GetTimestamp();
-                            // GPU/hybrid models return [1, vocabSize] (last token only);
-                            // CPU model returns [seqLen, vocabSize]. Use actual shape to index.
-                            float* logitPtr = (float*)prefillLogits.DataPointer;
-                            int logitRows = prefillLogits.Shape[0];
-                            var logitSpan = new Span<float>(logitPtr + (long)(logitRows - 1) * vocabSize, vocabSize);
+                            var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
                             if (constraint != null)
                                 TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
                             (firstTokenId, firstLogprobInfo) = SampleWithLogprobs(logitSpan);
@@ -547,61 +436,62 @@ public sealed class TextGenerator
                         }
                     }
                 }
-                finally
+                else
                 {
-                    ArrayPool<int>.Shared.Return(positionsArray);
+                    // Unreachable: empty prompt guard ensures promptLen >= 1
+                    throw new InvalidOperationException("Prompt is empty after guard.");
+                }
+
+                if (prefillSpan is { IsAllDataRequested: true })
+                {
+                    prefillSpan.SetTag(TelemetryTags.PrefillTokenCount, prefillLen);
+                    prefillSpan.SetTag(TelemetryTags.PrefillDurationMs, prefillTicks * 1000.0 / Stopwatch.Frequency);
                 }
             }
-            else if (promptLen > 0)
-            {
-                // 100% cache hit — re-forward last prompt token to get logits
-                using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache))
-                {
-                    long ts1 = Stopwatch.GetTimestamp();
-                    prefillTicks = ts1 - ts0;
 
-                    unsafe
-                    {
-                        long samplerStart = Stopwatch.GetTimestamp();
-                        var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
-                        if (constraint != null)
-                            TokenMaskApplier.Apply(logitSpan, constraint.GetAllowedTokens());
-                        (firstTokenId, firstLogprobInfo) = SampleWithLogprobs(logitSpan);
-                        samplerTicks += Stopwatch.GetTimestamp() - samplerStart;
-                    }
-                }
-            }
-            else
-            {
-                // Unreachable: empty prompt guard ensures promptLen >= 1
-                throw new InvalidOperationException("Prompt is empty after guard.");
-            }
-
+            telemetry.RecordFirstToken();
             constraint?.Advance(firstTokenId);
+
+            // First-token logprob mirrors today's behaviour: added to logprobsList BEFORE the
+            // stop-check, so even the discarded trigger contributes a logprob entry. Kept here
+            // for byte-identical parity with the prior non-streaming path.
+            if (firstLogprobInfo.HasValue) logprobsList?.Add(firstLogprobInfo.Value);
 
             // Check stop conditions for first token
             generatedIds.Add(firstTokenId);
             detok.Append(firstTokenId);
 
             var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds,
-                detok.GetTailView(stopTailSize, stopScratch));
+                detok.GetTailView(stopTailSize, stopScratch), out int firstMatchedIdx);
             if (stopResult != StopResult.Continue)
             {
-                var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+                bool isStopStringMatch = IsStopStringMatch(stopConditions, firstMatchedIdx);
+                finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
 
                 if (stopResult == StopResult.Stop)
                 {
-                    generatedIds.RemoveAt(generatedIds.Count - 1);
-                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                    // Push the just-decoded delta into the holdback buffer first — its
+                    // safe-emit return must NOT be discarded (any text past the holdback
+                    // window is already trim-immune). Then trim the matched suffix
+                    // (stop-string case) or flush as-is (EOS etc.).
+                    string newDelta = streamBuffer.Push(detok.TakeDelta());
+                    string emit = newDelta + (isStopStringMatch
+                        ? streamBuffer.TrimAndFlush(stopConditions)
+                        : streamBuffer.FlushAll());
+                    if (!isStopStringMatch)
+                        generatedIds.RemoveAt(generatedIds.Count - 1);
+                    // Stop-string match: keep token in id list so KV-cache length stays in sync
+                    // with the stored prompt+generated sequence (mirrors prior non-streaming path).
                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                    yield return new GenerationToken(firstTokenId, string.Empty, fr, timings, firstLogprobInfo);
+                    yield return new GenerationToken(firstTokenId, emit, finishReason, timings, firstLogprobInfo);
                 }
                 else
                 {
-                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                    // StopInclude (e.g. max-tokens consuming the just-yielded token) — flush all
+                    // buffered text including the just-decoded delta. No trim.
+                    string emit = streamBuffer.Push(detok.TakeDelta()) + streamBuffer.FlushAll();
                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                    string text = detok.TakeDelta();
-                    yield return new GenerationToken(firstTokenId, text, fr, timings, firstLogprobInfo);
+                    yield return new GenerationToken(firstTokenId, emit, finishReason, timings, firstLogprobInfo);
                 }
                 yield break;
             }
@@ -609,26 +499,24 @@ public sealed class TextGenerator
             // Yield first token — check if it's also the last (maxTokens == 1)
             {
                 bool firstIsLast = maxTokens <= 1;
-                string text = detok.TakeDelta();
+                string emit = streamBuffer.Push(detok.TakeDelta());
                 if (firstIsLast)
                 {
-                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                    // Decode loop won't run; drain holdback as the natural-end (Length) emit.
+                    emit += streamBuffer.FlushAll();
                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                    yield return new GenerationToken(firstTokenId, text, FinishReason.Length, timings, firstLogprobInfo);
+                    yield return new GenerationToken(firstTokenId, emit, FinishReason.Length, timings, firstLogprobInfo);
                     yield break;
                 }
-                yield return new GenerationToken(firstTokenId, text, null, Logprobs: firstLogprobInfo);
+                yield return new GenerationToken(firstTokenId, emit, null, Logprobs: firstLogprobInfo);
             }
 
-            int specDrafted = 0, specAccepted = 0;
-
             // Speculative decode disabled when logprobs requested — no per-position logit access.
-            // Also disabled when sampling isn't effectively greedy (see Wave 8 / issue #121).
-            if (_draftModel != null && !captureLogprobs && IsEffectivelyGreedy(options))
+            if (_draftModel != null && !captureLogprobs)
             {
                 // ── Speculative decode loop ──
                 var specDecoder = new SpeculativeDecoder(
-                    greedy: true, seed: options.Seed);
+                    greedy: pipeline.IsGreedy, seed: options.Seed);
                 Core.Attention.IKvCache draftKvCache = AllocateDraftKvCache(cacheSize);
                 int[] specBuffer = ArrayPool<int>.Shared.Rent(_speculativeCandidates + 1);
                 try
@@ -666,24 +554,31 @@ public sealed class TextGenerator
                             detok.Append(tokenId);
 
                             stopResult = CheckStopConditions(stopConditions, tokenId, generatedIds,
-                                detok.GetTailView(stopTailSize, stopScratch));
+                                detok.GetTailView(stopTailSize, stopScratch), out int specMatchedIdx);
                             if (stopResult != StopResult.Continue)
                             {
-                                var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+                                bool isStopStringMatch = IsStopStringMatch(stopConditions, specMatchedIdx);
+                                finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+
                                 if (stopResult == StopResult.Stop)
                                 {
-                                    generatedIds.RemoveAt(generatedIds.Count - 1);
-                                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                                    _ = streamBuffer.Push(detok.TakeDelta());
+                                    string emit = isStopStringMatch
+                                        ? streamBuffer.TrimAndFlush(stopConditions)
+                                        : streamBuffer.FlushAll();
+                                    if (!isStopStringMatch)
+                                        generatedIds.RemoveAt(generatedIds.Count - 1);
+                                    else
+                                        specAccepted++;
                                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
-                                    yield return new GenerationToken(tokenId, string.Empty, fr, timings);
+                                    yield return new GenerationToken(tokenId, emit, finishReason, timings);
                                 }
                                 else
                                 {
                                     specAccepted++;
-                                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                                    string emit = streamBuffer.Push(detok.TakeDelta()) + streamBuffer.FlushAll();
                                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
-                                    string text = detok.TakeDelta();
-                                    yield return new GenerationToken(tokenId, text, fr, timings);
+                                    yield return new GenerationToken(tokenId, emit, finishReason, timings);
                                 }
                                 shouldBreak = true;
                                 yield break;
@@ -694,22 +589,33 @@ public sealed class TextGenerator
                             // Yield each accepted token
                             {
                                 bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
-                                string text = detok.TakeDelta();
+                                string emit = streamBuffer.Push(detok.TakeDelta());
                                 if (isLastStep && i == result.AcceptedCount - 1)
                                 {
-                                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                                    // End of decode loop — drain holdback as the natural-end (Length) emit.
+                                    emit += streamBuffer.FlushAll();
                                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
-                                    yield return new GenerationToken(tokenId, text, FinishReason.Length, timings);
+                                    yield return new GenerationToken(tokenId, emit, FinishReason.Length, timings);
                                     shouldBreak = true;
                                     break;
                                 }
-                                yield return new GenerationToken(tokenId, text, null);
+                                yield return new GenerationToken(tokenId, emit, null);
                             }
 
                             step++;
                         }
 
                         if (shouldBreak) yield break;
+                    }
+
+                    // Spec loop exited without a stop-condition path (e.g. AcceptedCount==0,
+                    // cache full at top of while). Drain any held-back tail as the natural-end
+                    // (Length) emit so the holdback never silently truncates output.
+                    if (streamBuffer.PendingLength > 0)
+                    {
+                        var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
+                        int lastId = generatedIds.Count > 0 ? generatedIds[^1] : 0;
+                        yield return new GenerationToken(lastId, streamBuffer.FlushAll(), FinishReason.Length, timings);
                     }
                 }
                 finally
@@ -729,17 +635,20 @@ public sealed class TextGenerator
                     if (pos >= cacheSize)
                         break;
 
+                    Activity? decodeStepSpan = telemetry.StartDecodeStep(step);
+
                     int lastToken = generatedIds[^1];
                     int nextTokenId;
                     TokenLogprobInfo? tokenLogprob;
 
                     long fwdStart = Stopwatch.GetTimestamp();
-                    using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
+                    using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache, adapter))
                     {
                         decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
 
                         unsafe
                         {
+                            using var sampleSpan = telemetry.StartSample();
                             long samplerStart = Stopwatch.GetTimestamp();
                             var logitSpan = new Span<float>((void*)logits.DataPointer, vocabSize);
                             if (constraint != null)
@@ -749,30 +658,40 @@ public sealed class TextGenerator
                         }
                     }
 
+                    decodeStepSpan?.Dispose();
                     constraint?.Advance(nextTokenId);
+
+                    // Mirror prior non-streaming behaviour: logprob added before stop check, so the
+                    // discarded-trigger logprob is still recorded (parity assertion in tests).
+                    if (tokenLogprob.HasValue) logprobsList?.Add(tokenLogprob.Value);
 
                     generatedIds.Add(nextTokenId);
                     detok.Append(nextTokenId);
 
                     stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds,
-                        detok.GetTailView(stopTailSize, stopScratch));
+                        detok.GetTailView(stopTailSize, stopScratch), out int decMatchedIdx);
                     if (stopResult != StopResult.Continue)
                     {
-                        var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+                        bool isStopStringMatch = IsStopStringMatch(stopConditions, decMatchedIdx);
+                        finishReason = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
 
                         if (stopResult == StopResult.Stop)
                         {
-                            generatedIds.RemoveAt(generatedIds.Count - 1);
-                            StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                            string newDelta = streamBuffer.Push(detok.TakeDelta());
+                            string emit = newDelta + (isStopStringMatch
+                                ? streamBuffer.TrimAndFlush(stopConditions)
+                                : streamBuffer.FlushAll());
+                            if (!isStopStringMatch)
+                                generatedIds.RemoveAt(generatedIds.Count - 1);
+                            // Stop-string match: keep token so KV-cache length matches stored ids.
                             var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                            yield return new GenerationToken(nextTokenId, string.Empty, fr, timings, tokenLogprob);
+                            yield return new GenerationToken(nextTokenId, emit, finishReason, timings, tokenLogprob);
                         }
                         else
                         {
-                            StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                            string emit = streamBuffer.Push(detok.TakeDelta()) + streamBuffer.FlushAll();
                             var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                            string text = detok.TakeDelta();
-                            yield return new GenerationToken(nextTokenId, text, fr, timings, tokenLogprob);
+                            yield return new GenerationToken(nextTokenId, emit, finishReason, timings, tokenLogprob);
                         }
                         yield break;
                     }
@@ -780,43 +699,105 @@ public sealed class TextGenerator
                     // Yield token — attach finish reason if this is the last iteration
                     {
                         bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
-                        string text = detok.TakeDelta();
+                        string emit = streamBuffer.Push(detok.TakeDelta());
                         if (isLastStep)
                         {
-                            StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                            // End of decode loop — drain holdback as the natural-end (Length) emit.
+                            emit += streamBuffer.FlushAll();
                             var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                            yield return new GenerationToken(nextTokenId, text, FinishReason.Length, timings, tokenLogprob);
+                            yield return new GenerationToken(nextTokenId, emit, FinishReason.Length, timings, tokenLogprob);
                             yield break;
                         }
-                        yield return new GenerationToken(nextTokenId, text, null, Logprobs: tokenLogprob);
+                        yield return new GenerationToken(nextTokenId, emit, null, Logprobs: tokenLogprob);
                     }
+                }
+
+                // Standard loop exited via pos>=cacheSize at the top without isLastStep firing.
+                // The isLastStep predicate at the prior yield already accounts for this normally,
+                // but guard against future refactors leaving the buffer with un-emitted tail.
+                if (streamBuffer.PendingLength > 0)
+                {
+                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
+                    int lastId = generatedIds.Count > 0 ? generatedIds[^1] : 0;
+                    yield return new GenerationToken(lastId, streamBuffer.FlushAll(), FinishReason.Length, timings);
                 }
             }
         }
         finally
         {
+            // Single source of truth for terminal bookkeeping. StoreInPrefixCache and
+            // telemetry.Complete each happen exactly once per Generate / streaming call,
+            // regardless of which branch terminated the decode loop.
+            StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+            telemetry.Complete(promptLen, cachedTokenCount, generatedIds.Count,
+                prefillTicks * 1000.0 / Stopwatch.Frequency,
+                decodeTicks * 1000.0 / Stopwatch.Frequency,
+                finishReason);
             ArrayPool<char>.Shared.Return(stopScratch);
+            detok.Dispose();
             if (ownsKvCache)
                 kvCache.Dispose();
+            telemetry.RequestSpan?.Dispose();
         }
     }
 
     /// <summary>
-    /// Streams generated text as an async enumerable, yielding incremental text fragments.
-    /// This is a convenience wrapper over <see cref="GenerateStreamingTokensAsync"/>.
+    /// Builds the stop-conditions list for a generation call from <paramref name="options"/>.
+    /// When <c>options.StopConditions</c> is supplied it is copied verbatim; otherwise the
+    /// default set is constructed: EOS + MaxTokens + one <see cref="StopStringCondition"/>
+    /// per entry in <c>options.StopSequences</c>. Used by both the public <see cref="Generate"/>
+    /// wrapper (for character-level suffix trimming) and <see cref="GenerateCoreAsync"/> (for
+    /// the decode-loop stop check) — keeping the two views byte-identical.
     /// </summary>
-    /// <param name="prompt">Input text prompt.</param>
-    /// <param name="options">Inference options controlling sampling and stopping. Null uses defaults.</param>
-    /// <param name="cancellationToken">Token to cancel generation cooperatively between decode steps.</param>
-    /// <returns>An async enumerable of incremental text strings.</returns>
-    public async IAsyncEnumerable<string> GenerateStreamingAsync(
-        string prompt,
-        InferenceOptions? options = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    private List<IStopCondition> BuildStopConditions(InferenceOptions options, int maxTokens)
     {
-        await foreach (var token in GenerateStreamingTokensAsync(prompt, options, cancellationToken))
-            yield return token.Text;
+        if (options.StopConditions is not null)
+            return new List<IStopCondition>(options.StopConditions);
+
+        var list = new List<IStopCondition>
+        {
+            new EosStopCondition(_tokenizer.EosTokenId),
+            new MaxTokensStopCondition(maxTokens)
+        };
+        foreach (string seq in options.StopSequences)
+            list.Add(new StopStringCondition(seq));
+        return list;
     }
+
+    /// <summary>
+    /// Builds the final <see cref="InferenceResponse"/> from timings that have already been
+    /// computed by the core's terminal <see cref="GenerationToken"/>. Performs the same
+    /// character-level stop-string suffix trim that the inlined non-streaming path used to do
+    /// before <see cref="GenerateCoreAsync"/> became the single source of truth.
+    /// </summary>
+    private InferenceResponse BuildResponseFromTimings(int promptLen, List<int> generatedIds,
+        FinishReason finishReason, InferenceTimings? timings,
+        TokenLogprobInfo[]? logprobs, List<IStopCondition> stopConditionsForSuffixTrim)
+    {
+        string text = generatedIds.Count > 0
+            ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false)
+            : string.Empty;
+
+        // Character-level stop-string suffix trim. When generation stopped because a
+        // StopStringCondition matched, the last token is kept in `generatedIds` so the user
+        // can see how many tokens were actually emitted, but its decoded text may contain a
+        // partial overlap with the stop string. Trim at the char boundary so the returned
+        // text excludes the matched suffix.
+        if (finishReason == FinishReason.Stop)
+            text = StopSuffixTrimmer.TrimMatchedSuffix(text, stopConditionsForSuffixTrim);
+
+        return new InferenceResponse
+        {
+            GeneratedTokenIds = generatedIds.ToArray(),
+            Text = text,
+            FinishReason = finishReason,
+            PromptTokenCount = promptLen,
+            GeneratedTokenCount = generatedIds.Count,
+            Timings = timings ?? default,
+            Logprobs = logprobs,
+        };
+    }
+
 
     /// <summary>
     /// Resolves the KV-cache to use: either from the prefix cache (on hit) or freshly allocated.
@@ -825,11 +806,19 @@ public sealed class TextGenerator
     private (Core.Attention.IKvCache KvCache, int CachedTokenCount, bool OwnsKvCache) ResolveKvCache(
         int[] promptIds, int promptLen, int maxTokens)
     {
+        // Cross-request prefix trie (Step 37) takes priority — multiple sessions share blocks.
+        if (_prefixTrieManager != null)
+        {
+            int cacheSize = Math.Min(promptLen + maxTokens, _model.Config.MaxSequenceLength);
+            var admission = _prefixTrieManager.Admit(promptIds, cacheSize);
+            return (admission.Cache, admission.CachedTokens, true);
+        }
+
         if (_prefixCache != null)
         {
             var (entry, matchedTokens) = _prefixCache.FindMatch(promptIds);
 
-            if (entry != null && matchedTokens > 0)
+            if (entry != null && matchedTokens > 0 && SupportsPrefixReuse(entry.KvCache))
             {
                 // Cache hit — reuse existing KV-cache, truncate to matched prefix
                 switch (entry.KvCache)
@@ -840,24 +829,24 @@ public sealed class TextGenerator
                     case KvCache.PagedKvCache pagedCache:
                         pagedCache.SetCurrentLength(matchedTokens);
                         break;
-                    default:
-                        // Unsupported cache type for prefix reuse — fall through to allocate fresh
-                        goto cacheMiss;
                 }
 
-                // Verify the cache is large enough for the new prompt + generation
+                // A cache that only fits the prompt would run out mid-decode and silently terminate
+                // generation; require room for the full (prompt + maxTokens) request.
                 int requiredSize = promptLen + maxTokens;
-                if (entry.KvCache.MaxLength >= requiredSize || entry.KvCache.MaxLength >= promptLen)
+                if (entry.KvCache.MaxLength >= requiredSize)
                     return (entry.KvCache, matchedTokens, false);
 
                 // Cache too small — fall through to allocate fresh
             }
-            cacheMiss:
 
-            // Cache miss or incompatible — allocate with full model context for future reuse
+            // Cache miss or incompatible — allocate with full model context for future reuse.
+            // ownsKvCache=true so that an exception/cancellation between allocation and the
+            // Store call below disposes the cache instead of leaking it. StoreInPrefixCache
+            // flips this to false only on successful store.
             int cacheSize = Math.Min(promptLen + maxTokens, _model.Config.MaxSequenceLength);
             var kvCache = AllocateKvCache(cacheSize);
-            return (kvCache, 0, false); // ownsKvCache=false: will be transferred to prefix cache
+            return (kvCache, 0, true);
         }
 
         // No prefix cache — allocate normally, caller owns
@@ -867,6 +856,11 @@ public sealed class TextGenerator
             return (kvCache, 0, true);
         }
     }
+
+    // Mirror of the switch in ResolveKvCache — gates StoreInPrefixCache too so we never
+    // store cache types we wouldn't be able to reuse (they'd pin RAM/VRAM forever).
+    internal static bool SupportsPrefixReuse(Core.Attention.IKvCache kvCache) =>
+        kvCache is SimpleKvCache or KvCache.PagedKvCache;
 
     /// <summary>
     /// Allocates a fresh KV-cache using the factory or default SimpleKvCache.
@@ -889,7 +883,32 @@ public sealed class TextGenerator
     private void StoreInPrefixCache(Core.Attention.IKvCache kvCache, int[] promptIds,
         List<int> generatedIds, ref bool ownsKvCache)
     {
+        // Cross-request trie (Step 37): record completion so freshly-computed
+        // blocks become available to future sequences, then let Dispose run.
+        if (_prefixTrieManager != null && kvCache is KvCache.PagedKvCache paged)
+        {
+            int total = promptIds.Length + generatedIds.Count;
+            var full = ArrayPool<int>.Shared.Rent(total);
+            try
+            {
+                Array.Copy(promptIds, full, promptIds.Length);
+                CollectionsMarshal.AsSpan(generatedIds).CopyTo(full.AsSpan(promptIds.Length));
+                _prefixTrieManager.RecordCompletion(paged, full.AsSpan(0, total));
+            }
+            finally
+            {
+                ArrayPool<int>.Shared.Return(full);
+            }
+            // ownsKvCache stays unchanged — caller disposes the cache, the trie has
+            // already promoted the new blocks to "trie-owned".
+            return;
+        }
+
         if (_prefixCache == null)
+            return;
+
+        // Only store cache types ResolveKvCache can later reuse — anything else just pins memory.
+        if (!SupportsPrefixReuse(kvCache))
             return;
 
         // Build full token sequence: prompt + generated
@@ -898,6 +917,7 @@ public sealed class TextGenerator
         CollectionsMarshal.AsSpan(generatedIds).CopyTo(fullSequence.AsSpan(promptIds.Length));
 
         _prefixCache.Store(fullSequence, kvCache);
+        // Ownership transferred to the prefix cache only after Store succeeds.
         ownsKvCache = false;
     }
 
@@ -905,14 +925,37 @@ public sealed class TextGenerator
         List<IStopCondition> conditions, int tokenId,
         IReadOnlyList<int> generatedTokens, ReadOnlySpan<char> decodedTail)
     {
+        return CheckStopConditions(conditions, tokenId, generatedTokens, decodedTail, out _);
+    }
+
+    private static StopResult CheckStopConditions(
+        List<IStopCondition> conditions, int tokenId,
+        IReadOnlyList<int> generatedTokens, ReadOnlySpan<char> decodedTail,
+        out int matchedIndex)
+    {
         for (int i = 0; i < conditions.Count; i++)
         {
             var result = conditions[i].ShouldStop(tokenId, generatedTokens, decodedTail);
             if (result != StopResult.Continue)
+            {
+                matchedIndex = i;
                 return result;
+            }
         }
+        matchedIndex = -1;
         return StopResult.Continue;
     }
+
+    /// <summary>
+    /// True when a <see cref="StopResult.Stop"/> result came from a
+    /// <see cref="StopStringCondition"/> match. Determines whether the last token
+    /// should be kept in <c>generatedIds</c> (true — its text contains a partial
+    /// suffix overlap with the stop string and must be character-trimmed later) or
+    /// removed (false — EOS / similar single-token termination where the token's
+    /// text is conceptually the terminator itself).
+    /// </summary>
+    private static bool IsStopStringMatch(List<IStopCondition> conditions, int matchedIndex)
+        => matchedIndex >= 0 && matchedIndex < conditions.Count && conditions[matchedIndex] is StopStringCondition;
 
     // Tail window passed to stop conditions. Must cover the longest stop string currently
     // registered; a safety cushion absorbs future stop strings added via custom conditions.
@@ -926,14 +969,6 @@ public sealed class TextGenerator
         }
         return Math.Max(64, maxStopLen + 16);
     }
-
-    // Speculative decoding's greedy acceptance path matches the target pipeline only when the pipeline
-    // itself is effectively argmax. Temperature <= 0 forces argmax selection; repetition penalty can
-    // shift which token is argmax, so it must also be neutral. Top-k/p/min-p prune low-probability
-    // tokens and never mask the argmax, so they don't need to be checked. Wave 8 / issue #121 lifts
-    // this restriction by making q/p pipeline-aware.
-    private static bool IsEffectivelyGreedy(DotLLM.Core.Configuration.InferenceOptions options)
-        => options.Temperature <= 0f && options.RepetitionPenalty == 1.0f;
 
     /// <summary>
     /// Prefills the draft model with the full prompt.
@@ -969,28 +1004,6 @@ public sealed class TextGenerator
             _draftModel.Config.NumKvHeads,
             _draftModel.Config.HeadDim,
             cacheSize);
-    }
-
-    private InferenceResponse BuildResponse(int promptLen, List<int> generatedIds,
-        FinishReason finishReason, long prefillTicks, long decodeTicks, long samplerTicks,
-        long kvCacheBytes = 0, int cachedTokenCount = 0,
-        int specDrafted = 0, int specAccepted = 0,
-        TokenLogprobInfo[]? logprobs = null)
-    {
-        string text = generatedIds.Count > 0
-            ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false)
-            : string.Empty;
-
-        return new InferenceResponse
-        {
-            GeneratedTokenIds = generatedIds.ToArray(),
-            Text = text,
-            FinishReason = finishReason,
-            PromptTokenCount = promptLen,
-            GeneratedTokenCount = generatedIds.Count,
-            Timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvCacheBytes, cachedTokenCount, specDrafted, specAccepted),
-            Logprobs = logprobs,
-        };
     }
 
     private static InferenceTimings BuildTimings(int promptLen, int generatedCount,

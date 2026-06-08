@@ -117,6 +117,17 @@ public sealed class BpeTokenizer : ITokenizer
         tokenIds.IsEmpty ? string.Empty : _encoding.Decode(tokenIds, stripBosSpace);
 
     /// <inheritdoc/>
+    public bool TryDecode(ReadOnlySpan<int> tokenIds, bool stripBosSpace, Span<char> destination, out int charsWritten)
+    {
+        if (tokenIds.IsEmpty)
+        {
+            charsWritten = 0;
+            return true;
+        }
+        return _encoding.TryDecode(tokenIds, stripBosSpace, destination, out charsWritten);
+    }
+
+    /// <inheritdoc/>
     public string DecodeToken(int tokenId) => _encoding.DecodeToken(tokenId);
 
     /// <inheritdoc/>

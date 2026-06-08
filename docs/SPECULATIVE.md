@@ -6,9 +6,7 @@ A small **draft model** proposes K candidate tokens; the larger **target model**
 
 ## Current Status
 
-Speculative decoding is **greedy-only** in the current implementation. `SpeculativeDecoder`'s constructor rejects `greedy: false` and `TextGenerator` only engages speculative decoding when the sampler is effectively argmax — `Temperature <= 0` and `RepetitionPenalty == 1.0`. Requests that don't meet both fall through to the regular (non-speculative) decode path; they are never sampled from an incorrect distribution.
-
-The probabilistic (modified rejection sampling) path described below requires `q` and `p` to be drawn from the same post-transform distribution the [sampler pipeline](SAMPLING.md) actually samples from (temperature / top-k / top-p / min-p / repetition penalty). The current code computes them from raw softmax over constraint-masked logits, which only coincides with the pipeline for argmax. Tracked in Wave 8 ([issue #121](https://github.com/kkokosa/dotLLM/issues/121)).
+Both greedy and non-greedy (probabilistic) acceptance are supported. The decoder mirrors `SamplerPipeline.IsGreedy` at call time: greedy pipelines use argmax acceptance, non-greedy pipelines use modified rejection sampling. In the non-greedy path `q` and `p` are computed from the post-transform distribution the [sampler pipeline](SAMPLING.md) draws from (temperature / top-k / top-p / min-p / repetition penalty), so samples come from the target model's distribution exactly. Resolved in Wave 8 ([issue #121](https://github.com/kkokosa/dotLLM/issues/121)).
 
 ## Algorithm
 
@@ -47,7 +45,7 @@ if all K accepted:
   output bonus
 ```
 
-**Key property**: When `q` and `p` are computed from the same post-transform distribution the sampler pipeline actually draws from, this scheme produces samples from the target model's distribution exactly — not an approximation. See [Current Status](#current-status) for the current limitation: the probabilistic path is not yet pipeline-aware, so the implementation accepts only greedy (argmax) mode today.
+**Key property**: `q` and `p` are computed from the same post-transform distribution the sampler pipeline actually draws from. The decoder applies the pipeline's transforms (processors then sampler steps) to both draft and target logits before softmax, and uses the pipeline's RNG path for `SampleFromTransformed`. The repetition-penalty context for position `i` in the verify pass is rebuilt to match the draft pass — `generatedIds + draft_0 … draft_{i-1}` — so both penalty applications see the same history. The scheme then produces samples from the target distribution exactly — not an approximation.
 
 ## ISpeculativeDecoder Interface
 

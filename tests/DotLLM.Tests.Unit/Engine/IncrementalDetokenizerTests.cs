@@ -183,4 +183,40 @@ public sealed class IncrementalDetokenizerTests
 
         Assert.Equal(bulk, detok.ToString());
     }
+
+    /// <summary>
+    /// Steady-state Append() must not allocate the per-token Decode() <see cref="string"/> that
+    /// the pre-PR implementation produced. The committed <see cref="System.Text.StringBuilder"/>
+    /// still grows in chunks and TakeDelta()/ToString() materialize strings on demand, so we
+    /// don't assert zero bytes — but a small, bounded ceiling proves the per-Append decode
+    /// allocations are gone. The pre-PR implementation allocated ~2 small strings per Append
+    /// (one for `_windowText`, one for the eviction-tail decode); at 200 calls × small-window-size
+    /// that comfortably exceeded 6 KB of Gen-0 traffic.
+    /// </summary>
+    [Fact]
+    public void Append_SteadyState_AllocationFloorIsBoundedAndFarBelowPreviousPath()
+    {
+        var tok = BuildSpaceMarkerVocab();
+        // Cycle through h/e/l/l/o tokens — purely scalar single-char tokens so the window
+        // resolves cleanly each step and no byte-fallback run is held back.
+        int[] cycle = [2, 3, 4, 4, 5];
+
+        using var detok = new IncrementalDetokenizer(tok);
+        // Warm-up: pay any one-off ArrayPool rent / first-call costs outside the window.
+        for (int i = 0; i < 32; i++)
+            detok.Append(cycle[i % cycle.Length]);
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 200; i++)
+            detok.Append(cycle[i % cycle.Length]);
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        long delta = after - before;
+        // 200 Append calls under the previous path = ~400 small string allocs ~= O(few KB).
+        // The new path's only steady-state allocation source is the committed StringBuilder
+        // chunk growth (amortized — typically zero across 200 calls once warm). Assert a
+        // conservative ceiling well below the previous baseline.
+        Assert.True(delta < 2_048,
+            $"Append() allocated {delta} bytes across 200 calls — expected far less than the pre-PR ~4 KB+ baseline");
+    }
 }

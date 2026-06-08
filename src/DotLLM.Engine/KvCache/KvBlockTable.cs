@@ -76,6 +76,44 @@ public sealed class KvBlockTable
     }
 
     /// <summary>
+    /// Seeds this table with pre-allocated block IDs whose refcounts have already
+    /// been incremented by the caller (typically the prefix cache). The visible
+    /// length advances to cover all seeded blocks. Must be called on an empty table.
+    /// </summary>
+    /// <remarks>
+    /// The seeded blocks become owned by this table — calling <see cref="Free"/>
+    /// will release one ref per seeded block, matching the AddRef the caller did
+    /// to hand them over.
+    /// </remarks>
+    internal void SeedSharedBlocks(IReadOnlyList<int> blockIds, int tokenCount)
+    {
+        if (_blockIds.Count > 0)
+            throw new InvalidOperationException("SeedSharedBlocks requires an empty block table.");
+        if (tokenCount <= 0) return;
+        if ((tokenCount + _blockSize - 1) / _blockSize != blockIds.Count)
+            throw new ArgumentException("Token count does not match supplied block count.", nameof(tokenCount));
+
+        for (int i = 0; i < blockIds.Count; i++)
+            _blockIds.Add(blockIds[i]);
+        _currentLength = tokenCount;
+    }
+
+    /// <summary>
+    /// Snapshots the contiguous range of FULL physical block IDs covering
+    /// <paramref name="tokenCount"/> tokens. Used by the prefix trie when inserting
+    /// freshly computed blocks. Returns blocks that are fully populated only —
+    /// trailing partial blocks are excluded.
+    /// </summary>
+    internal void SnapshotFullBlocks(int tokenCount, List<int> blockIds)
+    {
+        ArgumentNullException.ThrowIfNull(blockIds);
+        blockIds.Clear();
+        int fullBlocks = tokenCount / _blockSize;
+        for (int i = 0; i < fullBlocks; i++)
+            blockIds.Add(_blockIds[i]);
+    }
+
+    /// <summary>
     /// Ensures the block containing <paramref name="position"/> is writable (ref count = 1).
     /// If the block is shared (ref count &gt; 1), copies it (copy-on-write).
     /// </summary>

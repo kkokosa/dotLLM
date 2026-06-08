@@ -212,12 +212,56 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
 
     public string Decode(ReadOnlySpan<int> tokenIds)
     {
-        // GPT-2 decode: every char in a token string is a GPT-2-encoded byte.
-        // Map each char back to its byte, then UTF-8 decode the combined byte stream.
-        int maxBytes = tokenIds.Length * 8;
-        byte[] buf = ArrayPool<byte>.Shared.Rent(maxBytes);
-        int count = 0;
+        // Materializes the decoded byte stream once into a pooled buffer, then UTF-8 decodes.
+        // The shared helper is used both here and by TryDecode to avoid duplicating the
+        // GPT-2 char-to-byte unmapping logic.
+        byte[] buf = MaterializeBytes(tokenIds, out int count);
+        string result = Encoding.UTF8.GetString(buf, 0, count);
+        ArrayPool<byte>.Shared.Return(buf);
+        return result;
+    }
 
+    /// <summary>
+    /// Zero-allocation decode into <paramref name="destination"/>. Atomic on overflow —
+    /// pre-computes the UTF-8 char count against the materialized byte stream and returns
+    /// <see langword="false"/> without touching <paramref name="destination"/> when the
+    /// result would not fit.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="stripBosSpace"/> is accepted for interface compatibility but is a no-op
+    /// for the GPT-2 / tiktoken encoding — it has no SentencePiece-style BOS space marker.
+    /// </remarks>
+    public bool TryDecode(ReadOnlySpan<int> tokenIds, bool stripBosSpace, Span<char> destination, out int charsWritten)
+    {
+        _ = stripBosSpace; // no-op for tiktoken; here only to satisfy ITokenizer surface
+        byte[] buf = MaterializeBytes(tokenIds, out int count);
+        try
+        {
+            int needed = Encoding.UTF8.GetCharCount(buf, 0, count);
+            if (needed > destination.Length)
+            {
+                charsWritten = 0;
+                return false;
+            }
+            charsWritten = Encoding.UTF8.GetChars(buf.AsSpan(0, count), destination);
+            return true;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buf);
+        }
+    }
+
+    /// <summary>
+    /// Maps each GPT-2-encoded token char back to its raw byte value, materializing the
+    /// concatenated byte stream into a pooled <see cref="byte"/> buffer. Caller owns the
+    /// returned buffer and must return it to <see cref="ArrayPool{T}.Shared"/>.
+    /// </summary>
+    private byte[] MaterializeBytes(ReadOnlySpan<int> tokenIds, out int count)
+    {
+        int maxBytes = Math.Max(16, tokenIds.Length * 8);
+        byte[] buf = ArrayPool<byte>.Shared.Rent(maxBytes);
+        count = 0;
         foreach (int id in tokenIds)
         {
             if ((uint)id >= (uint)_idToToken.Length) continue;
@@ -231,7 +275,6 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
                     ArrayPool<byte>.Shared.Return(buf);
                     buf = larger;
                 }
-                // Look up the byte value for this GPT-2 Unicode char.
                 int idx = (int)c;
                 if ((uint)idx < (uint)Gpt2UnicodeToByteTable.Length)
                 {
@@ -240,10 +283,7 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
                 }
             }
         }
-
-        string result = Encoding.UTF8.GetString(buf, 0, count);
-        ArrayPool<byte>.Shared.Return(buf);
-        return result;
+        return buf;
     }
 
     public string DecodeToken(int tokenId)
