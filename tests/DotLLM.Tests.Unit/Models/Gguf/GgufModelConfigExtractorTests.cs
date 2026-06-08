@@ -156,6 +156,105 @@ public class GgufModelConfigExtractorTests
     }
 
     [Fact]
+    public void Extract_DeepSeekV2Lite_PopulatesMla()
+    {
+        // Synthesises a DeepSeek-V2-Lite-style GGUF metadata blob and verifies
+        // MlaConfig (Q monolithic, KvLora=512, qk_nope=128, qk_rope=64,
+        // v_head=128) comes through end-to-end. MoE config detection ships in
+        // the parallel DeepSeek-GGUF A-2 PR.
+        var metadata = BuildMetadata(d =>
+        {
+            d.AddString("general.architecture", "deepseek2");
+            d.AddUInt32("deepseek2.embedding_length", 2048);
+            d.AddUInt32("deepseek2.block_count", 27);
+            d.AddUInt32("deepseek2.feed_forward_length", 10944);     // dense FFN width (layer 0)
+            d.AddUInt32("deepseek2.attention.head_count", 16);
+            d.AddUInt32("deepseek2.attention.head_count_kv", 16);
+            d.AddUInt32("deepseek2.context_length", 163840);
+            d.AddFloat32("deepseek2.attention.layer_norm_rms_epsilon", 1e-6f);
+            d.AddUInt32("deepseek2.vocab_size", 102400);
+            d.AddFloat32("deepseek2.rope.freq_base", 10000.0f);
+            d.AddUInt32("deepseek2.rope.dimension_count", 64);        // qk_rope
+            // MLA-specific
+            d.AddUInt32("deepseek2.attention.q_lora_rank", 0);        // V2-Lite is monolithic
+            d.AddUInt32("deepseek2.attention.kv_lora_rank", 512);
+            d.AddUInt32("deepseek2.attention.key_length", 192);       // total qk_head (qk_nope + qk_rope)
+            d.AddUInt32("deepseek2.attention.value_length", 128);     // v_head
+        });
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+
+        // Architecture + AttentionType
+        Assert.Equal(Architecture.DeepSeekV2, config.Architecture);
+        Assert.Equal(AttentionType.MLA, config.AttentionType);
+
+        // MLA config
+        Assert.NotNull(config.MlaConfig);
+        Assert.Equal(0, config.MlaConfig.QLoraRank);                  // V2-Lite monolithic
+        Assert.Equal(512, config.MlaConfig.KvLoraRank);
+        Assert.Equal(128, config.MlaConfig.QkNopeHeadDim);
+        Assert.Equal(64, config.MlaConfig.QkRopeHeadDim);
+        Assert.Equal(128, config.MlaConfig.VHeadDim);
+        Assert.Equal(192, config.MlaConfig.QkHeadDim);                // qk_nope + qk_rope
+        Assert.Equal(10000.0f, config.MlaConfig.RopeTheta);
+
+        // HeadDim is patched to the full qk_head_dim for MLA
+        Assert.Equal(192, config.HeadDim);
+    }
+
+    [Fact]
+    public void Extract_DeepSeekV2_LoraQ_PopulatesQLoraRank()
+    {
+        // V2-full / V3 ship with q_lora_rank > 0 (Q-side factorisation).
+        var metadata = BuildMetadata(d =>
+        {
+            d.AddString("general.architecture", "deepseek2");
+            d.AddUInt32("deepseek2.embedding_length", 5120);
+            d.AddUInt32("deepseek2.block_count", 60);
+            d.AddUInt32("deepseek2.feed_forward_length", 12288);
+            d.AddUInt32("deepseek2.attention.head_count", 128);
+            d.AddUInt32("deepseek2.attention.head_count_kv", 128);
+            d.AddUInt32("deepseek2.context_length", 163840);
+            d.AddUInt32("deepseek2.vocab_size", 102400);
+            d.AddFloat32("deepseek2.rope.freq_base", 10000.0f);
+            d.AddUInt32("deepseek2.rope.dimension_count", 64);
+            d.AddUInt32("deepseek2.attention.q_lora_rank", 1536);      // V2-full LoRA-Q
+            d.AddUInt32("deepseek2.attention.kv_lora_rank", 512);
+            d.AddUInt32("deepseek2.attention.key_length", 192);        // total qk_head
+            d.AddUInt32("deepseek2.attention.value_length", 128);
+        });
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.Equal(1536, config.MlaConfig!.QLoraRank);
+    }
+
+    [Fact]
+    public void Extract_DeepSeekV3_PopulatesArchitecture()
+    {
+        var metadata = BuildMetadata(d =>
+        {
+            d.AddString("general.architecture", "deepseek3");
+            d.AddUInt32("deepseek3.embedding_length", 7168);
+            d.AddUInt32("deepseek3.block_count", 61);
+            d.AddUInt32("deepseek3.feed_forward_length", 18432);
+            d.AddUInt32("deepseek3.attention.head_count", 128);
+            d.AddUInt32("deepseek3.attention.head_count_kv", 128);
+            d.AddUInt32("deepseek3.context_length", 163840);
+            d.AddUInt32("deepseek3.vocab_size", 129280);
+            d.AddFloat32("deepseek3.rope.freq_base", 10000.0f);
+            d.AddUInt32("deepseek3.rope.dimension_count", 64);
+            d.AddUInt32("deepseek3.attention.q_lora_rank", 1536);
+            d.AddUInt32("deepseek3.attention.kv_lora_rank", 512);
+            d.AddUInt32("deepseek3.attention.key_length", 192);   // total qk_head
+            d.AddUInt32("deepseek3.attention.value_length", 128);
+        });
+
+        var config = GgufModelConfigExtractor.Extract(metadata);
+        Assert.Equal(Architecture.DeepSeekV3, config.Architecture);
+        Assert.Equal(AttentionType.MLA, config.AttentionType);
+    }
+
+    [Fact]
     public void Extract_UnsupportedArchitecture_Throws()
     {
         var metadata = BuildMetadata(d => d.AddString("general.architecture", "unknown_arch"));
@@ -209,7 +308,10 @@ public class GgufModelConfigExtractorTests
     [InlineData("qwen2", Architecture.Qwen)]
     [InlineData("qwen3", Architecture.Qwen)]
     [InlineData("deepseek", Architecture.DeepSeek)]
-    [InlineData("deepseek2", Architecture.DeepSeek)]
+    // Note: deepseek2 / deepseek3 require additional MLA + MoE metadata that
+    // this minimal-keys parameterised test doesn't supply — they're covered by
+    // the dedicated Extract_DeepSeekV2Lite_PopulatesMlaAndMoe and
+    // Extract_DeepSeekV3_PopulatesArchitecture tests.
     public void Extract_ArchitectureParsing(string archString, Architecture expected)
     {
         var metadata = BuildMetadata(d =>

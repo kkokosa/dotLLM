@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Cpu.Kernels;
@@ -80,6 +81,21 @@ internal readonly struct TransformerLayerWeights
     /// <summary>Optional down projection bias [DownOutputDim]. Null when absent.</summary>
     public readonly float[]? DownBias;
 
+    // ──────────────────────────── MLA attention ────────────────────────────
+    // DeepSeek-V2/V3 replaces the monolithic Q/K/V/O projections with a
+    // low-rank-factorised set. When <see cref="Mla"/> is non-null, the
+    // forward pass routes through MlaAttention and ignores the legacy
+    // Q/K/V slots above (O is still used as the output projection).
+
+    /// <summary>
+    /// Non-null on DeepSeek-V2/V3 MLA layers. Carries all MLA-specific
+    /// projection pointers + hyperparameters (qk nope/rope dims, v_head_dim,
+    /// q/kv LoRA ranks). When present, <see cref="QWeight"/>/<see cref="KWeight"/>/
+    /// <see cref="VWeight"/> are zeroed and the forward pass takes the MLA branch.
+    /// </summary>
+    public readonly MlaLayerWeights? Mla;
+
+
     public TransformerLayerWeights(
         float[] attnNormWeight,
         nint qWeight, QuantizationType qQuantType, int qOutputDim, int qInputDim,
@@ -92,7 +108,8 @@ internal readonly struct TransformerLayerWeights
         nint downWeight, QuantizationType downQuantType, int downOutputDim, int downInputDim,
         float[]? qBias = null, float[]? kBias = null, float[]? vBias = null, float[]? oBias = null,
         float[]? gateBias = null, float[]? upBias = null, float[]? downBias = null,
-        float[]? qNormWeight = null, float[]? kNormWeight = null)
+        float[]? qNormWeight = null, float[]? kNormWeight = null,
+        MlaLayerWeights? mla = null)
     {
         AttnNormWeight = attnNormWeight;
         QNormWeight = qNormWeight;
@@ -105,6 +122,76 @@ internal readonly struct TransformerLayerWeights
         GateWeight = gateWeight; GateQuantType = gateQuantType; GateOutputDim = gateOutputDim; GateInputDim = gateInputDim; GateBias = gateBias;
         UpWeight = upWeight; UpQuantType = upQuantType; UpOutputDim = upOutputDim; UpInputDim = upInputDim; UpBias = upBias;
         DownWeight = downWeight; DownQuantType = downQuantType; DownOutputDim = downOutputDim; DownInputDim = downInputDim; DownBias = downBias;
+        Mla = mla;
+    }
+}
+
+/// <summary>
+/// Per-layer MLA (Multi-head Latent Attention) weight bundle for DeepSeek-V2/V3.
+/// All projection pointers are F32 row-major — F16 / BF16 tensors are upcast at
+/// load time (via <c>ResolveLinearAsF32</c>) so the kernel can consume a uniform
+/// F32 layout matching <see cref="DotLLM.Cpu.Kernels.MlaAttention.Execute"/>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Exactly one of the Q paths is populated:
+/// <list type="bullet">
+///   <item>LoRA-factored Q (<see cref="QLoraRank"/> &gt; 0): <see cref="QAProj"/>,
+///     <see cref="QALayernormWeight"/>, <see cref="QBProj"/> are all non-zero;
+///     <see cref="QProj"/> is zero.</item>
+///   <item>Monolithic Q (<see cref="QLoraRank"/> == 0): <see cref="QProj"/> is
+///     non-zero; <see cref="QAProj"/>, <see cref="QBProj"/> are zero and
+///     <see cref="QALayernormWeight"/> is null.</item>
+/// </list>
+/// The KV path is always LoRA-factored (<see cref="KvAProjWithMqa"/>,
+/// <see cref="KvALayernormWeight"/>, <see cref="KvBProj"/>).
+/// </para>
+/// </remarks>
+internal sealed class MlaLayerWeights
+{
+    /// <summary>Q down-projection [qLoraRank, hidden]. Zero when <see cref="QLoraRank"/>==0.</summary>
+    public readonly nint QAProj;
+    /// <summary>Q LoRA RMSNorm weight [qLoraRank]. Null when <see cref="QLoraRank"/>==0.</summary>
+    public readonly float[]? QALayernormWeight;
+    /// <summary>Q up-projection [numHeads * qkHeadDim, qLoraRank]. Zero when <see cref="QLoraRank"/>==0.</summary>
+    public readonly nint QBProj;
+    /// <summary>Monolithic Q projection [numHeads * qkHeadDim, hidden]. Zero when <see cref="QLoraRank"/>&gt;0.</summary>
+    public readonly nint QProj;
+
+    /// <summary>KV down-projection with shared-rope-K [kvLoraRank + qkRopeHeadDim, hidden].</summary>
+    public readonly nint KvAProjWithMqa;
+    /// <summary>KV LoRA RMSNorm weight [kvLoraRank].</summary>
+    public readonly float[] KvALayernormWeight;
+    /// <summary>KV up-projection [numHeads * (qkNopeHeadDim + vHeadDim), kvLoraRank].</summary>
+    public readonly nint KvBProj;
+
+    // Hyperparameters (mirrors MlaConfig, carried on the layer for forward-path convenience).
+    public readonly int NumHeads;
+    public readonly int QkNopeHeadDim;
+    public readonly int QkRopeHeadDim;
+    public readonly int VHeadDim;
+    public readonly int QLoraRank;
+    public readonly int KvLoraRank;
+
+    public MlaLayerWeights(
+        nint qAProj, float[]? qALayernormWeight, nint qBProj, nint qProj,
+        nint kvAProjWithMqa, float[] kvALayernormWeight, nint kvBProj,
+        int numHeads, int qkNopeHeadDim, int qkRopeHeadDim, int vHeadDim,
+        int qLoraRank, int kvLoraRank)
+    {
+        QAProj = qAProj;
+        QALayernormWeight = qALayernormWeight;
+        QBProj = qBProj;
+        QProj = qProj;
+        KvAProjWithMqa = kvAProjWithMqa;
+        KvALayernormWeight = kvALayernormWeight;
+        KvBProj = kvBProj;
+        NumHeads = numHeads;
+        QkNopeHeadDim = qkNopeHeadDim;
+        QkRopeHeadDim = qkRopeHeadDim;
+        VHeadDim = vHeadDim;
+        QLoraRank = qLoraRank;
+        KvLoraRank = kvLoraRank;
     }
 }
 
@@ -155,11 +242,19 @@ internal sealed class TransformerWeights : IDisposable
     /// <summary>R4-interleaved LM head weights. Null until <see cref="RepackWeights"/> is called or if type is not repackable.</summary>
     public WeightRepacking.RepackedWeight? RepackedOutput { get; private set; }
 
+    /// <summary>
+    /// Loader-owned 64-byte-aligned allocations created at load time (e.g.
+    /// bf16 → F32 upcasts for the safetensors path). Freed by
+    /// <see cref="Dispose"/>. Empty for pure-mmap GGUF loads.
+    /// </summary>
+    private readonly List<nint>? _ownedAllocations;
+
     private TransformerWeights(
         nint tokenEmbedWeight, QuantizationType tokenEmbedQuantType, int vocabSize, int hiddenSize,
         TransformerLayerWeights[] layers,
         float[] outputNormWeight,
-        nint outputWeight, QuantizationType outputQuantType, int outputOutputDim, int outputInputDim)
+        nint outputWeight, QuantizationType outputQuantType, int outputOutputDim, int outputInputDim,
+        List<nint>? ownedAllocations = null)
     {
         TokenEmbedWeight = tokenEmbedWeight;
         TokenEmbedQuantType = tokenEmbedQuantType;
@@ -171,6 +266,27 @@ internal sealed class TransformerWeights : IDisposable
         OutputQuantType = outputQuantType;
         OutputOutputDim = outputOutputDim;
         OutputInputDim = outputInputDim;
+        _ownedAllocations = ownedAllocations;
+    }
+
+    /// <summary>
+    /// Factory used by the safetensors loader. Wraps the private constructor
+    /// and accepts the list of owned allocations (bf16→F32 upcast buffers)
+    /// that must be freed when the weights are disposed.
+    /// </summary>
+    internal static TransformerWeights CreateFromSafetensors(
+        nint tokenEmbedWeight, QuantizationType tokenEmbedQt, int vocabSize, int hiddenSize,
+        TransformerLayerWeights[] layers,
+        float[] outputNormWeight,
+        nint outputWeight, QuantizationType outputQt, int outputM, int outputK,
+        List<nint> ownedAllocations)
+    {
+        return new TransformerWeights(
+            tokenEmbedWeight, tokenEmbedQt, vocabSize, hiddenSize,
+            layers,
+            outputNormWeight,
+            outputWeight, outputQt, outputM, outputK,
+            ownedAllocations);
     }
 
     /// <summary>
@@ -186,11 +302,18 @@ internal sealed class TransformerWeights : IDisposable
         var embDesc = tensors["token_embd.weight"];
         nint embPtr = dataBase + (nint)embDesc.DataOffset;
 
+        // MLA (DeepSeek-V2/V3) loads its projection tensors as F32 dequant
+        // buffers since the CPU MlaAttention.Execute oracle is F32-only. Track
+        // them on the loader so Dispose can free them. Empty for non-MLA models.
+        var owned = config.MlaConfig is not null ? new List<nint>() : null;
+
         // Per-layer weights
         var layers = new TransformerLayerWeights[config.NumLayers];
         for (int i = 0; i < config.NumLayers; i++)
         {
-            layers[i] = LoadLayer(i, dataBase, tensors, config);
+            layers[i] = config.MlaConfig is not null
+                ? LoadMlaLayer(i, dataBase, tensors, config, owned!)
+                : LoadLayer(i, dataBase, tensors, config);
         }
 
         // Output norm
@@ -223,7 +346,8 @@ internal sealed class TransformerWeights : IDisposable
             embPtr, embDesc.QuantizationType, config.VocabSize, config.HiddenSize,
             layers,
             outputNormWeight,
-            outputPtr, outputQt, outputM, outputK);
+            outputPtr, outputQt, outputM, outputK,
+            ownedAllocations: owned);
     }
 
     /// <summary>
@@ -237,12 +361,16 @@ internal sealed class TransformerWeights : IDisposable
         for (int i = 0; i < Layers.Length; i++)
         {
             ref readonly var lw = ref Layers[i];
+            // MLA layers don't populate the legacy Q/K/V slots — the MLA forward
+            // takes its weights from lw.Mla and calls the scalar MlaAttention
+            // kernel which does not consume R4 repacks.
+            bool isMla = lw.Mla is not null;
             repacked[i] = new RepackedLayerWeights
             {
-                Q = TryRepack(lw.QWeight, lw.QQuantType, lw.QOutputDim, lw.QInputDim),
-                K = TryRepack(lw.KWeight, lw.KQuantType, lw.KOutputDim, lw.KInputDim),
-                V = TryRepack(lw.VWeight, lw.VQuantType, lw.VOutputDim, lw.VInputDim),
-                O = TryRepack(lw.OWeight, lw.OQuantType, lw.OOutputDim, lw.OInputDim),
+                Q = isMla ? default : TryRepack(lw.QWeight, lw.QQuantType, lw.QOutputDim, lw.QInputDim),
+                K = isMla ? default : TryRepack(lw.KWeight, lw.KQuantType, lw.KOutputDim, lw.KInputDim),
+                V = isMla ? default : TryRepack(lw.VWeight, lw.VQuantType, lw.VOutputDim, lw.VInputDim),
+                O = isMla ? default : TryRepack(lw.OWeight, lw.OQuantType, lw.OOutputDim, lw.OInputDim),
                 Gate = TryRepack(lw.GateWeight, lw.GateQuantType, lw.GateOutputDim, lw.GateInputDim),
                 Up = TryRepack(lw.UpWeight, lw.UpQuantType, lw.UpOutputDim, lw.UpInputDim),
                 Down = TryRepack(lw.DownWeight, lw.DownQuantType, lw.DownOutputDim, lw.DownInputDim),
@@ -261,8 +389,8 @@ internal sealed class TransformerWeights : IDisposable
         return WeightRepacking.RepackR4(ptr, qt, m, k);
     }
 
-    /// <summary>Frees all R4-interleaved weight buffers.</summary>
-    public void Dispose()
+    /// <summary>Frees all R4-interleaved weight buffers and any owned aligned allocations.</summary>
+    public unsafe void Dispose()
     {
         if (RepackedLayers is not null)
         {
@@ -272,6 +400,16 @@ internal sealed class TransformerWeights : IDisposable
         }
         RepackedOutput?.Dispose();
         RepackedOutput = null;
+
+        if (_ownedAllocations is not null)
+        {
+            foreach (var ptr in _ownedAllocations)
+            {
+                if (ptr != nint.Zero)
+                    NativeMemory.AlignedFree((void*)ptr);
+            }
+            _ownedAllocations.Clear();
+        }
     }
 
     private static TransformerLayerWeights LoadLayer(
@@ -419,6 +557,160 @@ internal sealed class TransformerWeights : IDisposable
         int k = desc.Shape[0];
         int m = desc.Shape[1];
         return (ptr, desc.QuantizationType, m, k);
+    }
+
+    /// <summary>
+    /// Loads a single DeepSeek-V2 / V3 MLA layer's projection tensors from GGUF.
+    /// Each MLA-specific tensor is dequantized to a 64-byte-aligned F32 host
+    /// buffer (to match the CPU oracle <see cref="DotLLM.Cpu.Kernels.MlaAttention.Execute"/>'s
+    /// F32 contract); the returned <see cref="TransformerLayerWeights"/> carries
+    /// these F32 pointers in <c>lw.Mla</c> and zeroes the legacy GQA Q/K/V slots.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Tensor naming</b> (per llama.cpp's <c>convert_hf_to_gguf.py</c>
+    /// <c>DeepseekV2Model</c>):
+    /// <list type="bullet">
+    ///   <item><c>blk.{N}.attn_q_a.weight</c> + <c>attn_q_a_norm.weight</c> +
+    ///     <c>attn_q_b.weight</c> when <c>q_lora_rank &gt; 0</c></item>
+    ///   <item><c>blk.{N}.attn_q.weight</c> when <c>q_lora_rank == 0</c> (V2-Lite)</item>
+    ///   <item><c>blk.{N}.attn_kv_a_mqa.weight</c> + <c>attn_kv_a_norm.weight</c> +
+    ///     <c>attn_kv_b.weight</c></item>
+    ///   <item><c>blk.{N}.attn_output.weight</c> (same name as GQA — reused as o_proj)</item>
+    /// </list>
+    /// </para>
+    /// <para>
+    /// <b>Memory budget.</b> Q4_K_M → F32 dequant inflates ~4× per element.
+    /// V2-Lite MLA per-layer footprint ≈ 12 MB raw → 48 MB F32 (×27 layers ≈
+    /// 1.3 GB total). Dense FFN (separate path) is the main pressure.
+    /// Full-V2 MLA is ~10× this (160 GB) — that needs an on-device dequant
+    /// path; flagged as a follow-up.
+    /// </para>
+    /// </remarks>
+    private static unsafe TransformerLayerWeights LoadMlaLayer(
+        int layerIdx,
+        nint dataBase,
+        IReadOnlyDictionary<string, GgufTensorDescriptor> tensors,
+        ModelConfig config,
+        List<nint> owned)
+    {
+        var mla = config.MlaConfig
+            ?? throw new InvalidOperationException("LoadMlaLayer called without MlaConfig.");
+
+        string prefix = $"blk.{layerIdx}";
+        int hiddenSize = config.HiddenSize;
+        int qLora = mla.QLoraRank;
+        int kvLora = mla.KvLoraRank;
+        int qkNope = mla.QkNopeHeadDim;
+        int qkRope = mla.QkRopeHeadDim;
+        int vHead = mla.VHeadDim;
+        int numHeads = config.NumAttentionHeads;
+        int qTotal = numHeads * (qkNope + qkRope);
+        int kvAOut = kvLora + qkRope;
+        int kvBOut = numHeads * (qkNope + vHead);
+        int oInput = numHeads * vHead;
+
+        // ── Norms ─────────────────────────────────────────────────────
+        float[] attnNorm = DequantizeNorm(dataBase, tensors[$"{prefix}.attn_norm.weight"], hiddenSize);
+        float[] ffnNorm = DequantizeNorm(dataBase, tensors[$"{prefix}.ffn_norm.weight"], hiddenSize);
+
+        // ── Q path ─────────────────────────────────────────────────────
+        nint qAProj = 0, qBProj = 0, qProj = 0;
+        float[]? qANorm = null;
+        if (qLora > 0)
+        {
+            qAProj = DequantToF32(dataBase, tensors[$"{prefix}.attn_q_a.weight"],
+                                  (long)qLora * hiddenSize, owned);
+            qANorm = DequantizeNorm(dataBase, tensors[$"{prefix}.attn_q_a_norm.weight"], qLora);
+            qBProj = DequantToF32(dataBase, tensors[$"{prefix}.attn_q_b.weight"],
+                                  (long)qTotal * qLora, owned);
+        }
+        else
+        {
+            qProj = DequantToF32(dataBase, tensors[$"{prefix}.attn_q.weight"],
+                                 (long)qTotal * hiddenSize, owned);
+        }
+
+        // ── KV path (always factored) ────────────────────────────────
+        nint kvAProj = DequantToF32(dataBase, tensors[$"{prefix}.attn_kv_a_mqa.weight"],
+                                    (long)kvAOut * hiddenSize, owned);
+        float[] kvANorm = DequantizeNorm(dataBase, tensors[$"{prefix}.attn_kv_a_norm.weight"], kvLora);
+        nint kvBProj = DequantToF32(dataBase, tensors[$"{prefix}.attn_kv_b.weight"],
+                                    (long)kvBOut * kvLora, owned);
+
+        // ── O projection (same tensor name as GQA: attn_output) ──────
+        nint oProj = DequantToF32(dataBase, tensors[$"{prefix}.attn_output.weight"],
+                                  (long)hiddenSize * oInput, owned);
+
+        var mlaBundle = new MlaLayerWeights(
+            numHeads: numHeads,
+            qkNopeHeadDim: qkNope,
+            qkRopeHeadDim: qkRope,
+            vHeadDim: vHead,
+            qLoraRank: qLora,
+            kvLoraRank: kvLora,
+            qAProj: qAProj,
+            qALayernormWeight: qANorm,
+            qBProj: qBProj,
+            qProj: qProj,
+            kvAProjWithMqa: kvAProj,
+            kvALayernormWeight: kvANorm,
+            kvBProj: kvBProj);
+
+        // ── FFN ────────────────────────────────────────────────────────
+        // Dense FFN only in this extraction. MoE config detection + the
+        // 3D-stacked ffn_*_exps tensor loader ship in the parallel
+        // DeepSeek-GGUF A-2 PR. Layers in the MoE band (when MoE config
+        // arrives) will route to that loader instead; until then, any
+        // checkpoint that lacks dense ffn_gate.weight (i.e. is actually MoE)
+        // throws a clear error here.
+        nint gatePtr = 0; QuantizationType gateQt = QuantizationType.F32; int gateM = 0, gateK = 0;
+        nint upPtr = 0; QuantizationType upQt = QuantizationType.F32; int upM = 0, upK = 0;
+        nint downPtr = 0; QuantizationType downQt = QuantizationType.F32; int downM = 0, downK = 0;
+        if (tensors.TryGetValue($"{prefix}.ffn_gate.weight", out var gateDesc))
+        {
+            (gatePtr, gateQt, gateM, gateK) = LoadLinear(dataBase, gateDesc);
+            (upPtr, upQt, upM, upK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_up.weight"]);
+            (downPtr, downQt, downM, downK) = LoadLinear(dataBase, tensors[$"{prefix}.ffn_down.weight"]);
+        }
+        else
+        {
+            throw new InvalidDataException(
+                $"DeepSeek-V2 layer {layerIdx} has no dense ffn_gate.weight; MoE 3D-stacked " +
+                "ffn_*_exps tensor loader ships in the parallel DeepSeek-GGUF A-2 PR.");
+        }
+
+        // GGUF: Dimensions[0] = input dim (K), Dimensions[1] = output dim (M)
+        return new TransformerLayerWeights(
+            attnNormWeight: attnNorm,
+            qWeight: 0, qQuantType: QuantizationType.F32, qOutputDim: 0, qInputDim: 0,
+            kWeight: 0, kQuantType: QuantizationType.F32, kOutputDim: 0, kInputDim: 0,
+            vWeight: 0, vQuantType: QuantizationType.F32, vOutputDim: 0, vInputDim: 0,
+            oWeight: oProj, oQuantType: QuantizationType.F32,
+            oOutputDim: hiddenSize, oInputDim: oInput,
+            ffnNormWeight: ffnNorm,
+            gateWeight: gatePtr, gateQuantType: gateQt, gateOutputDim: gateM, gateInputDim: gateK,
+            upWeight: upPtr, upQuantType: upQt, upOutputDim: upM, upInputDim: upK,
+            downWeight: downPtr, downQuantType: downQt, downOutputDim: downM, downInputDim: downK,
+            mla: mlaBundle);
+    }
+
+    /// <summary>
+    /// Allocates a 64-byte-aligned F32 buffer and dequantizes <paramref name="elementCount"/>
+    /// values from the GGUF tensor at <paramref name="desc"/>'s data offset into it.
+    /// Tracks the allocation in <paramref name="owned"/> so the loader's Dispose
+    /// can free it. Returns the pointer.
+    /// </summary>
+    private static unsafe nint DequantToF32(nint dataBase, GgufTensorDescriptor desc,
+                                            long elementCount, List<nint> owned)
+    {
+        nuint bytes = (nuint)(elementCount * sizeof(float));
+        nint dst = (nint)NativeMemory.AlignedAlloc(bytes, 64);
+        owned.Add(dst);
+        nint src = dataBase + (nint)desc.DataOffset;
+        Dequantize.ToFloat32(src, elementCount, desc.QuantizationType,
+                              new Span<float>((void*)dst, (int)elementCount));
+        return dst;
     }
 
     private static float[] DequantizeNorm(nint dataBase, GgufTensorDescriptor desc, int expectedSize)

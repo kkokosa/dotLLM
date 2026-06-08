@@ -9,6 +9,7 @@ using DotLLM.Core.Tensors;
 using DotLLM.Cpu.Kernels;
 using DotLLM.Cpu.Threading;
 using DotLLM.Models.Gguf;
+using DotLLM.Models.SafeTensors;
 
 namespace DotLLM.Models.Architectures;
 
@@ -29,7 +30,12 @@ public sealed unsafe class TransformerModel : IModel
 
     private readonly TransformerWeights _weights;
     private readonly TransformerForwardState _state;
-    private readonly GgufFile _gguf; // prevent premature GC of mmap
+    // Lifetime anchor for the underlying mmap-backed weight file. Holds a
+    // strong reference so the GC cannot collect the GgufFile / SafetensorsFile
+    // while weight pointers are still in use. Not null for any loaded model.
+#pragma warning disable IDE0052, CA1823 // field used only as a GC root
+    private readonly object _mmapAnchor;
+#pragma warning restore IDE0052, CA1823
     private readonly int _ropeDim;
     private readonly RoPEType _ropeType;
     private readonly int? _slidingWindowSize;
@@ -46,13 +52,13 @@ public sealed unsafe class TransformerModel : IModel
     internal int DebugMaxLayers { get; set; }
 
     private TransformerModel(ModelConfig config, TransformerWeights weights, TransformerForwardState state,
-                       GgufFile gguf, int ropeDim, RoPEType ropeType,
+                       object mmapAnchor, int ropeDim, RoPEType ropeType,
                        ComputeThreadPool? threadPool, bool ownsPool)
     {
         Config = config;
         _weights = weights;
         _state = state;
-        _gguf = gguf;
+        _mmapAnchor = mmapAnchor;
         _ropeDim = ropeDim;
         _ropeType = ropeType;
         _slidingWindowSize = config.SlidingWindowSize;
@@ -115,6 +121,71 @@ public sealed unsafe class TransformerModel : IModel
         }
 
         return new TransformerModel(config, weights, state, gguf, ropeDim, ropeType, pool, ownsPool: pool is not null);
+    }
+
+    /// <summary>
+    /// Loads a transformer model from an opened HuggingFace-convention
+    /// safetensors file (single-threaded). The <paramref name="file"/> must
+    /// remain alive for the lifetime of the returned model — internally
+    /// anchored to prevent GC, but the caller must still dispose it after
+    /// disposing the model.
+    /// </summary>
+    public static TransformerModel LoadFromSafetensors(SafetensorsFile file, ModelConfig config)
+        => LoadFromSafetensors(file, config, ThreadingConfig.SingleThreaded);
+
+    /// <summary>
+    /// Loads a transformer model from an opened HuggingFace-convention
+    /// safetensors file with threading configuration.
+    /// </summary>
+    public static TransformerModel LoadFromSafetensors(
+        SafetensorsFile file, ModelConfig config, ThreadingConfig threading)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        ArgumentNullException.ThrowIfNull(config);
+
+        var weights = TransformerWeightsSafetensorsLoader.Load(file, config);
+        weights.RepackWeights();
+
+        // For MLA (DeepSeek-V2/V3) RoPE applies only to the decoupled
+        // qk_rope_head_dim sub-dimension — NOT the full qk_head_dim carried
+        // in ModelConfig.HeadDim. Size the RoPE table accordingly so the MLA
+        // kernel's [pos, qk_rope_head_dim / 2] indexing lines up.
+        int ropeDim = config.MlaConfig is not null
+            ? config.MlaConfig.QkRopeHeadDim
+            : (config.RoPEConfig?.DimensionCount ?? config.HeadDim);
+        if (ropeDim == 0) ropeDim = config.HeadDim;
+        float ropeTheta = config.MlaConfig?.RopeTheta ?? config.RoPEConfig?.Theta ?? 10000.0f;
+        RoPEType ropeType = config.RoPEConfig?.Type ?? RoPEType.Norm;
+
+        var state = new TransformerForwardState(
+            config.HiddenSize,
+            config.NumAttentionHeads,
+            config.NumKvHeads,
+            config.HeadDim,
+            config.IntermediateSize,
+            config.VocabSize,
+            config.MaxSequenceLength,
+            ropeDim,
+            ropeTheta);
+
+        ComputeThreadPool? pool = null;
+        if (threading.IsParallel)
+        {
+            int effectiveThreads = threading.EffectiveThreadCount;
+            if (threading.EnableNumaPinning || threading.EnablePCorePinning)
+            {
+                var topology = NumaTopology.Detect();
+                if (threading.EnablePCorePinning && topology.IsHybrid)
+                    effectiveThreads = Math.Min(effectiveThreads, topology.PerformanceCoreIds.Count);
+                pool = new ComputeThreadPool(effectiveThreads, topology, threading);
+            }
+            else
+            {
+                pool = new ComputeThreadPool(effectiveThreads, topology: null, threading);
+            }
+        }
+
+        return new TransformerModel(config, weights, state, file, ropeDim, ropeType, pool, ownsPool: pool is not null);
     }
 
     /// <inheritdoc/>
@@ -187,12 +258,96 @@ public sealed unsafe class TransformerModel : IModel
             ref readonly var lw = ref _weights.Layers[layer];
             var rl = repackedLayers?[layer];
 
+            // Declared once for the whole layer so both the GQA and MLA
+            // paths share the same input-quantisation scratch region.
+            byte* inputQ8Scratch = (byte*)_state.InputQ8Scratch;
+
             // a. Copy hiddenState → residual
             new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
 
-            // b. RMSNorm + Pre-quantize + Q/K/V projections
-            byte* inputQ8Scratch = (byte*)_state.InputQ8Scratch;
+            // ── MLA branch (DeepSeek-V2/V3) ──────────────────────────────
+            // Routes through the standalone MlaAttention kernel: RMSNorm → Q
+            // path (LoRA or monolithic) → KV path (LoRA + MQA-shared rope-K)
+            // → decoupled RoPE on the rope sub-dim only → per-head
+            // scaled-dot-product attention with causal mask → o_proj. No
+            // KV-cache in this PoC (kvCache argument is ignored for MLA layers).
+            if (lw.Mla is not null)
+            {
+                // RMSNorm per token into normOut (MLA kernel consumes the
+                // normalised hidden state).
+                for (int t = 0; t < seqLen; t++)
+                {
+                    RmsNorm.Execute(
+                        new ReadOnlySpan<float>(hidden + t * hiddenSize, hiddenSize),
+                        lw.AttnNormWeight, eps,
+                        new Span<float>(normOut + t * hiddenSize, hiddenSize));
+                }
 
+                MlaLayerWeights mlaW = lw.Mla!;
+                int qTotalElems = mlaW.NumHeads * (mlaW.QkNopeHeadDim + mlaW.QkRopeHeadDim);
+                int kvAElems = mlaW.KvLoraRank + mlaW.QkRopeHeadDim;
+                int kvBElems = mlaW.NumHeads * (mlaW.QkNopeHeadDim + mlaW.VHeadDim);
+                int oElems = hiddenSize * (mlaW.NumHeads * mlaW.VHeadDim);
+                int qAElems = mlaW.QLoraRank > 0 ? mlaW.QLoraRank * hiddenSize : 0;
+                int qBElems = mlaW.QLoraRank > 0 ? qTotalElems * mlaW.QLoraRank : 0;
+                int qMonoElems = mlaW.QLoraRank > 0 ? 0 : qTotalElems * hiddenSize;
+
+                int ropeHalf = mlaW.QkRopeHeadDim / 2;
+                int ropeTableLen = _state.CosTable.Length;
+
+                MlaAttention.Execute(
+                    hidden: new ReadOnlySpan<float>(normOut, seqLen * hiddenSize),
+                    output: new Span<float>(attnOut, seqLen * hiddenSize),
+                    seqLen: seqLen,
+                    positionOffset: positions[0],
+                    hiddenSize: hiddenSize,
+                    numHeads: mlaW.NumHeads,
+                    qkNopeHeadDim: mlaW.QkNopeHeadDim,
+                    qkRopeHeadDim: mlaW.QkRopeHeadDim,
+                    vHeadDim: mlaW.VHeadDim,
+                    qLoraRank: mlaW.QLoraRank,
+                    kvLoraRank: mlaW.KvLoraRank,
+                    rmsNormEps: eps,
+                    ropeCosTable: _state.CosTable.AsSpan(0, ropeTableLen),
+                    ropeSinTable: _state.SinTable.AsSpan(0, ropeTableLen),
+                    qAProj: qAElems > 0
+                        ? new ReadOnlySpan<float>((void*)mlaW.QAProj, qAElems)
+                        : ReadOnlySpan<float>.Empty,
+                    qALayernormWeight: mlaW.QALayernormWeight ?? (ReadOnlySpan<float>)ReadOnlySpan<float>.Empty,
+                    qBProj: qBElems > 0
+                        ? new ReadOnlySpan<float>((void*)mlaW.QBProj, qBElems)
+                        : ReadOnlySpan<float>.Empty,
+                    qProj: qMonoElems > 0
+                        ? new ReadOnlySpan<float>((void*)mlaW.QProj, qMonoElems)
+                        : ReadOnlySpan<float>.Empty,
+                    kvAProjWithMqa: new ReadOnlySpan<float>((void*)mlaW.KvAProjWithMqa, kvAElems * hiddenSize),
+                    kvALayernormWeight: mlaW.KvALayernormWeight,
+                    kvBProj: new ReadOnlySpan<float>((void*)mlaW.KvBProj, kvBElems * mlaW.KvLoraRank),
+                    oProj: new ReadOnlySpan<float>((void*)lw.OWeight, oElems));
+
+                // Bias on o_proj (rare — DeepSeek doesn't ship one by default).
+                AddBias(lw.OBias, attnOut, hiddenSize, seqLen);
+
+                // Residual add: attnOut + residual → hidden
+                for (int t = 0; t < seqLen; t++)
+                {
+                    Add.Execute(
+                        new ReadOnlySpan<float>(residual + t * hiddenSize, hiddenSize),
+                        new ReadOnlySpan<float>(attnOut + t * hiddenSize, hiddenSize),
+                        new Span<float>(hidden + t * hiddenSize, hiddenSize));
+                }
+
+                // Prepare residual for FFN.
+                new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
+
+                // Fall through to the standard FFN branch (dense OR MoE,
+                // decided by lw.Moe). Keep the original code path below by
+                // goto-less control: set a flag and skip the GQA attention
+                // code.
+                goto FfnBranch;
+            }
+
+            // b. RMSNorm + Pre-quantize + Q/K/V projections
             if (seqLen == 1 && _threadPool != null)
             {
                 // Decode path: try fused RmsNorm+Quantize (skips normOut intermediate)
@@ -312,6 +467,8 @@ public sealed unsafe class TransformerModel : IModel
 
             // h. Copy hiddenState → residual
             new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
+
+            FfnBranch:
 
             // i. FFN RMSNorm + Pre-quantize + Gate/Up projections
             if (seqLen == 1 && _threadPool != null)
@@ -816,7 +973,7 @@ public sealed unsafe class TransformerModel : IModel
         if (_ownsThreadPool)
             _threadPool?.Dispose();
         _state.Dispose();
-        _weights.Dispose(); // free R4-interleaved weight buffers
-        // _gguf is not owned by us — caller manages GgufFile lifetime.
+        _weights.Dispose(); // free R4-interleaved weight buffers and any owned bf16→F32 scratch
+        // _mmapAnchor is not owned by us — caller disposes the GgufFile / SafetensorsFile.
     }
 }

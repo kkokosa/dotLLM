@@ -22,6 +22,7 @@
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Xunit.SkippableFact" />
   </ItemGroup>
 
 </Project>

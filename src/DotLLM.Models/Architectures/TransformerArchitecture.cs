@@ -24,18 +24,20 @@ public sealed class TransformerArchitecture : IModelArchitecture
 
     /// <inheritdoc/>
     public IReadOnlyList<Architecture> SupportedArchitectures { get; } =
-        [Architecture.Llama, Architecture.Mistral, Architecture.Phi, Architecture.Qwen];
+        [Architecture.Llama, Architecture.Mistral, Architecture.Phi, Architecture.Qwen,
+         Architecture.DeepSeekV2, Architecture.DeepSeekV3];
 
     /// <inheritdoc/>
     public IModel CreateModel(ModelConfig config, IBackend backend)
     {
         if (config.Architecture is Architecture.DeepSeek)
             throw new NotSupportedException(
-                "DeepSeek models require Multi-Latent Attention (MLA) which is not yet implemented. " +
-                "See roadmap Step 48.");
+                "Pre-V2 DeepSeek (legacy 'deepseek' arch string in GGUF) is not supported — " +
+                "the kernel set targets DeepSeek-V2 / V3 (MLA + MoE). Re-export from a V2/V3 checkpoint.");
 
         if (config.Architecture is not (Architecture.Llama or Architecture.Mistral
-                                    or Architecture.Phi or Architecture.Qwen))
+                                    or Architecture.Phi or Architecture.Qwen
+                                    or Architecture.DeepSeekV2 or Architecture.DeepSeekV3))
             throw new ArgumentException(
                 $"TransformerArchitecture does not support {config.Architecture}.", nameof(config));
 
