@@ -1,0 +1,203 @@
+#version 450
+// Tiled scaled-dot-product attention (flash-attention style online softmax)
+// with FP32 Q / K / V / output. Mirrors native/kernels/attention_f32.cu.
+//
+// One workgroup per (query token, query head) pair. Threads stride across
+// head_dim for per-token ops (Q load, out-accum scale, final write) and
+// across the KV tile for score computation and softmax reductions.
+//
+// GQA: each query head hq maps to kv head hq / (num_heads / num_kv_heads).
+//
+// Causal mask: score[tkv] = -inf when tkv > position_offset + tq.
+// Sliding window (optional, 0 = disabled): mask tkv < pos_q - sliding_window + 1.
+//
+// Numerically stable softmax via running max + sum_exp. Each KV tile rescales
+// the running output accumulator by exp(old_max - new_max) before accumulating
+// its weighted V contribution.
+//
+// Dispatch:
+//   local_size_x    = 256
+//   groupCount.x    = seq_q * num_heads
+// Shared memory:    headDim*2 + TILE_KV + workgroup_size (floats)
+//   (MAX_HEAD_DIM = 256 gives headroom for Llama/DeepSeek 128, SmolLM 64.)
+
+#define TILE_KV         256
+#define MAX_HEAD_DIM    256
+#define WG_SIZE         256
+#define NEG_INF         (-3.4e38)
+
+layout(local_size_x = WG_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly  buffer BufQ   { float q[]; };    // [seq_q,  num_heads    * head_dim]
+layout(set = 0, binding = 1, std430) readonly  buffer BufK   { float k[]; };    // [seq_kv, num_kv_heads * head_dim]
+layout(set = 0, binding = 2, std430) readonly  buffer BufV   { float v[]; };    // [seq_kv, num_kv_heads * head_dim]
+layout(set = 0, binding = 3, std430) writeonly buffer BufOut { float outp[]; }; // [seq_q,  num_heads    * head_dim]
+
+layout(push_constant) uniform PushConstants {
+    uint seqQ;
+    uint seqKv;
+    uint numHeads;
+    uint numKvHeads;
+    uint headDim;
+    uint positionOffset;
+    uint slidingWindow;   // 0 = disabled
+} pc;
+
+shared float qShared[MAX_HEAD_DIM];
+shared float scoreTile[TILE_KV];
+shared float outAccum[MAX_HEAD_DIM];
+shared float reduceScratch[WG_SIZE];
+
+// Single-value broadcast slot used to publish per-tile max / sum_exp from
+// thread 0 to every thread (results of shared-mem tree reduces).
+shared float broadcastSlot;
+
+// Tree-reduce `val` across the workgroup (max). Writes final value to every
+// thread's return; uses reduceScratch + a barrier inside.
+float workgroupMax(float val) {
+    uint tid = gl_LocalInvocationID.x;
+    reduceScratch[tid] = val;
+    barrier();
+    for (uint stride = WG_SIZE / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            reduceScratch[tid] = max(reduceScratch[tid], reduceScratch[tid + stride]);
+        }
+        barrier();
+    }
+    float m = reduceScratch[0];
+    barrier();
+    return m;
+}
+
+float workgroupSum(float val) {
+    uint tid = gl_LocalInvocationID.x;
+    reduceScratch[tid] = val;
+    barrier();
+    for (uint stride = WG_SIZE / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            reduceScratch[tid] += reduceScratch[tid + stride];
+        }
+        barrier();
+    }
+    float s = reduceScratch[0];
+    barrier();
+    return s;
+}
+
+void main() {
+    uint blockId = gl_WorkGroupID.x;
+    uint total = pc.seqQ * pc.numHeads;
+    if (blockId >= total) return;
+
+    uint tq = blockId / pc.numHeads;
+    uint hq = blockId - tq * pc.numHeads;
+    uint groupSize = pc.numHeads / pc.numKvHeads;
+    uint hkv = hq / groupSize;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint threads = WG_SIZE;
+
+    uint qStride  = pc.numHeads   * pc.headDim;
+    uint kvStride = pc.numKvHeads * pc.headDim;
+
+    uint posQ = pc.positionOffset + tq;
+    float scale = inversesqrt(float(pc.headDim));
+
+    uint qBase = tq * qStride + hq * pc.headDim;
+
+    // 1. Load Q and zero out the accumulator.
+    for (uint d = tid; d < pc.headDim; d += threads) {
+        qShared[d]  = q[qBase + d];
+        outAccum[d] = 0.0;
+    }
+    barrier();
+
+    float runningMax = NEG_INF;
+    float runningSum = 0.0;
+
+    for (uint tStart = 0u; tStart < pc.seqKv; tStart += uint(TILE_KV)) {
+        uint tEnd = tStart + uint(TILE_KV);
+        if (tEnd > pc.seqKv) tEnd = pc.seqKv;
+        uint tileLen = tEnd - tStart;
+
+        // 2. Compute raw scores for this tile (dot(Q, K_t) * scale) with
+        //    causal + sliding-window masking. Out-of-tile lanes will never
+        //    be read.
+        for (uint t = tid; t < tileLen; t += threads) {
+            uint tkv = tStart + t;
+            bool masked =
+                tkv > posQ ||
+                (pc.slidingWindow > 0u && posQ >= tkv && (posQ - tkv) > pc.slidingWindow);
+            if (masked) {
+                scoreTile[t] = NEG_INF;
+                continue;
+            }
+            uint kBase = tkv * kvStride + hkv * pc.headDim;
+            float s = 0.0;
+            for (uint d = 0u; d < pc.headDim; d++) {
+                s += qShared[d] * k[kBase + d];
+            }
+            scoreTile[t] = s * scale;
+        }
+        barrier();
+
+        // 3. Tile max reduction. Pad inactive lanes with NEG_INF so they don't
+        //    contribute. Threads whose t-index is past tileLen also contribute
+        //    NEG_INF.
+        float localMax = NEG_INF;
+        for (uint t = tid; t < tileLen; t += threads) {
+            localMax = max(localMax, scoreTile[t]);
+        }
+        float tileMax = workgroupMax(localMax);
+
+        // 4. Online-softmax rescale of running state.
+        float newMax = max(runningMax, tileMax);
+        float correction;
+        if (runningMax > NEG_INF * 0.5) {
+            correction = exp(runningMax - newMax);
+        } else {
+            correction = 0.0;
+        }
+        runningSum *= correction;
+        for (uint d = tid; d < pc.headDim; d += threads) {
+            outAccum[d] *= correction;
+        }
+        runningMax = newMax;
+        barrier();
+
+        // 5. Convert raw scores to exp(score - newMax); accumulate tile sum.
+        float localSum = 0.0;
+        for (uint t = tid; t < tileLen; t += threads) {
+            float s = scoreTile[t];
+            float w = (s > NEG_INF * 0.5) ? exp(s - runningMax) : 0.0;
+            scoreTile[t] = w;
+            localSum += w;
+        }
+        float tileSum = workgroupSum(localSum);
+        runningSum += tileSum;
+        barrier();
+
+        // 6. Accumulate weighted V. Each thread owns a subset of head_dim
+        //    output lanes and loops across the tile's KV rows. Reading
+        //    scoreTile[t] in the inner loop hits shared memory.
+        for (uint d = tid; d < pc.headDim; d += threads) {
+            float vAcc = 0.0;
+            for (uint t = 0u; t < tileLen; t++) {
+                float w = scoreTile[t];
+                if (w > 0.0) {
+                    uint vBase = (tStart + t) * kvStride + hkv * pc.headDim;
+                    vAcc += w * v[vBase + d];
+                }
+            }
+            outAccum[d] += vAcc;
+        }
+        barrier();
+    }
+
+    // 7. Normalize and write out.
+    float invSum = (runningSum > 1e-10) ? (1.0 / runningSum) : 0.0;
+    uint outBase = tq * qStride + hq * pc.headDim;
+    for (uint d = tid; d < pc.headDim; d += threads) {
+        outp[outBase + d] = outAccum[d] * invSum;
+    }
+}

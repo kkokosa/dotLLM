@@ -1,0 +1,111 @@
+#version 450
+// RoPE (Rotary Position Embedding) with FP32 Q / K data.
+//
+// Mirrors native/kernels/rope_f32.cu: one thread per rotation pair, no
+// pre-computed cos/sin tables — each thread reconstructs its frequency from
+// `theta` on the fly. Q and K are rotated independently in the same dispatch
+// (GQA has fewer K heads than Q heads, so the two per-tensor index ranges are
+// distinct).
+//
+// Layout: Q is [seqLen, numHeads * headDim], K is [seqLen, numKvHeads * headDim],
+// row-major. Only the first `ropeDim` dims of each head are rotated; the
+// remaining `headDim - ropeDim` dims pass through.
+//
+// ropeType:
+//   0 = Norm / interleaved — pair (2i, 2i+1) within a head.
+//   1 = NeoX / rotate-half — pair (i, i + halfRope) within a head.
+// (Matches the CUDA convention: rope_type == 1 → NeoX.)
+//
+// Dispatch:
+//   local_size_x = 256
+//   groupCount.x = ceil(max(totalQpairs, totalKpairs) / 256)
+//     where totalQpairs = seqLen * numHeads    * (ropeDim / 2)
+//           totalKpairs = seqLen * numKvHeads  * (ropeDim / 2)
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430)         buffer BufQ   { float q[]; };       // [seqLen, numHeads   * headDim]
+layout(set = 0, binding = 1, std430)         buffer BufK   { float k[]; };       // [seqLen, numKvHeads * headDim]
+layout(set = 0, binding = 2, std430) readonly buffer BufPos { int positions[]; }; // [seqLen]
+
+layout(push_constant) uniform PushConstants {
+    uint  seqLen;
+    uint  numHeads;
+    uint  numKvHeads;
+    uint  headDim;
+    uint  ropeDim;     // number of dims to rotate (<= headDim, even)
+    uint  ropeType;    // 0 = Norm (interleaved), 1 = NeoX (rotate-half)
+    float theta;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    uint halfRope = pc.ropeDim >> 1u;
+    if (halfRope == 0u) return;
+
+    uint totalQPairs = pc.seqLen * pc.numHeads   * halfRope;
+    uint totalKPairs = pc.seqLen * pc.numKvHeads * halfRope;
+
+    // --- Q pair ---
+    if (idx < totalQPairs) {
+        uint pair      = idx % halfRope;
+        uint rem       = idx / halfRope;
+        uint head      = rem % pc.numHeads;
+        uint t         = rem / pc.numHeads;
+
+        // freq = 1 / theta^(2*pair / ropeDim) = exp(-log(theta) * 2*pair / ropeDim).
+        // Matching CUDA exactly: powf(theta, 2*pair/ropeDim).
+        float expn  = float(2u * pair) / float(pc.ropeDim);
+        float freq  = 1.0 / pow(pc.theta, expn);
+        float angle = float(positions[t]) * freq;
+        float c     = cos(angle);
+        float s     = sin(angle);
+
+        uint baseIdx = t * pc.numHeads * pc.headDim + head * pc.headDim;
+        uint i0, i1;
+        if (pc.ropeType == 1u) {
+            // NeoX: pair (i, i + halfRope).
+            i0 = baseIdx + pair;
+            i1 = baseIdx + pair + halfRope;
+        } else {
+            // Norm / interleaved: pair (2i, 2i+1).
+            i0 = baseIdx + 2u * pair;
+            i1 = baseIdx + 2u * pair + 1u;
+        }
+
+        float v0 = q[i0];
+        float v1 = q[i1];
+        q[i0] = v0 * c - v1 * s;
+        q[i1] = v0 * s + v1 * c;
+    }
+
+    // --- K pair ---
+    if (idx < totalKPairs) {
+        uint pair      = idx % halfRope;
+        uint rem       = idx / halfRope;
+        uint head      = rem % pc.numKvHeads;
+        uint t         = rem / pc.numKvHeads;
+
+        float expn  = float(2u * pair) / float(pc.ropeDim);
+        float freq  = 1.0 / pow(pc.theta, expn);
+        float angle = float(positions[t]) * freq;
+        float c     = cos(angle);
+        float s     = sin(angle);
+
+        uint baseIdx = t * pc.numKvHeads * pc.headDim + head * pc.headDim;
+        uint i0, i1;
+        if (pc.ropeType == 1u) {
+            i0 = baseIdx + pair;
+            i1 = baseIdx + pair + halfRope;
+        } else {
+            i0 = baseIdx + 2u * pair;
+            i1 = baseIdx + 2u * pair + 1u;
+        }
+
+        float v0 = k[i0];
+        float v1 = k[i1];
+        k[i0] = v0 * c - v1 * s;
+        k[i1] = v0 * s + v1 * c;
+    }
+}

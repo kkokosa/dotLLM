@@ -1,0 +1,45 @@
+#version 450
+// F32 matrix multiplication: C[N,M] = B[N,K] @ A[M,K]^T
+//
+// Semantics mirror DotLLM.Cpu.Kernels.MatMul.GemmF32:
+//   A is row-major [M,K] weight matrix   (one row = one output neuron's weights)
+//   B is row-major [N,K] input matrix    (one row per token)
+//   C is row-major [N,M] output matrix   (C[t,m] = dot(A[m,:], B[t,:]))
+//
+// For N=1 this degenerates to GEMV exactly as the CPU path does.
+//
+// Dispatch: 2D grid, one thread per output cell (t, m).
+//   Workgroup  = (16, 16, 1)
+//   groupCount = (ceil(M/16), ceil(N/16), 1)
+//
+// This is the "plain matmul" smoke test — no shared-memory tiling, no
+// vectorization. Correctness first; GEMM tiling comes with the cooperative-
+// matrix kernel later in the Vulkan roadmap.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly  buffer BufA { float a[]; }; // [M*K]
+layout(set = 0, binding = 1, std430) readonly  buffer BufB { float b[]; }; // [N*K]
+layout(set = 0, binding = 2, std430) writeonly buffer BufC { float c[]; }; // [N*M]
+
+layout(push_constant) uniform PushConstants {
+    uint M; // output dim
+    uint K; // input  dim (contraction)
+    uint N; // batch size (number of input rows)
+} pc;
+
+void main() {
+    uint m = gl_GlobalInvocationID.x; // row of A / column of C
+    uint t = gl_GlobalInvocationID.y; // row of B / row of C
+    if (m >= pc.M || t >= pc.N) return;
+
+    uint aRowBase = m * pc.K;
+    uint bRowBase = t * pc.K;
+
+    float acc = 0.0;
+    for (uint j = 0u; j < pc.K; j++) {
+        acc += a[aRowBase + j] * b[bRowBase + j];
+    }
+
+    c[t * pc.M + m] = acc;
+}

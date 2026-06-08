@@ -1,0 +1,203 @@
+#version 450
+// Q8_0 batched matrix multiplication (prefill-path GEMM).
+//
+//   C[N, M] = B[N, K] @ W_q8[M, K]^T        with W_q8 dequantized on the fly.
+//
+// Semantic parity with DotLLM.Cpu.Kernels.MatMul.GemmQ8_0:
+//   W_q8 is row-major [M, K] weights, each row stored as (K/32) Q8_0 blocks of
+//        34 bytes (2 bytes fp16 scale + 32 signed int8).
+//   B    is row-major [N, K] FP32 input (one row per token).
+//   C    is row-major [N, M] FP32 output; C[t, m] = dot(W[m, :], B[t, :]).
+//
+// Weight byte layout (identical to matmul_q8_0.comp, the GEMV kernel):
+//   row stride = (K / 32) * 34 bytes. Blocks are read as uint[] with explicit
+//   byte shifts because GLSL storage buffers cannot hold int8 / float16 scalars
+//   without optional extensions. fp16 scale uses `unpackHalf2x16`.
+//
+// Tiling strategy (first-pass tiled GEMM — no subgroup / cooperative-matrix):
+//   Output tile  = 16 rows of C (TILE_N) × 16 cols of C (TILE_M) = 256 cells.
+//   Workgroup    = (16, 16, 1) = 256 threads, one thread per output cell.
+//   K-chunk      = 32 elements (exactly one Q8_0 block).
+//
+//   Per K-chunk iteration:
+//     1. Cooperatively stage the 16×32 tile of B into shared memory (sharedB).
+//     2. Cooperatively dequantize the 16×32 tile of W into shared memory
+//        (sharedW) — one dequant pass per chunk, reused by all 16 B rows.
+//     3. Each thread accumulates 32 FMAs from its (row, col) slice of
+//        (sharedB, sharedW) into a register.
+//
+//   This amortizes the Q8_0 unpack cost across 16 output-row neighbours, and
+//   reuses each sharedB row across 16 weight-row neighbours. A follow-up
+//   cooperative-matrix / subgroup-reduce variant is the intended next step if
+//   the perf gap to CUDA is still large.
+//
+// Edge handling: the workgroup is always a full 16×16; threads whose (t, m)
+// falls outside the [N, M] bounds participate in the cooperative loads
+// (guarded with M-bound checks for sharedW since out-of-range weight rows must
+// not read out-of-buffer memory) but skip the final store.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly  buffer BufW { uint  weight[]; }; // Q8_0 blob
+layout(set = 0, binding = 1, std430) readonly  buffer BufB { float b[]; };      // [N*K]
+layout(set = 0, binding = 2, std430) writeonly buffer BufC { float c[]; };      // [N*M]
+
+layout(push_constant) uniform PushConstants {
+    uint M;             // output dim (number of weight rows)
+    uint K;             // contraction dim (must be a multiple of 32)
+    uint N;             // batch size (number of input rows)
+    uint blocksPerRow;  // = K / 32
+    uint rowUints;      // per-row uint stride = ceil(blocksPerRow * 34 / 4)
+} pc;
+
+const uint TILE_M = 16u;
+const uint TILE_N = 16u;
+const uint BLOCK = 32u;  // Q8_0 group size
+const uint BLOCK_BYTES = 34u;
+
+// sharedB[t_local][j] — one row of B per local-y, one K column per local-x*2.
+// 16 rows × 32 K values. Row-major flattened.
+shared float sharedB[TILE_N * BLOCK];
+
+// sharedW[m_local][j] — dequantized 16×32 W tile. Row-major flattened.
+shared float sharedW[TILE_M * BLOCK];
+
+// Fetch the i-th byte of the qs[] portion of block `b` at absolute byte offset
+// `absByteOff`. Returns sign-extended int in [-128, 127].
+int readQsByte(uint absByteOff) {
+    uint u = weight[absByteOff >> 2u];
+    uint shift = (absByteOff & 3u) * 8u;
+    int bv = int((u >> shift) & 0xFFu);
+    return (bv ^ 0x80) - 0x80;
+}
+
+// Fetch the fp16 scale at `absByteOff` (2 bytes), handling straddled uint words.
+float readHalf(uint absByteOff) {
+    uint alignedIdx = absByteOff >> 2u;
+    uint byteInWord = absByteOff & 3u;
+    uint u = weight[alignedIdx];
+    uint half16;
+    if (byteInWord <= 2u) {
+        half16 = (u >> (byteInWord * 8u)) & 0xFFFFu;
+    } else {
+        uint uNext = weight[alignedIdx + 1u];
+        half16 = ((u >> 24) & 0xFFu) | ((uNext & 0xFFu) << 8);
+    }
+    return unpackHalf2x16(half16).x;
+}
+
+void main() {
+    // Output coordinates for this thread.
+    uint m = gl_WorkGroupID.x * TILE_M + gl_LocalInvocationID.x; // weight row / col of C
+    uint t = gl_WorkGroupID.y * TILE_N + gl_LocalInvocationID.y; // token row of B / row of C
+
+    // Flattened local thread id 0..255 for cooperative loading.
+    uint tid = gl_LocalInvocationID.y * TILE_M + gl_LocalInvocationID.x;
+
+    // Workgroup-level origins.
+    uint mBase = gl_WorkGroupID.x * TILE_M;
+    uint tBase = gl_WorkGroupID.y * TILE_N;
+
+    // Row-stride in bytes for Q8_0 weights. We compute this from blocksPerRow
+    // directly rather than reusing rowUints * 4 — rowUints is rounded up to
+    // the next uint multiple for buffer-bounds safety, so it would overstate
+    // the stride when blocksPerRow * 34 is not itself a multiple of 4
+    // (e.g. K=32 yields rowBytes=34, rowUints=9, rowUints*4=36 ≠ 34).
+    uint rowByteStride = pc.blocksPerRow * BLOCK_BYTES;
+
+    float acc = 0.0;
+
+    for (uint kBlock = 0u; kBlock < pc.blocksPerRow; kBlock++) {
+        uint kBase = kBlock * BLOCK; // column offset into K-axis
+
+        // ---- 1. Stage sharedB[TILE_N, 32]  (16×32 = 512 floats). ----
+        // 256 threads, 2 floats per thread (512 / 256 = 2).
+        // Layout: each thread handles two contiguous elements of the flat
+        // sharedB buffer to keep the B load coalesced on row-major memory.
+        {
+            uint flat0 = tid * 2u;
+            uint flat1 = flat0 + 1u;
+
+            uint row0 = flat0 / BLOCK;            // 0..15, selects which of the 16 tokens
+            uint col0 = flat0 - row0 * BLOCK;     // 0..31, K column within the chunk
+
+            uint row1 = flat1 / BLOCK;
+            uint col1 = flat1 - row1 * BLOCK;
+
+            uint tGlobal0 = tBase + row0;
+            uint tGlobal1 = tBase + row1;
+
+            float v0 = 0.0;
+            float v1 = 0.0;
+            if (tGlobal0 < pc.N) {
+                v0 = b[tGlobal0 * pc.K + kBase + col0];
+            }
+            if (tGlobal1 < pc.N) {
+                v1 = b[tGlobal1 * pc.K + kBase + col1];
+            }
+            sharedB[flat0] = v0;
+            sharedB[flat1] = v1;
+        }
+
+        // ---- 2. Dequantize sharedW[TILE_M, 32] (16×32 = 512 floats). ----
+        // Each of the 16 weight rows has a single 34-byte block for this
+        // K-chunk. We assign 16 threads per weight row (tid / 16 -> mLocal,
+        // tid % 16 -> which pair of qs bytes). Each thread reads 2 qs bytes
+        // and multiplies by the (shared per row) fp16 scale.
+        //
+        // Out-of-range weight rows (mGlobal >= M) write zeros so subsequent
+        // dot products are harmless noise; the thread's final store is
+        // bounds-guarded anyway.
+        {
+            uint mLocal = tid / TILE_M;             // 0..15 — weight row within tile
+            uint lane   = tid - mLocal * TILE_M;    // 0..15 — byte-pair index within block
+            uint mGlobal = mBase + mLocal;
+
+            float d = 0.0;
+            uint blockBase = 0u;
+            bool rowValid = mGlobal < pc.M;
+            if (rowValid) {
+                blockBase = mGlobal * rowByteStride + kBlock * BLOCK_BYTES;
+                d = readHalf(blockBase);
+            }
+
+            // lane in [0, 15]; two qs bytes -> columns 2*lane and 2*lane+1.
+            uint col0 = lane * 2u;
+            uint col1 = col0 + 1u;
+
+            float q0 = 0.0;
+            float q1 = 0.0;
+            if (rowValid) {
+                q0 = d * float(readQsByte(blockBase + 2u + col0));
+                q1 = d * float(readQsByte(blockBase + 2u + col1));
+            }
+
+            uint sBase = mLocal * BLOCK;
+            sharedW[sBase + col0] = q0;
+            sharedW[sBase + col1] = q1;
+        }
+
+        barrier();
+
+        // ---- 3. Compute partial dot product for this K-chunk. ----
+        // Each thread owns output cell (t, m). Reads its B row from sharedB
+        // and its W row from sharedW; 32 FMAs per chunk.
+        // No bounds check here — sharedB/sharedW were zeroed for OOB lanes.
+        {
+            uint bOff = gl_LocalInvocationID.y * BLOCK; // sharedB row for this thread
+            uint wOff = gl_LocalInvocationID.x * BLOCK; // sharedW row for this thread
+            float chunk = 0.0;
+            for (uint j = 0u; j < BLOCK; j++) {
+                chunk += sharedB[bOff + j] * sharedW[wOff + j];
+            }
+            acc += chunk;
+        }
+
+        barrier();
+    }
+
+    // ---- 4. Store output if within [N, M] bounds. ----
+    if (m < pc.M && t < pc.N) {
+        c[t * pc.M + m] = acc;
+    }
+}

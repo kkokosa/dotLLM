@@ -68,6 +68,10 @@ public static class ModelManagementEndpoint
                     state.DraftModel = newState.DraftModel;
                     state.DraftModelPath = newState.DraftModelPath;
                     state.DraftGguf = newState.DraftGguf;
+                    // Preserve the existing LoRA registry across model swap so loaded
+                    // adapters survive (LoadModel mints a fresh registry for fresh starts).
+                    if (newState.LoraRegistry is not null && !ReferenceEquals(newState.LoraRegistry, state.LoraRegistry))
+                        newState.LoraRegistry.Dispose();
 
                     await Task.CompletedTask;
                 }, ct);
