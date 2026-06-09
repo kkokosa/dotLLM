@@ -35,7 +35,7 @@ public static class ToolCallParserFactory
         {
             Architecture.Llama => new LlamaToolCallParser(),
             Architecture.Mistral => new MistralToolCallParser(),
-            Architecture.Qwen => new HermesToolCallParser(),
+            Architecture.Qwen or Architecture.QwenMoe => new HermesToolCallParser(),
             _ => new GenericToolCallParser()
         };
     }

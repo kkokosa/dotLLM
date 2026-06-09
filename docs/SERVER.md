@@ -242,9 +242,30 @@ These are designed for the local Chat UI workflow and must not be internet-expos
 
 ## Concurrency
 
-The server processes one inference request at a time, serialized by a `SemaphoreSlim(1, 1)` gate. Concurrent requests queue and are served FIFO. This is by design — no batch scheduler exists yet.
+The server has two execution paths and picks per-request:
 
-The startup log prints `Single-request mode — requests processed sequentially` as a reminder.
+1. **Continuous-batch scheduler path (default for paged-KV serving)**. When `--paged` is on (the default for `serve`) and no speculative-decoding draft model is loaded, `ServerStartup` constructs a `ContinuousBatchSchedulerService` per loaded model and starts its `RunLoopAsync` on a background task tied to `IHostApplicationLifetime.ApplicationStopping`. `/v1/chat/completions` and `/v1/completions` route non-streaming requests through `EnqueueAsync` — multiple concurrent requests pipeline through a single `IModel.ForwardBatch` dispatch per scheduler iteration. The startup log prints `Continuous-batch scheduler active` when this path is engaged.
+2. **Single-request gate path (fallback)**. Streaming requests, LoRA-adapter requests, logprob-capturing requests, and any backend without a paged KV-cache factory (CUDA, hybrid GPU, quantized KV) keep using the original `SemaphoreSlim(1, 1)` gate via `ServerState.ExecuteAsync`. Requests serialize FIFO. The startup log prints `Single-request mode — requests processed sequentially` when this is the only path.
+
+### Scheduler tuning
+
+`ContinuousBatchSchedulerOptions`:
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `MaxActiveSequences` | 64 | Slot cap. KV-cache pressure is the hard limit; this is a soft upper bound for batch-formation cost. |
+| `MaxPrefillTokensPerStep` | 0 (disabled) | Chunked-prefill cap. When non-zero, no single Step iteration prefills more than this many tokens, even if a long prompt has more to feed. Decode tokens of already-decoding sequences keep running every step regardless — prevents head-of-line blocking. |
+| `ReserveBlocksPerSequence` | 0 (disabled) | Admission KV-pressure gate: skip admission when `pagedPool.FreeBlocks < ReserveBlocksPerSequence`. |
+
+### Engine telemetry providers
+
+Once a `ContinuousBatchSchedulerService` is constructed, it wires the observable gauges that
+`EngineTelemetry` exposes:
+
+- `dotllm.engine.request.queue_depth` → `Inner.QueueDepth + Inner.ActiveCount` (so saturation is visible — pure queue depth would underreport when sequences are already admitted).
+- `dotllm.engine.kvcache.utilization` → `1.0 - FreeBlocks / TotalBlocks` of the underlying paged pool (when present).
+
+Both providers are cleared back to `null` on `Service.Dispose` / model swap so the gauges return to their `-1` sentinel.
 
 ## Request Validation
 

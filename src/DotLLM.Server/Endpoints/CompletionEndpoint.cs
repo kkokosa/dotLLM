@@ -48,6 +48,23 @@ public static class CompletionEndpoint
         var modelId = state.Options.ModelId;
         var generator = state.Generator;
 
+        // Resolve LoRA adapter (if requested) — bad name → 400 with available list
+        DotLLM.Core.Lora.ILoraAdapter? adapter;
+        try
+        {
+            adapter = LoraEndpoints.Resolve(request.LoraAdapter, state);
+        }
+        catch (LoraAdapterNotFoundException ex)
+        {
+            httpContext.Response.StatusCode = 400;
+            await httpContext.Response.WriteAsJsonAsync(
+                new ErrorResponse { Error = ex.Message },
+                ServerJsonContext.Default.ErrorResponse,
+                contentType: null,
+                httpContext.RequestAborted);
+            return;
+        }
+
         // Validate prompt length against model context
         int maxTokens = request.MaxTokens ?? state.SamplingDefaults.MaxTokens;
         var promptError = RequestValidator.ValidatePromptLength(
@@ -72,21 +89,23 @@ public static class CompletionEndpoint
 
         if (request.Stream)
             await HandleStreamingAsync(generator, state, httpContext, request.Prompt, options,
-                requestId, modelId, ct);
+                requestId, modelId, adapter, ct);
         else
             await HandleNonStreamingAsync(generator, state, httpContext, request.Prompt, options,
-                requestId, modelId, ct);
+                requestId, modelId, adapter, ct);
     }
 
     private static async Task HandleNonStreamingAsync(
         TextGenerator generator, ServerState state, HttpContext httpContext,
         string prompt, DotLLM.Core.Configuration.InferenceOptions options,
-        string requestId, string modelId, CancellationToken ct)
+        string requestId, string modelId,
+        DotLLM.Core.Lora.ILoraAdapter? adapter,
+        CancellationToken ct)
     {
         InferenceResponse? result = null;
         await state.ExecuteAsync(async () =>
         {
-            result = generator.Generate(prompt, options);
+            result = generator.Generate(prompt, options, adapter: adapter);
         }, ct);
 
         var logprobsDto = result!.Logprobs is { Length: > 0 }
@@ -119,7 +138,9 @@ public static class CompletionEndpoint
     private static async Task HandleStreamingAsync(
         TextGenerator generator, ServerState state, HttpContext httpContext,
         string prompt, DotLLM.Core.Configuration.InferenceOptions options,
-        string requestId, string modelId, CancellationToken ct)
+        string requestId, string modelId,
+        DotLLM.Core.Lora.ILoraAdapter? adapter,
+        CancellationToken ct)
     {
         httpContext.Response.ContentType = "text/event-stream";
         httpContext.Response.Headers.CacheControl = "no-cache";
@@ -127,7 +148,7 @@ public static class CompletionEndpoint
 
         await state.ExecuteAsync(async () =>
         {
-            await foreach (var token in generator.GenerateStreamingTokensAsync(prompt, options, ct))
+            await foreach (var token in generator.GenerateStreamingTokensAsync(prompt, options, ct, adapter))
             {
                 var tokenLogprobs = token.Logprobs.HasValue
                     ? RequestConverter.ToLogprobsDto(token.Logprobs.Value)

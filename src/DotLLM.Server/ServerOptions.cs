@@ -59,6 +59,13 @@ public sealed record ServerOptions
     public string ModelId { get; init; } = "default";
 
     /// <summary>
+    /// Whether the LoRA admin write endpoints (<c>POST /v1/lora/load</c>,
+    /// <c>DELETE /v1/lora/{name}</c>) are enabled. Read-only <c>GET /v1/lora</c>
+    /// is always available. Defaults to <c>false</c> — opt-in via configuration.
+    /// </summary>
+    public bool AllowLoraAdminApi { get; init; }
+
+    /// <summary>
     /// Parses command-line arguments into <see cref="ServerOptions"/>.
     /// </summary>
     public static ServerOptions Parse(string[] args)

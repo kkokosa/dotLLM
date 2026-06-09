@@ -1,0 +1,63 @@
+#version 450
+// Full FP32 RMS Normalization: FP32 input, FP32 weight, FP32 output.
+//
+//   rms = sqrt(mean(x_i^2) + eps)
+//   y_i = (x_i / rms) * weight_i
+//
+// Mirrors native/kernels/rmsnorm_f32.cu — one workgroup per row, threads
+// stride over the row to accumulate sum-of-squares, then workgroup tree
+// reduction in shared memory. No subgroup intrinsics (broadest driver
+// portability, same rationale as matmul_q8_0).
+//
+// Dispatch:
+//   groupCount = (rowCount, 1, 1)
+//   local_size_x = 256
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly  buffer BufIn     { float input_[]; };   // [rowCount * n]
+layout(set = 0, binding = 1, std430) readonly  buffer BufWeight { float weight[]; };   // [n]
+layout(set = 0, binding = 2, std430) writeonly buffer BufOut    { float output_[]; };  // [rowCount * n]
+
+layout(push_constant) uniform PushConstants {
+    uint  n;    // row length
+    float eps;  // epsilon added under the sqrt
+} pc;
+
+shared float partials[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint threads = gl_WorkGroupSize.x;
+    uint rowBase = row * pc.n;
+
+    // 1. Per-thread partial sum of squares.
+    float sumSq = 0.0;
+    for (uint i = tid; i < pc.n; i += threads) {
+        float v = input_[rowBase + i];
+        sumSq += v * v;
+    }
+
+    // 2. Workgroup tree reduction.
+    partials[tid] = sumSq;
+    barrier();
+    for (uint stride = threads / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) partials[tid] = partials[tid] + partials[tid + stride];
+        barrier();
+    }
+
+    // 3. Broadcast the reciprocal of the RMS. Thread 0 computes, all threads
+    //    read the same shared slot — rsqrt(mean + eps).
+    if (tid == 0) {
+        float meanSq = partials[0] / float(pc.n);
+        partials[0] = inversesqrt(meanSq + pc.eps);
+    }
+    barrier();
+    float rinv = partials[0];
+
+    // 4. Scale and write out.
+    for (uint i = tid; i < pc.n; i += threads) {
+        output_[rowBase + i] = input_[rowBase + i] * rinv * weight[i];
+    }
+}

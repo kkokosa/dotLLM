@@ -1,9 +1,150 @@
+using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Cpu.Kernels;
 using DotLLM.Models.Gguf;
 
 namespace DotLLM.Models.Architectures;
+
+/// <summary>
+/// Per-layer dense-routing MoE weight bundle. Present on a
+/// <see cref="TransformerLayerWeights"/> when the layer replaces its FFN
+/// with a Mixtral-convention or Qwen-MoE-convention MoE block. All pointers
+/// are F32 row-major — bf16 and F16 tensors are upcast at load time so the
+/// MoE kernel can feed <see cref="DotLLM.Cpu.Kernels.MoeSwiGluMlp"/>
+/// directly without per-call dequant.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Qwen-MoE and DeepSeek-V2/V3 add optional shared-expert pointers — each
+/// carried as parallel arrays (<see cref="SharedGateProj"/>, <see cref="SharedUpProj"/>,
+/// <see cref="SharedDownProj"/>) of length <see cref="NumSharedExperts"/>.
+/// Qwen1.5-MoE ships a single shared expert optionally gated by a
+/// <see cref="SharedExpertGate"/> sigmoid; DeepSeek-V2/V3 ships
+/// <c>n_shared_experts</c> shared experts (often 1 or 2) and does not gate.
+/// When <see cref="HasSharedExpert"/> is true, the forward pass runs each
+/// shared expert as a dense SwiGLU over the token, sums their outputs, and
+/// adds the (optionally gated) sum to the routed top-k sum. The
+/// <see cref="NormTopKProb"/> flag controls whether the selected top-k
+/// probabilities are renormalised to sum to 1.0 (Mixtral + Qwen3-MoE) or
+/// left as raw softmax values (Qwen1.5-MoE-A2.7B).
+/// </para>
+/// </remarks>
+internal sealed class MoeLayerWeights
+{
+    /// <summary>Router gate.weight as F32 [numExperts, hiddenSize] row-major.</summary>
+    public readonly float[] Gate;
+
+    /// <summary>Per-expert <c>w1</c> (gate_proj) F32 pointers [intermediateSize, hiddenSize] row-major.</summary>
+    public readonly nint[] W1;
+
+    /// <summary>Per-expert <c>w2</c> (down_proj) F32 pointers [hiddenSize, intermediateSize] row-major.</summary>
+    public readonly nint[] W2;
+
+    /// <summary>Per-expert <c>w3</c> (up_proj) F32 pointers [intermediateSize, hiddenSize] row-major.</summary>
+    public readonly nint[] W3;
+
+    public readonly int NumExperts;
+    public readonly int NumExpertsPerTok;
+    public readonly int HiddenSize;
+    public readonly int IntermediateSize;
+
+    /// <summary>
+    /// When <c>true</c>, the kernel renormalises the selected top-k
+    /// probabilities to sum to 1.0 (Mixtral + Qwen3-MoE). When <c>false</c>,
+    /// the raw softmax probabilities are used as gating weights (Qwen1.5-MoE).
+    /// </summary>
+    public readonly bool NormTopKProb;
+
+    /// <summary>
+    /// Per-shared-expert <c>gate_proj</c> pointers — F32
+    /// [sharedIntermediateSize, hiddenSize] row-major, one per shared expert.
+    /// Length equals <see cref="NumSharedExperts"/>; empty when no shared
+    /// experts are present.
+    /// </summary>
+    public readonly nint[] SharedGateProj;
+    /// <summary>
+    /// Per-shared-expert <c>up_proj</c> pointers — F32
+    /// [sharedIntermediateSize, hiddenSize] row-major, one per shared expert.
+    /// </summary>
+    public readonly nint[] SharedUpProj;
+    /// <summary>
+    /// Per-shared-expert <c>down_proj</c> pointers — F32
+    /// [hiddenSize, sharedIntermediateSize] row-major, one per shared expert.
+    /// </summary>
+    public readonly nint[] SharedDownProj;
+    /// <summary>
+    /// Per-shared-expert intermediate width (0 when no shared expert).
+    /// Applies uniformly across all shared experts (they share width).
+    /// </summary>
+    public readonly int SharedIntermediateSize;
+    /// <summary>
+    /// Number of parallel shared experts whose outputs are summed. 1 for
+    /// Qwen1.5-MoE, &gt;=1 for DeepSeek-V2/V3 (<c>n_shared_experts</c>).
+    /// Zero only when there is no shared-expert branch.
+    /// </summary>
+    public readonly int NumSharedExperts;
+    /// <summary>
+    /// Optional shared-expert sigmoid gate weight — F32 [hiddenSize]. When
+    /// present, per-token <c>sigmoid(hidden . SharedExpertGate)</c> scales
+    /// the summed shared-expert output before it's added to the routed sum
+    /// (Qwen1.5-MoE convention; ALWAYS paired with a single shared expert).
+    /// Null = no gate, summed shared-expert output added unscaled
+    /// (DeepSeek-V2/V3 convention).
+    /// </summary>
+    public readonly float[]? SharedExpertGate;
+
+    /// <summary>True iff a shared-expert branch is present on this layer.</summary>
+    public bool HasSharedExpert => SharedIntermediateSize > 0 && NumSharedExperts > 0;
+
+    /// <summary>Mixtral-convention ctor (no shared expert, always renormalise top-k).</summary>
+    public MoeLayerWeights(
+        float[] gate,
+        nint[] w1, nint[] w2, nint[] w3,
+        int numExperts, int numExpertsPerTok, int hiddenSize, int intermediateSize)
+        : this(gate, w1, w2, w3, numExperts, numExpertsPerTok, hiddenSize, intermediateSize,
+               normTopKProb: true,
+               sharedGateProj: Array.Empty<nint>(),
+               sharedUpProj: Array.Empty<nint>(),
+               sharedDownProj: Array.Empty<nint>(),
+               sharedIntermediateSize: 0,
+               sharedExpertGate: null)
+    {
+    }
+
+    /// <summary>
+    /// Full ctor covering Qwen-MoE and DeepSeek extensions: per-shared-expert
+    /// pointer arrays, <c>norm_topk_prob</c> flag, optional sigmoid gate.
+    /// Length of the three shared arrays must agree; a zero-length array set
+    /// disables the shared-expert branch.
+    /// </summary>
+    public MoeLayerWeights(
+        float[] gate,
+        nint[] w1, nint[] w2, nint[] w3,
+        int numExperts, int numExpertsPerTok, int hiddenSize, int intermediateSize,
+        bool normTopKProb,
+        nint[] sharedGateProj, nint[] sharedUpProj, nint[] sharedDownProj,
+        int sharedIntermediateSize, float[]? sharedExpertGate)
+    {
+        if (sharedGateProj.Length != sharedUpProj.Length || sharedGateProj.Length != sharedDownProj.Length)
+            throw new ArgumentException(
+                "Shared-expert pointer arrays must all have the same length (number of shared experts).");
+
+        Gate = gate;
+        W1 = w1; W2 = w2; W3 = w3;
+        NumExperts = numExperts;
+        NumExpertsPerTok = numExpertsPerTok;
+        HiddenSize = hiddenSize;
+        IntermediateSize = intermediateSize;
+        NormTopKProb = normTopKProb;
+        SharedGateProj = sharedGateProj;
+        SharedUpProj = sharedUpProj;
+        SharedDownProj = sharedDownProj;
+        SharedIntermediateSize = sharedIntermediateSize;
+        NumSharedExperts = sharedGateProj.Length;
+        SharedExpertGate = sharedExpertGate;
+    }
+}
 
 /// <summary>
 /// Holds per-layer weight references for a single transformer layer.
@@ -80,6 +221,27 @@ internal readonly struct TransformerLayerWeights
     /// <summary>Optional down projection bias [DownOutputDim]. Null when absent.</summary>
     public readonly float[]? DownBias;
 
+    // ──────────────────────────── MLA attention ────────────────────────────
+    // DeepSeek-V2/V3 replaces the monolithic Q/K/V/O projections with a
+    // low-rank-factorised set. When <see cref="Mla"/> is non-null, the
+    // forward pass routes through MlaAttention and ignores the legacy
+    // Q/K/V slots above (O is still used as the output projection).
+
+    /// <summary>
+    /// Non-null on DeepSeek-V2/V3 MLA layers. Carries all MLA-specific
+    /// projection pointers + hyperparameters (qk nope/rope dims, v_head_dim,
+    /// q/kv LoRA ranks). When present, <see cref="QWeight"/>/<see cref="KWeight"/>/
+    /// <see cref="VWeight"/> are zeroed and the forward pass takes the MLA branch.
+    /// </summary>
+    public readonly MlaLayerWeights? Mla;
+
+    /// <summary>
+    /// MoE FFN bundle for Mixtral-convention layers. When non-null the dense
+    /// <see cref="GateWeight"/>/<see cref="UpWeight"/>/<see cref="DownWeight"/>
+    /// slots are ignored by the forward pass and MoE routing runs instead.
+    /// </summary>
+    public readonly MoeLayerWeights? Moe;
+
     public TransformerLayerWeights(
         float[] attnNormWeight,
         nint qWeight, QuantizationType qQuantType, int qOutputDim, int qInputDim,
@@ -92,7 +254,9 @@ internal readonly struct TransformerLayerWeights
         nint downWeight, QuantizationType downQuantType, int downOutputDim, int downInputDim,
         float[]? qBias = null, float[]? kBias = null, float[]? vBias = null, float[]? oBias = null,
         float[]? gateBias = null, float[]? upBias = null, float[]? downBias = null,
-        float[]? qNormWeight = null, float[]? kNormWeight = null)
+        float[]? qNormWeight = null, float[]? kNormWeight = null,
+        MlaLayerWeights? mla = null,
+        MoeLayerWeights? moe = null)
     {
         AttnNormWeight = attnNormWeight;
         QNormWeight = qNormWeight;
@@ -105,6 +269,77 @@ internal readonly struct TransformerLayerWeights
         GateWeight = gateWeight; GateQuantType = gateQuantType; GateOutputDim = gateOutputDim; GateInputDim = gateInputDim; GateBias = gateBias;
         UpWeight = upWeight; UpQuantType = upQuantType; UpOutputDim = upOutputDim; UpInputDim = upInputDim; UpBias = upBias;
         DownWeight = downWeight; DownQuantType = downQuantType; DownOutputDim = downOutputDim; DownInputDim = downInputDim; DownBias = downBias;
+        Mla = mla;
+        Moe = moe;
+    }
+}
+
+/// <summary>
+/// Per-layer MLA (Multi-head Latent Attention) weight bundle for DeepSeek-V2/V3.
+/// All projection pointers are F32 row-major — F16 / BF16 tensors are upcast at
+/// load time (via <c>ResolveLinearAsF32</c>) so the kernel can consume a uniform
+/// F32 layout matching <see cref="DotLLM.Cpu.Kernels.MlaAttention.Execute"/>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Exactly one of the Q paths is populated:
+/// <list type="bullet">
+///   <item>LoRA-factored Q (<see cref="QLoraRank"/> &gt; 0): <see cref="QAProj"/>,
+///     <see cref="QALayernormWeight"/>, <see cref="QBProj"/> are all non-zero;
+///     <see cref="QProj"/> is zero.</item>
+///   <item>Monolithic Q (<see cref="QLoraRank"/> == 0): <see cref="QProj"/> is
+///     non-zero; <see cref="QAProj"/>, <see cref="QBProj"/> are zero and
+///     <see cref="QALayernormWeight"/> is null.</item>
+/// </list>
+/// The KV path is always LoRA-factored (<see cref="KvAProjWithMqa"/>,
+/// <see cref="KvALayernormWeight"/>, <see cref="KvBProj"/>).
+/// </para>
+/// </remarks>
+internal sealed class MlaLayerWeights
+{
+    /// <summary>Q down-projection [qLoraRank, hidden]. Zero when <see cref="QLoraRank"/>==0.</summary>
+    public readonly nint QAProj;
+    /// <summary>Q LoRA RMSNorm weight [qLoraRank]. Null when <see cref="QLoraRank"/>==0.</summary>
+    public readonly float[]? QALayernormWeight;
+    /// <summary>Q up-projection [numHeads * qkHeadDim, qLoraRank]. Zero when <see cref="QLoraRank"/>==0.</summary>
+    public readonly nint QBProj;
+    /// <summary>Monolithic Q projection [numHeads * qkHeadDim, hidden]. Zero when <see cref="QLoraRank"/>&gt;0.</summary>
+    public readonly nint QProj;
+
+    /// <summary>KV down-projection with shared-rope-K [kvLoraRank + qkRopeHeadDim, hidden].</summary>
+    public readonly nint KvAProjWithMqa;
+    /// <summary>KV LoRA RMSNorm weight [kvLoraRank].</summary>
+    public readonly float[] KvALayernormWeight;
+    /// <summary>KV up-projection [numHeads * (qkNopeHeadDim + vHeadDim), kvLoraRank].</summary>
+    public readonly nint KvBProj;
+
+    // Hyperparameters (mirrors MlaConfig, carried on the layer for forward-path convenience).
+    public readonly int NumHeads;
+    public readonly int QkNopeHeadDim;
+    public readonly int QkRopeHeadDim;
+    public readonly int VHeadDim;
+    public readonly int QLoraRank;
+    public readonly int KvLoraRank;
+
+    public MlaLayerWeights(
+        nint qAProj, float[]? qALayernormWeight, nint qBProj, nint qProj,
+        nint kvAProjWithMqa, float[] kvALayernormWeight, nint kvBProj,
+        int numHeads, int qkNopeHeadDim, int qkRopeHeadDim, int vHeadDim,
+        int qLoraRank, int kvLoraRank)
+    {
+        QAProj = qAProj;
+        QALayernormWeight = qALayernormWeight;
+        QBProj = qBProj;
+        QProj = qProj;
+        KvAProjWithMqa = kvAProjWithMqa;
+        KvALayernormWeight = kvALayernormWeight;
+        KvBProj = kvBProj;
+        NumHeads = numHeads;
+        QkNopeHeadDim = qkNopeHeadDim;
+        QkRopeHeadDim = qkRopeHeadDim;
+        VHeadDim = vHeadDim;
+        QLoraRank = qLoraRank;
+        KvLoraRank = kvLoraRank;
     }
 }
 
@@ -155,11 +390,19 @@ internal sealed class TransformerWeights : IDisposable
     /// <summary>R4-interleaved LM head weights. Null until <see cref="RepackWeights"/> is called or if type is not repackable.</summary>
     public WeightRepacking.RepackedWeight? RepackedOutput { get; private set; }
 
+    /// <summary>
+    /// Loader-owned 64-byte-aligned allocations created at load time (e.g.
+    /// bf16 → F32 upcasts for the safetensors path). Freed by
+    /// <see cref="Dispose"/>. Empty for pure-mmap GGUF loads.
+    /// </summary>
+    private readonly List<nint>? _ownedAllocations;
+
     private TransformerWeights(
         nint tokenEmbedWeight, QuantizationType tokenEmbedQuantType, int vocabSize, int hiddenSize,
         TransformerLayerWeights[] layers,
         float[] outputNormWeight,
-        nint outputWeight, QuantizationType outputQuantType, int outputOutputDim, int outputInputDim)
+        nint outputWeight, QuantizationType outputQuantType, int outputOutputDim, int outputInputDim,
+        List<nint>? ownedAllocations = null)
     {
         TokenEmbedWeight = tokenEmbedWeight;
         TokenEmbedQuantType = tokenEmbedQuantType;
@@ -171,6 +414,27 @@ internal sealed class TransformerWeights : IDisposable
         OutputQuantType = outputQuantType;
         OutputOutputDim = outputOutputDim;
         OutputInputDim = outputInputDim;
+        _ownedAllocations = ownedAllocations;
+    }
+
+    /// <summary>
+    /// Factory used by the safetensors loader. Wraps the private constructor
+    /// and accepts the list of owned allocations (bf16→F32 upcast buffers)
+    /// that must be freed when the weights are disposed.
+    /// </summary>
+    internal static TransformerWeights CreateFromSafetensors(
+        nint tokenEmbedWeight, QuantizationType tokenEmbedQt, int vocabSize, int hiddenSize,
+        TransformerLayerWeights[] layers,
+        float[] outputNormWeight,
+        nint outputWeight, QuantizationType outputQt, int outputM, int outputK,
+        List<nint> ownedAllocations)
+    {
+        return new TransformerWeights(
+            tokenEmbedWeight, tokenEmbedQt, vocabSize, hiddenSize,
+            layers,
+            outputNormWeight,
+            outputWeight, outputQt, outputM, outputK,
+            ownedAllocations);
     }
 
     /// <summary>
@@ -237,15 +501,24 @@ internal sealed class TransformerWeights : IDisposable
         for (int i = 0; i < Layers.Length; i++)
         {
             ref readonly var lw = ref Layers[i];
+            // MLA layers don't populate the legacy Q/K/V slots — the MLA forward
+            // takes its weights from lw.Mla and calls the scalar MlaAttention
+            // kernel which does not consume R4 repacks.
+            bool isMla = lw.Mla is not null;
+            // MoE layers don't populate the dense gate/up/down slots —
+            // repack only the attention projections. The MoE FFN path runs
+            // without R4 interleaving (the per-expert GEMMs are tiny and
+            // the win would be microscopic).
+            bool isMoe = lw.Moe is not null;
             repacked[i] = new RepackedLayerWeights
             {
-                Q = TryRepack(lw.QWeight, lw.QQuantType, lw.QOutputDim, lw.QInputDim),
-                K = TryRepack(lw.KWeight, lw.KQuantType, lw.KOutputDim, lw.KInputDim),
-                V = TryRepack(lw.VWeight, lw.VQuantType, lw.VOutputDim, lw.VInputDim),
-                O = TryRepack(lw.OWeight, lw.OQuantType, lw.OOutputDim, lw.OInputDim),
-                Gate = TryRepack(lw.GateWeight, lw.GateQuantType, lw.GateOutputDim, lw.GateInputDim),
-                Up = TryRepack(lw.UpWeight, lw.UpQuantType, lw.UpOutputDim, lw.UpInputDim),
-                Down = TryRepack(lw.DownWeight, lw.DownQuantType, lw.DownOutputDim, lw.DownInputDim),
+                Q = isMla ? default : TryRepack(lw.QWeight, lw.QQuantType, lw.QOutputDim, lw.QInputDim),
+                K = isMla ? default : TryRepack(lw.KWeight, lw.KQuantType, lw.KOutputDim, lw.KInputDim),
+                V = isMla ? default : TryRepack(lw.VWeight, lw.VQuantType, lw.VOutputDim, lw.VInputDim),
+                O = isMla ? default : TryRepack(lw.OWeight, lw.OQuantType, lw.OOutputDim, lw.OInputDim),
+                Gate = isMoe ? default : TryRepack(lw.GateWeight, lw.GateQuantType, lw.GateOutputDim, lw.GateInputDim),
+                Up = isMoe ? default : TryRepack(lw.UpWeight, lw.UpQuantType, lw.UpOutputDim, lw.UpInputDim),
+                Down = isMoe ? default : TryRepack(lw.DownWeight, lw.DownQuantType, lw.DownOutputDim, lw.DownInputDim),
             };
         }
         RepackedLayers = repacked;
@@ -261,8 +534,8 @@ internal sealed class TransformerWeights : IDisposable
         return WeightRepacking.RepackR4(ptr, qt, m, k);
     }
 
-    /// <summary>Frees all R4-interleaved weight buffers.</summary>
-    public void Dispose()
+    /// <summary>Frees all R4-interleaved weight buffers and any owned aligned allocations.</summary>
+    public unsafe void Dispose()
     {
         if (RepackedLayers is not null)
         {
@@ -272,6 +545,16 @@ internal sealed class TransformerWeights : IDisposable
         }
         RepackedOutput?.Dispose();
         RepackedOutput = null;
+
+        if (_ownedAllocations is not null)
+        {
+            foreach (var ptr in _ownedAllocations)
+            {
+                if (ptr != nint.Zero)
+                    NativeMemory.AlignedFree((void*)ptr);
+            }
+            _ownedAllocations.Clear();
+        }
     }
 
     private static TransformerLayerWeights LoadLayer(

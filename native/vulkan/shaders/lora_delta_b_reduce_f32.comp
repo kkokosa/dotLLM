@@ -1,0 +1,65 @@
+#version 450
+// LoRA delta — B-stage reduction.
+//
+// tmp[t, r] = dot(B[r, :], x[t, :])
+//
+// Each workgroup computes one tmp[t, r] cell via a WG-wide tree reduction
+// over inputDim. Companion shader lora_delta_gemv_fused_f32 then does
+//   y[t, m] += sum_r A[m, r] * tmp[t, r]
+// in place, eliminating the AddKernel + vkCmdCopyBuffer tail of the
+// original 4-dispatch chain.
+//
+// B is pre-scaled by alpha/rank at upload time (see VulkanLoraAdapter.Upload),
+// so tmp already carries the scale.
+//
+// Layout:
+//   x:    row-major [seqLen,   inputDim]  F32 input rows
+//   B:    row-major [rank,     inputDim]  F32 LoRA down-proj (alpha/rank folded in)
+//   tmp:  row-major [seqLen,   rank]      F32 workspace (output)
+//
+// Dispatch:
+//   workgroup = (WG, 1, 1)
+//   groupCount = (rank, seqLen, 1)
+
+#define WG 64
+
+layout(local_size_x = WG, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly  buffer BufX   { float x[]; };
+layout(set = 0, binding = 1, std430) readonly  buffer BufB   { float bWeight[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer BufTmp { float tmp[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint inputDim;
+    uint rank;
+    uint seqLen;
+} pc;
+
+shared float partials[WG];
+
+void main() {
+    uint t = gl_WorkGroupID.y;
+    uint r = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (t >= pc.seqLen || r >= pc.rank) return;
+
+    uint xBase = t * pc.inputDim;
+    uint bBase = r * pc.inputDim;
+
+    float acc = 0.0;
+    for (uint k = tid; k < pc.inputDim; k += WG) {
+        acc += bWeight[bBase + k] * x[xBase + k];
+    }
+    partials[tid] = acc;
+    barrier();
+    memoryBarrierShared();
+
+    // Tree reduction within the workgroup. WG must be a power of 2.
+    for (uint step = WG / 2u; step > 0u; step >>= 1) {
+        if (tid < step) partials[tid] += partials[tid + step];
+        barrier();
+        memoryBarrierShared();
+    }
+
+    if (tid == 0u) tmp[t * pc.rank + r] = partials[0];
+}

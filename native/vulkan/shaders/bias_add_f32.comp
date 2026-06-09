@@ -1,0 +1,33 @@
+#version 450
+// Per-feature bias add: output[t, i] += bias[i] for every (t, i).
+//
+// Mirrors the host-side fallback in VulkanTransformerModel.AddBiasRows that
+// this kernel replaces — Phi-3 / Qwen3 / DeepSeek-V2 layers carry small
+// per-feature bias vectors after Q/K/V/O/Gate/Up/Down projections. Doing
+// this on a compute kernel keeps the whole forward in one submit (the
+// host-mapped fallback forced a COMPUTE→HOST barrier + SubmitAndWait +
+// HOST→COMPUTE per bias-bearing projection per layer).
+//
+// Dispatch:
+//   local_size_x = 256
+//   groupCount.x = ceil(seqLen * outputDim / 256)
+// Thread t handles flat index t; bias index = t % outputDim.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430)          buffer BufOut  { float outp[]; };  // [seqLen, outputDim]
+layout(set = 0, binding = 1, std430) readonly buffer BufBias { float bias[]; };  // [outputDim]
+
+layout(push_constant) uniform PushConstants {
+    uint seqLen;
+    uint outputDim;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = pc.seqLen * pc.outputDim;
+    if (idx >= total) return;
+
+    uint feature = idx - (idx / pc.outputDim) * pc.outputDim;  // idx % outputDim
+    outp[idx] += bias[feature];
+}
