@@ -1,5 +1,6 @@
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
+using DotLLM.Core.Lora;
 using DotLLM.Core.Models;
 using DotLLM.Engine;
 using DotLLM.Engine.KvCache;
@@ -58,7 +59,17 @@ public static class ServerStartup
     {
         Options = options,
         IsReady = false,
+        LoraRegistry = CreateLoraRegistry(),
     };
+
+    /// <summary>
+    /// Builds the process-wide LoRA adapter registry. The factory delegate
+    /// uses <see cref="PeftAdapterLoader.LoadFromDirectory"/> so adapters can
+    /// be loaded from disk via <c>POST /v1/lora/load</c>.
+    /// </summary>
+    public static ILoraAdapterRegistry CreateLoraRegistry()
+        => new LoraAdapterRegistry(
+            (name, path) => PeftAdapterLoader.LoadFromDirectory(name, path, baseConfig: null));
 
     /// <summary>
     /// Loads a model from the given GGUF path and returns a fully populated <see cref="ServerState"/>.
@@ -210,6 +221,7 @@ public static class ServerStartup
             DraftModel = draftModel,
             DraftModelPath = draftModelPath,
             DraftGguf = draftGguf,
+            LoraRegistry = CreateLoraRegistry(),
         };
     }
 

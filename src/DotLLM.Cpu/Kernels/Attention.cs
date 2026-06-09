@@ -38,13 +38,41 @@ public static class Attention
     /// <param name="headDim">Dimension per attention head.</param>
     /// <param name="positionOffset">Position offset for causal mask. For prefill: 0. For decode: number of cached tokens.</param>
     /// <param name="slidingWindowSize">Optional sliding window size. When non-null, limits attention to the most recent positions.</param>
+    /// <param name="softCap">Optional Gemma-2/3 style soft-cap on raw scores. When &gt; 0, raw scores
+    /// pass through <c>softCap * tanh(s / softCap)</c> before softmax. Default 0 = disabled. Mirrors the
+    /// Vulkan <c>attention_flash_f32.comp</c> convention.</param>
     [SkipLocalsInit]
     public static void Execute(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
                                 Span<float> output,
                                 int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
-                                int positionOffset, int? slidingWindowSize = null)
+                                int positionOffset, int? slidingWindowSize = null, float softCap = 0f)
         => Execute(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
-                   positionOffset, 1.0f / MathF.Sqrt(headDim), slidingWindowSize);
+                   positionOffset, 1.0f / MathF.Sqrt(headDim), default, slidingWindowSize, softCap);
+
+    /// <summary>
+    /// Computes scaled dot-product attention with causal masking, GQA head broadcast, and ALiBi.
+    /// </summary>
+    /// <param name="q">Query tensor. Layout: <c>[seqQ, numHeads * headDim]</c>.</param>
+    /// <param name="k">Key tensor. Layout: <c>[seqKv, numKvHeads * headDim]</c>.</param>
+    /// <param name="v">Value tensor. Layout: <c>[seqKv, numKvHeads * headDim]</c>.</param>
+    /// <param name="output">Output tensor. Layout: <c>[seqQ, numHeads * headDim]</c>.</param>
+    /// <param name="seqQ">Number of query positions.</param>
+    /// <param name="seqKv">Number of key/value positions.</param>
+    /// <param name="numHeads">Number of query attention heads.</param>
+    /// <param name="numKvHeads">Number of key/value heads.</param>
+    /// <param name="headDim">Dimension per attention head.</param>
+    /// <param name="positionOffset">Position offset for causal mask.</param>
+    /// <param name="alibiSlopes">Per-query-head slopes. Length must be at least <paramref name="numHeads"/>.</param>
+    /// <param name="slidingWindowSize">Optional sliding window size.</param>
+    /// <param name="softCap">Optional Gemma-2/3 style soft-cap on raw scores. Default 0 = disabled.</param>
+    [SkipLocalsInit]
+    public static void Execute(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
+                                Span<float> output,
+                                int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
+                                int positionOffset, ReadOnlySpan<float> alibiSlopes,
+                                int? slidingWindowSize = null, float softCap = 0f)
+        => Execute(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                   positionOffset, 1.0f / MathF.Sqrt(headDim), alibiSlopes, slidingWindowSize, softCap);
 
     /// <summary>
     /// Computes scaled dot-product attention with causal masking, GQA head broadcast, and caller-provided scale.
@@ -61,17 +89,31 @@ public static class Attention
     /// <param name="positionOffset">Position offset for causal mask. For prefill: 0. For decode: number of cached tokens.</param>
     /// <param name="scale">Attention scale factor applied to dot-product scores.</param>
     /// <param name="slidingWindowSize">Optional sliding window size. When non-null, limits attention to the most recent positions.</param>
+    /// <param name="softCap">Optional Gemma-2/3 style soft-cap on raw scores. Default 0 = disabled.</param>
     [SkipLocalsInit]
     public static void Execute(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
                                 Span<float> output,
                                 int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
-                                int positionOffset, float scale, int? slidingWindowSize = null)
+                                int positionOffset, float scale, int? slidingWindowSize = null, float softCap = 0f)
+        => Execute(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                   positionOffset, scale, default, slidingWindowSize, softCap);
+
+    /// <summary>
+    /// Computes scaled dot-product attention with causal masking, GQA head broadcast, caller-provided scale, and ALiBi.
+    /// </summary>
+    [SkipLocalsInit]
+    public static void Execute(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
+                                Span<float> output,
+                                int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
+                                int positionOffset, float scale, ReadOnlySpan<float> alibiSlopes,
+                                int? slidingWindowSize = null, float softCap = 0f)
     {
         if (headDim <= 0)
             throw new ArgumentException($"headDim must be positive, got {headDim}", nameof(headDim));
         if (numHeads % numKvHeads != 0)
             throw new ArgumentException(
                 $"numHeads ({numHeads}) must be divisible by numKvHeads ({numKvHeads})", nameof(numKvHeads));
+        ValidateAlibiSlopes(alibiSlopes, numHeads);
 
         int groupSize = numHeads / numKvHeads;
         int qStride = numHeads * headDim;
@@ -83,7 +125,7 @@ public static class Attention
         {
             Span<float> scores = stackalloc float[scoreSize];
             ExecuteCore(q, k, v, output, scores, seqQ, seqKv, numHeads, headDim,
-                        groupSize, scale, qStride, kvStride, positionOffset, slidingWindowSize);
+                        groupSize, scale, qStride, kvStride, positionOffset, alibiSlopes, slidingWindowSize, softCap);
         }
         else
         {
@@ -91,7 +133,8 @@ public static class Attention
             int tileSize = ComputeTileSize(headDim);
             Span<float> tileScores = stackalloc float[MaxTileSize];
             ExecuteTiledCore(q, k, v, output, tileScores, seqQ, seqKv, numHeads, headDim,
-                             groupSize, scale, qStride, kvStride, positionOffset, tileSize, slidingWindowSize ?? 0);
+                             groupSize, scale, qStride, kvStride, positionOffset, tileSize, slidingWindowSize ?? 0,
+                             alibiSlopes, softCap);
         }
     }
 
@@ -99,7 +142,8 @@ public static class Attention
                                      Span<float> output, Span<float> scores,
                                      int seqQ, int seqKv, int numHeads, int headDim,
                                      int groupSize, float scale, int qStride, int kvStride,
-                                     int positionOffset, int? slidingWindowSize = null)
+                                     int positionOffset, ReadOnlySpan<float> alibiSlopes,
+                                     int? slidingWindowSize = null, float softCap = 0f)
     {
         for (int h = 0; h < numHeads; h++)
         {
@@ -109,7 +153,10 @@ public static class Attention
             ScaledDotProductScores(q, k, scores, seqQ, seqKv, headDim, scale,
                                    h, kvH, qStride, kvStride);
 
-            // 2. Apply causal mask
+            // 2. Apply optional ALiBi, then optional soft-cap (Gemma 2/3), then causal mask.
+            ApplyAlibiBias(scores, seqQ, seqKv, positionOffset, GetAlibiSlope(alibiSlopes, h));
+            if (softCap > 0f)
+                ApplySoftCap(scores, softCap);
             ApplyCausalMask(scores, seqQ, seqKv, positionOffset, slidingWindowSize);
 
             // 3. Fast softmax per row (approximate exp — sufficient for attention)
@@ -147,13 +194,14 @@ public static class Attention
                                           Span<float> output, Span<float> tileScores,
                                           int seqQ, int seqKv, int numHeads, int headDim,
                                           int groupSize, float scale, int qStride, int kvStride,
-                                          int positionOffset, int tileSize, int slidingWindowSize = 0)
+                                          int positionOffset, int tileSize, int slidingWindowSize,
+                                          ReadOnlySpan<float> alibiSlopes, float softCap = 0f)
     {
         for (int h = 0; h < numHeads; h++)
         {
             ExecuteTiledCore(q, k, v, output, tileScores, seqQ, seqKv, 1, headDim,
                              1, scale, qStride, kvStride, positionOffset, tileSize, slidingWindowSize,
-                             h, h / groupSize);
+                             h, h / groupSize, GetAlibiSlope(alibiSlopes, h), softCap);
         }
     }
 
@@ -167,9 +215,20 @@ public static class Attention
     public static unsafe void Execute(float* q, float* k, float* v, float* output,
                                       int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
                                       int positionOffset, ComputeThreadPool? pool,
-                                      int? slidingWindowSize = null)
+                                      int? slidingWindowSize = null, float softCap = 0f)
         => Execute(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
-                   positionOffset, 1.0f / MathF.Sqrt(headDim), pool, slidingWindowSize);
+                   positionOffset, 1.0f / MathF.Sqrt(headDim), pool, slidingWindowSize, softCap);
+
+    /// <summary>
+    /// Pointer-based attention with optional head-parallel execution and ALiBi.
+    /// </summary>
+    [SkipLocalsInit]
+    public static unsafe void Execute(float* q, float* k, float* v, float* output,
+                                      int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
+                                      int positionOffset, float* alibiSlopes, ComputeThreadPool? pool,
+                                      int? slidingWindowSize = null, float softCap = 0f)
+        => Execute(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                   positionOffset, 1.0f / MathF.Sqrt(headDim), alibiSlopes, pool, slidingWindowSize, softCap);
 
     /// <summary>
     /// Pointer-based attention with caller-provided scale and optional head-parallel execution.
@@ -178,7 +237,19 @@ public static class Attention
     public static unsafe void Execute(float* q, float* k, float* v, float* output,
                                       int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
                                       int positionOffset, float scale, ComputeThreadPool? pool,
-                                      int? slidingWindowSize = null)
+                                      int? slidingWindowSize = null, float softCap = 0f)
+        => Execute(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                   positionOffset, scale, null, pool, slidingWindowSize, softCap);
+
+    /// <summary>
+    /// Pointer-based attention with caller-provided scale, optional head-parallel execution, and ALiBi.
+    /// </summary>
+    [SkipLocalsInit]
+    public static unsafe void Execute(float* q, float* k, float* v, float* output,
+                                      int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
+                                      int positionOffset, float scale, float* alibiSlopes,
+                                      ComputeThreadPool? pool, int? slidingWindowSize = null,
+                                      float softCap = 0f)
     {
         if (headDim <= 0)
             throw new ArgumentException($"headDim must be positive, got {headDim}", nameof(headDim));
@@ -196,7 +267,9 @@ public static class Attention
                 new ReadOnlySpan<float>(k, kvLen),
                 new ReadOnlySpan<float>(v, kvLen),
                 new Span<float>(output, qLen),
-                seqQ, seqKv, numHeads, numKvHeads, headDim, positionOffset, scale, slidingWindowSize);
+                seqQ, seqKv, numHeads, numKvHeads, headDim, positionOffset, scale,
+                alibiSlopes is null ? default : new ReadOnlySpan<float>(alibiSlopes, numHeads),
+                slidingWindowSize, softCap);
             return;
         }
 
@@ -221,7 +294,9 @@ public static class Attention
                 KvStride = numKvHeads * headDim,
                 ScoreSize = scoreSize,
                 ScratchPtrs = scratchPtrs,
-                SlidingWindowSize = slidingWindowSize ?? 0
+                SlidingWindowSize = slidingWindowSize ?? 0,
+                AlibiSlopes = alibiSlopes,
+                SoftCap = softCap
             };
             pool.Dispatch((nint)(&ctx), &AttentionWorker);
         }
@@ -239,7 +314,9 @@ public static class Attention
                 QStride = numHeads * headDim,
                 KvStride = numKvHeads * headDim,
                 TileSize = tileSize,
-                SlidingWindowSize = slidingWindowSize ?? 0
+                SlidingWindowSize = slidingWindowSize ?? 0,
+                AlibiSlopes = alibiSlopes,
+                SoftCap = softCap
             };
             pool.Dispatch((nint)(&ctx), &TiledAttentionWorker);
         }
@@ -265,6 +342,9 @@ public static class Attention
         public nint* ScratchPtrs;
         /// <summary>Sliding window size. 0 means no sliding window (full context).</summary>
         public int SlidingWindowSize;
+        public float* AlibiSlopes;
+        /// <summary>Gemma 2/3 attention-logit soft-cap. 0 = disabled.</summary>
+        public float SoftCap;
     }
 
     private static unsafe void AttentionWorker(nint ctxPtr, int threadIdx, int threadCount)
@@ -294,6 +374,10 @@ public static class Attention
             ScaledDotProductScores(qSpan, kSpan, scoresSpan, ctx.SeqQ, ctx.SeqKv, ctx.HeadDim, ctx.Scale,
                                    h, kvH, ctx.QStride, ctx.KvStride);
 
+            ApplyAlibiBias(scoresSpan, ctx.SeqQ, ctx.SeqKv, ctx.PositionOffset,
+                           ctx.AlibiSlopes is null ? 0f : ctx.AlibiSlopes[h]);
+            if (ctx.SoftCap > 0f)
+                ApplySoftCap(scoresSpan, ctx.SoftCap);
             ApplyCausalMask(scoresSpan, ctx.SeqQ, ctx.SeqKv, ctx.PositionOffset, slidingWindow);
 
             for (int i = 0; i < ctx.SeqQ; i++)
@@ -326,6 +410,9 @@ public static class Attention
         public int TileSize;
         /// <summary>Sliding window size. 0 means no sliding window (full context).</summary>
         public int SlidingWindowSize;
+        public float* AlibiSlopes;
+        /// <summary>Gemma 2/3 attention-logit soft-cap. 0 = disabled.</summary>
+        public float SoftCap;
     }
 
     [SkipLocalsInit]
@@ -353,7 +440,9 @@ public static class Attention
                              ctx.SeqQ, ctx.SeqKv, 1, ctx.HeadDim,
                              1, ctx.Scale, ctx.QStride, ctx.KvStride,
                              ctx.PositionOffset, ctx.TileSize, ctx.SlidingWindowSize,
-                             h, h / ctx.GroupSize);
+                             h, h / ctx.GroupSize,
+                             ctx.AlibiSlopes is null ? 0f : ctx.AlibiSlopes[h],
+                             ctx.SoftCap);
         }
     }
 
@@ -366,7 +455,8 @@ public static class Attention
                                           int seqQ, int seqKv, int numHeads, int headDim,
                                           int groupSize, float scale, int qStride, int kvStride,
                                           int positionOffset, int tileSize, int slidingWindowSize,
-                                          int headIdx, int kvHeadIdx)
+                                          int headIdx, int kvHeadIdx, float alibiSlope,
+                                          float softCap = 0f)
     {
         int window = slidingWindowSize;
 
@@ -396,8 +486,15 @@ public static class Attention
                 for (int j = 0; j < tileLen; j++)
                 {
                     var kRow = k.Slice((tileBase + j) * kvStride + kvHeadIdx * headDim, headDim);
-                    scores[j] = TensorPrimitives.Dot(qRow, kRow) * scale;
+                    int keyPosition = tileBase + j;
+                    scores[j] = TensorPrimitives.Dot(qRow, kRow) * scale
+                        - alibiSlope * (positionOffset + i - keyPosition);
                 }
+
+                // Optional Gemma 2/3 soft-cap on raw scores, before softmax (mirrors
+                // attention_flash_f32.comp convention).
+                if (softCap > 0f)
+                    ApplySoftCap(scores, softCap);
 
                 float tileMax = TensorPrimitives.Max(scores);
                 float newMax = MathF.Max(maxSoFar, tileMax);
@@ -435,9 +532,21 @@ public static class Attention
     internal static void ExecuteScalar(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
                                         Span<float> output,
                                         int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
-                                        int positionOffset, int? slidingWindowSize = null)
+                                        int positionOffset, int? slidingWindowSize = null, float softCap = 0f)
         => ExecuteScalar(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
-                         positionOffset, 1.0f / MathF.Sqrt(headDim), slidingWindowSize);
+                         positionOffset, 1.0f / MathF.Sqrt(headDim), default, slidingWindowSize, softCap);
+
+    /// <summary>
+    /// Scalar reference implementation with ALiBi.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void ExecuteScalar(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
+                                        Span<float> output,
+                                        int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
+                                        int positionOffset, ReadOnlySpan<float> alibiSlopes,
+                                        int? slidingWindowSize = null, float softCap = 0f)
+        => ExecuteScalar(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                         positionOffset, 1.0f / MathF.Sqrt(headDim), alibiSlopes, slidingWindowSize, softCap);
 
     /// <summary>
     /// Scalar reference implementation with caller-provided scale.
@@ -446,13 +555,27 @@ public static class Attention
     internal static void ExecuteScalar(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
                                         Span<float> output,
                                         int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
-                                        int positionOffset, float scale, int? slidingWindowSize = null)
+                                        int positionOffset, float scale, int? slidingWindowSize = null,
+                                        float softCap = 0f)
+        => ExecuteScalar(q, k, v, output, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                         positionOffset, scale, default, slidingWindowSize, softCap);
+
+    /// <summary>
+    /// Scalar reference implementation with caller-provided scale and ALiBi.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void ExecuteScalar(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v,
+                                        Span<float> output,
+                                        int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
+                                        int positionOffset, float scale, ReadOnlySpan<float> alibiSlopes,
+                                        int? slidingWindowSize = null, float softCap = 0f)
     {
         if (headDim <= 0)
             throw new ArgumentException($"headDim must be positive, got {headDim}", nameof(headDim));
         if (numHeads % numKvHeads != 0)
             throw new ArgumentException(
                 $"numHeads ({numHeads}) must be divisible by numKvHeads ({numKvHeads})", nameof(numKvHeads));
+        ValidateAlibiSlopes(alibiSlopes, numHeads);
 
         int groupSize = numHeads / numKvHeads;
         int qStride = numHeads * headDim;
@@ -472,8 +595,16 @@ public static class Attention
                     float dot = 0;
                     for (int d = 0; d < headDim; d++)
                         dot += q[i * qStride + h * headDim + d] * k[j * kvStride + kvH * headDim + d];
-                    scores[i * seqKv + j] = dot * scale;
+                    scores[i * seqKv + j] = dot * scale
+                        - GetAlibiSlope(alibiSlopes, h) * (positionOffset + i - j);
                 }
+            }
+
+            // Optional Gemma 2/3 attention-logit soft-cap (pre-mask, pre-softmax).
+            if (softCap > 0f)
+            {
+                for (int i = 0; i < seqQ * seqKv; i++)
+                    scores[i] = softCap * MathF.Tanh(scores[i] / softCap);
             }
 
             // Causal mask
@@ -537,6 +668,52 @@ public static class Attention
                 scores[i * seqKv + j] = TensorPrimitives.Dot(qRow, kRow) * scale;
             }
         }
+    }
+
+    /// <summary>
+    /// Adds ALiBi score bias in-place: <c>score[i,j] += -slope * (positionOffset + i - j)</c>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void ApplyAlibiBias(Span<float> scores, int seqQ, int seqKv, int positionOffset, float slope)
+    {
+        if (slope == 0f) return;
+
+        for (int i = 0; i < seqQ; i++)
+        {
+            int queryPosition = positionOffset + i;
+            for (int j = 0; j < seqKv; j++)
+                scores[i * seqKv + j] -= slope * (queryPosition - j);
+        }
+    }
+
+    private static void ValidateAlibiSlopes(ReadOnlySpan<float> alibiSlopes, int numHeads)
+    {
+        if (!alibiSlopes.IsEmpty && alibiSlopes.Length < numHeads)
+            throw new ArgumentException(
+                $"ALiBi slope count ({alibiSlopes.Length}) must be at least numHeads ({numHeads}).",
+                nameof(alibiSlopes));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float GetAlibiSlope(ReadOnlySpan<float> alibiSlopes, int headIdx) =>
+        alibiSlopes.IsEmpty ? 0f : alibiSlopes[headIdx];
+
+    /// <summary>
+    /// Applies the Gemma 2/3 attention-logit soft-cap in place: <c>s = softCap * tanh(s / softCap)</c>.
+    /// Caller must ensure <paramref name="softCap"/> &gt; 0. Mirrors the Vulkan FA shader convention
+    /// (<c>attention_flash_f32.comp</c>) — applied to raw scores (post scale and ALiBi, pre causal mask).
+    /// Uses <see cref="TensorPrimitives"/> for SIMD-accelerated tanh.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void ApplySoftCap(Span<float> scores, float softCap)
+    {
+        // s' = softCap * tanh(s / softCap).
+        // SIMD path: divide-in-place, tanh-in-place, multiply-in-place. The TensorPrimitives
+        // overloads accept aliased source/destination spans.
+        float inv = 1.0f / softCap;
+        TensorPrimitives.Multiply(scores, inv, scores);
+        TensorPrimitives.Tanh(scores, scores);
+        TensorPrimitives.Multiply(scores, softCap, scores);
     }
 
     /// <summary>
@@ -611,8 +788,13 @@ public static class Attention
                                        float* output,
                                        int seqQ, int seqKv, int numHeads, int numKvHeads, int headDim,
                                        int positionOffset, ComputeThreadPool? pool,
-                                       int? slidingWindowSize = null)
+                                       int? slidingWindowSize = null, float softCap = 0f)
     {
+        // softCap currently unused on the quantized KV-cache path — Gemma checkpoints
+        // ship full-precision KV. When/if Gemma 2/3 quantized KV becomes a target the
+        // online-softmax loops above need an ApplySoftCap call sandwiched between
+        // score computation and the running-max update.
+        _ = softCap;
         if (headDim <= 0)
             throw new ArgumentException($"headDim must be positive, got {headDim}", nameof(headDim));
         if (numHeads % numKvHeads != 0)
