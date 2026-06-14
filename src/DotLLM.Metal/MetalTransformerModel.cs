@@ -20,7 +20,7 @@ namespace DotLLM.Metal;
 public sealed unsafe class MetalTransformerModel : IModel
 {
     private readonly MetalWeights _weights;
-    private readonly IMetalForwardState _state;
+    private readonly MetalForwardState _state;
     private readonly MetalContext _context;
     private readonly GgufFile _gguf;
     private readonly int _deviceId;
@@ -29,7 +29,7 @@ public sealed unsafe class MetalTransformerModel : IModel
     private readonly int _ropeType;
     private bool _disposed;
 
-    private MetalTransformerModel(MetalWeights weights, IMetalForwardState state, MetalContext context, GgufFile gguf, int deviceId, float ropeTheta, int ropeDim, int ropeType, ModelConfig config)
+    private MetalTransformerModel(MetalWeights weights, MetalForwardState state, MetalContext context, GgufFile gguf, int deviceId, float ropeTheta, int ropeDim, int ropeType, ModelConfig config)
     {
         _weights = weights;
         _state = state;
@@ -100,7 +100,7 @@ public sealed unsafe class MetalTransformerModel : IModel
         var weights = MetalWeights.LoadFromGguf(gguf, context, strategy);
 
         // Create scratch buffers
-        IMetalForwardState state = new GpuMetalForwardState(
+        MetalForwardState state = new MetalForwardState(
             context,
             config.HiddenSize, config.NumAttentionHeads, config.NumKvHeads,
             config.HeadDim, config.IntermediateSize, config.VocabSize);

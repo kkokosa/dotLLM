@@ -45,7 +45,7 @@ public static class Convert
 
     /// <summary>
     /// Forward-pass overload: takes raw <see cref="nint"/> pointers from
-    /// <see cref="IMetalForwardState"/> directly. No length validation.
+    /// <see cref="MetalForwardState"/> directly. No length validation.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe void F16ToF32(MetalContext ctx, nint src, nint dst, int n)

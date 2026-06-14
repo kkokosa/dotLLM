@@ -173,7 +173,7 @@ public static class EmbeddingLookup
     /// Forward-pass entry point. Dispatches to the right native kernel based on the
     /// embedding table's storage format. Uses raw <see cref="nint"/> pointers because
     /// in the forward pass the inputs/outputs already live in
-    /// <see cref="IMetalForwardState"/> as native allocations, not managed spans.
+    /// <see cref="MetalForwardState"/> as native allocations, not managed spans.
     /// </summary>
     /// <param name="ctx">Metal context.</param>
     /// <param name="embedTable">Pointer to the start of the embedding table.</param>

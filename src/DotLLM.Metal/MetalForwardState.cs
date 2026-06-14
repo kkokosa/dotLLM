@@ -4,18 +4,19 @@ using DotLLM.Metal.Interop;
 namespace DotLLM.Metal;
 
 /// <summary>
-/// GPU-resident forward state — every buffer is an <c>MTLResourceStorageModeShared</c>
-/// MTLBuffer allocated via <see cref="MetalNative.AllocShared"/>. The pointers exposed
-/// here are <c>MTLBuffer.contents</c>, so:
+/// Per-request scratch state for the Metal forward pass. Every buffer is an
+/// <c>MTLResourceStorageModeShared</c> MTLBuffer allocated via
+/// <see cref="MetalNative.AllocShared"/>. The pointers exposed here are
+/// <c>MTLBuffer.contents</c>, so:
 /// <list type="bullet">
 ///   <item><description>The CPU can read/write them directly (regular host RAM).</description></item>
 ///   <item><description>Kernels can recover the backing MTLBuffer by pointer (registered
 ///   in the context's shared-buffer map) and use it zero-copy in encoders.</description></item>
 /// </list>
-/// This eliminates the per-kernel CPU↔Metal copies that <see cref="CpuMetalForwardState"/>
-/// incurs and is the prerequisite for batched-command-buffer execution.
+/// This avoids per-kernel CPU↔Metal copies and is the prerequisite for
+/// batched-command-buffer execution.
 /// </summary>
-public sealed class GpuMetalForwardState : IMetalForwardState
+public sealed class MetalForwardState : IDisposable
 {
     private readonly nint _ctx;
     private readonly int _hiddenSize;
@@ -28,40 +29,40 @@ public sealed class GpuMetalForwardState : IMetalForwardState
     private int _currentSeqLen;
     private bool _disposed;
 
-    /// <inheritdoc/>
+    /// <summary>Total bytes currently allocated across all buffers.</summary>
     public long AllocatedBytes { get; private set; }
 
-    /// <inheritdoc/>
+    /// <summary>Hidden-state stream — <c>[seqLen, hiddenSize]</c> FP16.</summary>
     public nint HiddenState   { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Residual stream — <c>[seqLen, hiddenSize]</c> FP16.</summary>
     public nint Residual      { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Normalization / projection output scratch — <c>[seqLen, hiddenSize]</c> FP16.</summary>
     public nint NormOutput    { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Query projection — <c>[seqLen, numHeads * headDim]</c> FP16.</summary>
     public nint Q             { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Key projection — <c>[seqLen, numKvHeads * headDim]</c> FP16.</summary>
     public nint K             { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Value projection — <c>[seqLen, numKvHeads * headDim]</c> FP16.</summary>
     public nint V             { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Attention output — <c>[seqLen, numHeads * headDim]</c> FP16.</summary>
     public nint AttnOutput    { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>FFN gate projection — <c>[seqLen, intermediateSize]</c> FP16.</summary>
     public nint FfnGate       { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>FFN up projection — <c>[seqLen, intermediateSize]</c> FP16.</summary>
     public nint FfnUp         { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>SwiGLU activation output — <c>[seqLen, intermediateSize]</c> FP16.</summary>
     public nint SiluOutput    { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Final logits (FP16) — <c>[vocabSize]</c>.</summary>
     public nint LogitsF16     { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Final logits (FP32, for the sampler) — <c>[vocabSize]</c>.</summary>
     public nint LogitsF32     { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Scratch for GEMM (MPS) FP16 outputs.</summary>
     public nint GemmOutputF16 { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Scratch for dequantized FP16 weights (on-the-fly dequant path).</summary>
     public nint DequantScratch { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Input token ids — <c>[seqLen]</c> int32.</summary>
     public nint TokenIds      { get; private set; }
-    /// <inheritdoc/>
+    /// <summary>Input positions — <c>[seqLen]</c> int32.</summary>
     public nint Positions     { get; private set; }
 
     /// <summary>
@@ -69,8 +70,8 @@ public sealed class GpuMetalForwardState : IMetalForwardState
     /// of seq-length-dependent buffers sized for decode (<c>seqLen = 1</c>).
     /// All allocations come from the Metal device's shared-storage pool.
     /// </summary>
-    public GpuMetalForwardState(MetalContext ctx, int hiddenSize, int numHeads, int numKvHeads, int headDim,
-                                 int intermediateSize, int vocabSize)
+    public MetalForwardState(MetalContext ctx, int hiddenSize, int numHeads, int numKvHeads, int headDim,
+                             int intermediateSize, int vocabSize)
     {
         ArgumentNullException.ThrowIfNull(ctx);
         _ctx = ctx.Handle;
@@ -92,7 +93,7 @@ public sealed class GpuMetalForwardState : IMetalForwardState
         EnsureCapacity(1);
     }
 
-    /// <inheritdoc/>
+    /// <summary>Grows the seq-length-dependent buffers to fit <paramref name="seqLen"/> tokens.</summary>
     public void EnsureCapacity(int seqLen)
     {
         if (seqLen <= _currentSeqLen)
