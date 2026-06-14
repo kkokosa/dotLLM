@@ -529,8 +529,6 @@ public sealed class TextGenerator
 
                     using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
                     {
-                        DebugLogits(prefillLogits, vocabSize);
-
                         long ts1 = Stopwatch.GetTimestamp();
                         prefillTicks = ts1 - ts0;
 
@@ -801,34 +799,6 @@ public sealed class TextGenerator
             if (ownsKvCache)
                 kvCache.Dispose();
         }
-    }
-
-    [Conditional("DEBUG")]
-    private unsafe void DebugLogits(ITensor prefillLogits, int vocabSize)
-    {
-        if (!bool.TryParse(Environment.GetEnvironmentVariable("DEBUG_LOGITS"), out bool debugLogits) || !debugLogits)
-        {
-            return;
-        }
-
-        var logits = new ReadOnlySpan<float>((void*)prefillLogits.DataPointer, vocabSize);
-        var topK = logits.ToArray()
-            .Select((v, i) => (token: i, logit: v))
-            .OrderByDescending(x => x.logit)
-            .Take(10)
-            .ToList();
-        Console.WriteLine("Top-10 logits:");
-        foreach (var (t, l) in topK)
-            Console.WriteLine($"  token {t}: logit={l:F3}  '{_tokenizer.Decode([t])}'");
-
-        // Aussi : trouver le rang du token " Paris" attendu
-        int parisToken = _tokenizer.Encode(" Paris")[0]; // probablement un seul token
-        int rank = logits.ToArray()
-            .Select((v, i) => (v, i))
-            .OrderByDescending(x => x.v)
-            .Select((x, r) => (x.i, rank: r))
-            .First(x => x.i == parisToken).rank;
-        Console.WriteLine($"' Paris' (token {parisToken}) is at rank #{rank}, logit={logits[parisToken]:F3}");
     }
 
     /// <summary>
