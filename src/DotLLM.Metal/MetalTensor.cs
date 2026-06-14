@@ -3,9 +3,9 @@ using DotLLM.Core.Tensors;
 namespace DotLLM.Metal;
 
 /// <summary>
-/// Tensor backed by Metal-accessible native memory.
-/// By default this is a non-owning view over memory managed elsewhere,
-/// for example MetalForwardState.
+/// Non-owning tensor view over Metal-accessible native memory managed
+/// elsewhere (for example <see cref="MetalForwardState"/> or the KV-cache).
+/// Disposing only clears the pointer — it never frees the backing memory.
 /// </summary>
 public sealed class MetalTensor : ITensor
 {
@@ -32,24 +32,21 @@ public sealed class MetalTensor : ITensor
     /// <inheritdoc/>
     public long ByteCount { get; }
 
-    private readonly bool _ownsMemory;
-
     /// <inheritdoc/>
     public MetalTensor(nint ptr, int elementCount, int deviceId = 0)
-        : this(new TensorShape(elementCount), DType.Float32, deviceId, ptr, ownsMemory: false)
+        : this(new TensorShape(elementCount), DType.Float32, deviceId, ptr)
     {
     }
 
     /// <summary>
-    /// Create a MetalTensor from a native pointer.
+    /// Create a non-owning MetalTensor view over a native pointer.
     /// </summary>
-    /// <param name="shape"></param>
-    /// <param name="dtype"></param>
-    /// <param name="deviceId"></param>
-    /// <param name="ptr"></param>
-    /// <param name="ownsMemory"></param>
-    /// <exception cref="ArgumentException"></exception>
-    public MetalTensor(TensorShape shape, DType dtype, int deviceId, nint ptr, bool ownsMemory = false)
+    /// <param name="shape">Tensor shape.</param>
+    /// <param name="dtype">Element data type.</param>
+    /// <param name="deviceId">Device placement id.</param>
+    /// <param name="ptr">Pointer to native memory owned elsewhere.</param>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="ptr"/> is null.</exception>
+    public MetalTensor(TensorShape shape, DType dtype, int deviceId, nint ptr)
     {
         if (ptr == 0)
             throw new ArgumentException("Tensor pointer cannot be null.", nameof(ptr));
@@ -58,24 +55,11 @@ public sealed class MetalTensor : ITensor
         DType = dtype;
         DeviceId = deviceId;
         _ptr = ptr;
-        _ownsMemory = ownsMemory;
         ByteCount = dtype.ComputeByteCount(shape.ElementCount);
     }
 
-    /// <inheritdoc/>
-    public void Dispose()
-    {
-        if (!_ownsMemory)
-        {
-            _ptr = 0;
-            return;
-        }
-
-        nint ptr = Interlocked.Exchange(ref _ptr, 0);
-        if (ptr == 0)
-            return;
-
-        // TODO: free Metal-owned memory here if/when MetalTensor supports ownership.
-        // For now, avoid freeing because forward-state buffers are owned elsewhere.
-    }
+    /// <summary>
+    /// Clears the pointer. The backing memory is owned elsewhere and is not freed.
+    /// </summary>
+    public void Dispose() => _ptr = 0;
 }

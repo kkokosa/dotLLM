@@ -320,8 +320,7 @@ public sealed unsafe class MetalTransformerModel : IModel
             shape: new TensorShape(1, vocabSize),
             dtype: DType.Float32,
             deviceId: _deviceId,
-            ptr: _state.LogitsF32,
-            ownsMemory: false);
+            ptr: _state.LogitsF32);
     }
 
     // Dans MetalTransformerModel

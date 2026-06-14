@@ -147,14 +147,14 @@ public sealed unsafe class MetalKvCache : IKvCache
     public ITensor GetKeys(int layerIndex)
     {
         nint ptr = (nint)MetalNative.KvCacheKeyPtr(_handle, layerIndex);
-        return new MetalTensor(new TensorShape(_currentLength, _kvStride), DType.Float16, -1, ptr, ownsMemory: false);
+        return new MetalTensor(new TensorShape(_currentLength, _kvStride), DType.Float16, -1, ptr);
     }
 
     /// <inheritdoc/>
     public ITensor GetValues(int layerIndex)
     {
         nint ptr = (nint)MetalNative.KvCacheValuePtr(_handle, layerIndex);
-        return new MetalTensor(new TensorShape(_currentLength, _kvStride), DType.Float16, -1, ptr, ownsMemory: false);
+        return new MetalTensor(new TensorShape(_currentLength, _kvStride), DType.Float16, -1, ptr);
     }
 
     /// <inheritdoc/>
