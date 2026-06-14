@@ -43,147 +43,21 @@ If you are about to port a new kernel, read that file first.
 
 ## GEMM via Metal Performance Shaders
 
-### The gap GEMV could not fill
+The quantized GEMV kernels cover **decode** (`seqLen = 1`, matrix × vector).
+**Prefill** (matrix × matrix) uses **`MPSMatrixMultiplication`** — Apple's tuned
+FP16/FP32 matmul from Metal Performance Shaders — exposed via
+`dotllm_metal_gemm_f16` / `_f32` and the `Gemm` C# wrapper.
 
-The hand-ported quantized GEMV kernels (`quantized_gemv_q8_0`, `q5_0`, `q4_k`,
-`q5_k`, `q6_k`) cover **decode** — single-token forward passes where
-`seqLen = 1`, so each projection is a matrix × vector. They are not enough
-for **prefill**, where `seqLen` may be hundreds or thousands of tokens and
-every Q/K/V/O and FFN projection becomes a true matrix × matrix multiply.
-
-A second class of GEMM is therefore needed for prefill.
-
-### Why `MPSMatrixMultiplication`
-
-FP16 and FP32 GEMM are served by **`MPSMatrixMultiplication`**, Apple's tuned
-matmul primitive from **Metal Performance Shaders** (the same framework that
-backs PyTorch on Apple Silicon). It is:
-
-- already optimised for every shipping Apple GPU generation,
-- maintained by Apple (we inherit improvements transparently),
-- callable directly from the Metal command-buffer encoder,
-- available in FP16 and FP32 variants out of the box.
-
-> **Note** — an earlier iteration shipped a hand-written `simdgroup_matrix`
-> kernel (`gemm_f16_smm`) as a "fast path" for the LLM-projection mode.
-> Benchmarking on an M4 Max showed MPS to be ~1.5× faster at prefill (≈ 750 vs
-> ≈ 490 tok/s) while requiring zero maintenance, so the custom kernel was
-> removed. Decode is unaffected either way — it goes through the quantized
-> GEMV path, not GEMM. If a hand-tuned kernel is revisited later, it must beat
-> MPS on a real prefill before becoming the default.
-
-We expose MPS through two C entry points and a thin C# wrapper:
+LLM projections (`Y = X · Wᵀ`, with GGUF weights stored `[outputDim, inputDim]`)
+all use the same call convention:
 
 ```
-native/metal/bridge.mm                           dotllm_metal_gemm_f16 / _f32
-native/metal/dotllm_metal.h                      (declarations)
-src/DotLLM.Metal/Interop/MetalNative.Kernels.cs  GemmF16 / GemmF32 P/Invoke
-src/DotLLM.Metal/Kernels/Gemm.cs                 public static class Gemm
+Gemm.ExecuteF16(ctx, x, w, y,
+    m=seqLen, n=outputDim, k=inputDim,
+    transposeA=false, transposeB=true, alpha=1, beta=0)
 ```
 
-### Operation and layout convention
-
-The native function computes:
-
-```
-C = alpha · op(A) · op(B) + beta · C
-op(X) = Xᵀ if transpose_x != 0, else X
-```
-
-with row-major storage layouts (no transpose):
-
-```
-A : [m, k]
-B : [k, n]
-C : [m, n]
-```
-
-The `transpose_a` / `transpose_b` flags do not change storage — they only
-tell MPS to treat a matrix as transposed during the multiplication.
-
-#### Standard LLM projection layout
-
-Weight matrices in GGUF are stored as `[outputDim, inputDim]`. A projection
-`Y = X · Wᵀ` therefore maps to:
-
-| | rows | cols | transpose flag |
-|---|---|---|---|
-| A = X (activations) | `seqLen` | `inputDim` | 0 |
-| B = W (weights) | `outputDim` | `inputDim` | **1** |
-| C = Y (output) | `seqLen` | `outputDim` | (n/a) |
-
-So the call is `Gemm.ExecuteF16(ctx, x, w, y, m=seqLen, n=outputDim,
-k=inputDim, transposeA=false, transposeB=true, alpha=1, beta=0)`.
-
-This is the configuration the forward pass will use everywhere — Q/K/V/O
-projections, FFN gate/up/down, and the LM head. The `alpha`/`beta`
-parameters are kept in the API so a future fused residual-add path can
-accumulate (`beta = 1`) instead of overwriting.
-
-#### Visualising the transpose
-
-What lives in memory (both row-major):
-
-```
-        X : [m, k]                          W : [n, k]
-        ────── k columns ──────►            ────── k columns ──────►
-      ┌────────────────────────┐          ┌────────────────────────┐
-      │ x x x x x x x x x x x  │ ┐        │ w w w w w w w w w w w  │ ┐
-      │ x x x x x x x x x x x  │ m        │ w w w w w w w w w w w  │ n
-      │ x x x x x x x x x x x  │ rows     │ w w w w w w w w w w w  │ rows
-      │ x x x x x x x x x x x  │ ┘        │ w w w w w w w w w w w  │ ┘
-      └────────────────────────┘          └────────────────────────┘
-            transposeA = 0                       transposeB = 1
-            (read as-is)                         (treat as flipped)
-```
-
-The two `k` axes do not line up yet: textbook GEMM needs
-`A : [m, k] · B : [k, n]`, but `W` is stored as `[n, k]`. Setting
-`transposeB = 1` tells MPS to treat `W` as if its rows became columns —
-no data is moved, only the index mapping changes:
-
-```
-        op(A) = X        ·        op(B) = Wᵀ        =        C = Y
-      ┌────k────┐               ┌────n────┐                ┌────n────┐
-      │         │               │         │                │         │
-      │    m    │       ·       │    k    │       =        │    m    │
-      │         │               │         │                │         │
-      └─────────┘               └─────────┘                └─────────┘
-
-         k matches k → contracts away.   m × n remains in the result.
-```
-
-Per-element, the multiplication is:
-
-```
-                           k − 1
-        Y[i, j]  =          Σ        X[i, p] · W[j, p]
-                           p = 0
-                                    ▲           ▲
-                                    │           │
-                                row of X    row of W (the storage row,
-                                            because transposeB lets MPS
-                                            iterate it as if it were a column)
-```
-
-This is exactly the operation that should happen during a Q/K/V/O or FFN
-projection — and it is why every LLM call site uses the same
-`transposeA=false, transposeB=true` pair.
-
-### Build-time linkage
-
-`MetalPerformanceShaders.framework` is now linked into `libdotllmmetal.dylib`
-(`build.sh`). Verify with:
-
-```sh
-otool -L bin/libdotllmmetal.dylib | grep MetalPerformanceShaders
-```
-
-### What this does **not** cover
-
-`MPSMatrixMultiplication` operates on FP16 / FP32 inputs only. Quantized
-weights must be dequantized to FP16 before being multiplied this way — the
-strategy for that is part of the next milestone (`MetalWeights`, below).
+Quantized weights must be dequantized to FP16 first (see `MetalWeights`, below).
 
 ---
 
