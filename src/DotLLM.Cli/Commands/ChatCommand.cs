@@ -37,6 +37,12 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         [Description("System prompt for the conversation.")]
         public string? SystemPrompt { get; set; }
 
+        /// <summary>Path to a file containing the system prompt.</summary>
+        [CommandOption("--system-file")]
+        [Description("Read the system prompt from a file instead of --system. " +
+                     "A single trailing newline is stripped. Mutually exclusive with --system.")]
+        public string? SystemPromptFile { get; set; }
+
         /// <summary>Maximum tokens per response.</summary>
         [CommandOption("--max-tokens|-n")]
         [Description("Maximum number of tokens to generate per response.")]
@@ -204,6 +210,15 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
     /// <inheritdoc/>
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
     {
+        // Resolve before loading the model so a bad path fails fast.
+        if (!TextArgument.TryResolve(settings.SystemPrompt, settings.SystemPromptFile,
+                "--system|-s", "--system-file", required: false,
+                out string? systemPrompt, out string? systemError))
+        {
+            AnsiConsole.MarkupLine($"[red]{Markup.Escape(systemError!)}[/]");
+            return 1;
+        }
+
         var resolvedPath = GgufFileResolver.Resolve(settings.Model, settings.Quant);
         if (resolvedPath is null)
             return 1;
@@ -343,8 +358,8 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
 
         // Initialize conversation
         var history = new List<ChatMessage>();
-        if (!string.IsNullOrEmpty(settings.SystemPrompt))
-            history.Add(new ChatMessage { Role = "system", Content = settings.SystemPrompt });
+        if (!string.IsNullOrEmpty(systemPrompt))
+            history.Add(new ChatMessage { Role = "system", Content = systemPrompt });
 
         var kvConfig = new KvCacheConfig(
             KvCacheConfig.ParseDType(settings.CacheTypeK),

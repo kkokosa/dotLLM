@@ -181,6 +181,9 @@ dotllm run QuantFactory/SmolLM-135M-GGUF -p "Once upon a time" -n 128 -t 0.7 --t
 # JSON output (for scripting / piping)
 dotllm run QuantFactory/SmolLM-135M-GGUF -p "Hello" --json
 
+# Long prompts: read from a file instead of the command line
+dotllm run QuantFactory/SmolLM-135M-GGUF --prompt-file prompt.txt -n 256
+
 # Select a specific quantization when a repo has multiple .gguf files
 dotllm run QuantFactory/SmolLM-135M-GGUF -p "Test" -q Q8_0
 
@@ -347,12 +350,14 @@ To embed the same endpoints inside your own ASP.NET Core app, see [Host the Open
 
 **`run`-only:**
 
-- `--prompt` / `-p` — input prompt (**required**)
+- `--prompt` / `-p` — input prompt (**required** unless `--prompt-file` is given)
+- `--prompt-file` — read the prompt from a file instead of `--prompt`. A single trailing newline is stripped. Mutually exclusive with `--prompt`
 - `--json` — emit a single JSON result object (suppresses formatted output)
 
 **`chat`-only:**
 
 - `--system` / `-s` — system prompt
+- `--system-file` — read the system prompt from a file instead of `--system`. A single trailing newline is stripped. Mutually exclusive with `--system`
 - `--tool-choice` — `auto` (default), `none`, `required`, or a function name
 - `--no-prompt-cache` — disable KV-cache reuse across turns
 - `--prompt-cache-size` — max cached sessions (default: `1`)

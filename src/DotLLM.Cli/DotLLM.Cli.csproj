@@ -24,6 +24,10 @@
     <PackageReference Include="Spectre.Console.Cli" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
+  </ItemGroup>
+
   <!-- Rename the exe to `dotllm` for both Native AOT and self-contained single-file publish.
        Opt-in via `dotnet publish -p:PublishAot=true -r <rid>` or
        `dotnet publish -p:PublishSingleFile=true -p:SelfContained=true -r <rid>`. -->

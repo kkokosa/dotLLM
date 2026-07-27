@@ -16,6 +16,7 @@
     <ProjectReference Include="..\..\src\DotLLM.Telemetry\DotLLM.Telemetry.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Server\DotLLM.Server.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.HuggingFace\DotLLM.HuggingFace.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Cli\DotLLM.Cli.csproj" />
   </ItemGroup>
 
   <ItemGroup>

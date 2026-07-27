@@ -30,8 +30,13 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         public string Model { get; set; } = string.Empty;
 
         [CommandOption("--prompt|-p")]
-        [Description("Input prompt for generation (required).")]
+        [Description("Input prompt for generation. Required unless --prompt-file is given.")]
         public string? Prompt { get; set; }
+
+        [CommandOption("--prompt-file")]
+        [Description("Read the prompt from a file instead of --prompt. " +
+                     "A single trailing newline is stripped. Mutually exclusive with --prompt.")]
+        public string? PromptFile { get; set; }
 
         [CommandOption("--max-tokens|-n")]
         [Description("Maximum number of tokens to generate.")]
@@ -172,14 +177,18 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
     {
-        if (string.IsNullOrEmpty(settings.Prompt))
+        if (!TextArgument.TryResolve(settings.Prompt, settings.PromptFile,
+                "--prompt|-p", "--prompt-file", required: true,
+                out string? resolvedPrompt, out string? promptError))
         {
             if (settings.Json)
-                Console.Error.WriteLine("Error: --prompt|-p is required.");
+                Console.Error.WriteLine($"Error: {promptError}");
             else
-                AnsiConsole.MarkupLine("[red]--prompt|-p is required.[/]");
+                AnsiConsole.MarkupLine($"[red]{Markup.Escape(promptError!)}[/]");
             return 1;
         }
+
+        string prompt = resolvedPrompt!;
 
         var resolvedPath = GgufFileResolver.Resolve(settings.Model, settings.Quant);
         if (resolvedPath is null)
@@ -245,7 +254,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         // Parse tool definitions and format prompt via chat template when tools are provided
         ToolDefinition[]? tools = ChatCommand.ParseToolDefinitions(settings.Tools);
         IToolCallParser? toolCallParser = null;
-        string effectivePrompt = settings.Prompt;
+        string effectivePrompt = prompt;
         if (tools is { Length: > 0 })
         {
             string bosToken = tokenizer.DecodeToken(tokenizer.BosTokenId);
@@ -255,7 +264,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
             var messages = new List<ChatMessage>
             {
-                new() { Role = "user", Content = settings.Prompt }
+                new() { Role = "user", Content = prompt }
             };
             effectivePrompt = chatTemplate.Apply(messages, new ChatTemplateOptions
             {
@@ -321,7 +330,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             }
 
             if (!settings.Json)
-                Console.Write(tools is { Length: > 0 } ? "" : settings.Prompt);
+                Console.Write(tools is { Length: > 0 } ? "" : prompt);
 
             var kvConfig = new KvCacheConfig(
                 KvCacheConfig.ParseDType(settings.CacheTypeK),
@@ -480,7 +489,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 var result = new RunJsonResult
                 {
                     Text = outputText,
-                    Prompt = settings.Prompt,
+                    Prompt = prompt,
                     Model = Path.GetFileName(resolvedPath),
                     Architecture = config.Architecture.ToString(),
                     FinishReason = finishReason.ToString().ToLowerInvariant(),
