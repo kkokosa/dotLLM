@@ -15,6 +15,13 @@ public interface IModel : IDisposable
     long ComputeMemoryBytes { get; }
 
     /// <summary>
+    /// Total bytes of committed memory holding repacked (layout-transformed) copies of the model
+    /// weights, or 0 when the backend does not repack. This is memory in addition to the
+    /// memory-mapped weight file, not a subset of it.
+    /// </summary>
+    long RepackedWeightBytes => 0;
+
+    /// <summary>
     /// Runs a forward pass through the model.
     /// </summary>
     /// <param name="tokenIds">Input token IDs for this batch.</param>

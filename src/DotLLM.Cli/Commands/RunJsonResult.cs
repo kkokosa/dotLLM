@@ -54,6 +54,14 @@ internal sealed record RunTimingsDto
 internal sealed record RunMemoryDto
 {
     public long WeightsBytes { get; init; }
+
+    /// <summary>
+    /// Committed bytes holding R4-interleaved copies of the weights. This is memory in addition
+    /// to <see cref="WeightsBytes"/> (which is memory-mapped), not a subset of it. 0 when the
+    /// model's weights are not repackable.
+    /// </summary>
+    public long RepackedBytes { get; init; }
+
     public long ComputeBytes { get; init; }
     public long KvCacheBytes { get; init; }
     public long TotalBytes { get; init; }

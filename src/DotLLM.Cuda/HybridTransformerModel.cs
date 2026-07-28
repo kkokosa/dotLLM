@@ -61,6 +61,9 @@ public sealed unsafe class HybridTransformerModel : IModel
     /// <inheritdoc/>
     public long ComputeMemoryBytes => _gpuState.AllocatedBytes + _cpuState.AllocatedBytes;
 
+    /// <inheritdoc/>
+    public long RepackedWeightBytes => _cpuWeights.RepackedBytes;
+
     /// <summary>Non-null when GPU-side weights exceed available VRAM.</summary>
     public string? VramWarning { get; }
 

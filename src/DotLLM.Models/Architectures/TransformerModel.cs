@@ -42,6 +42,9 @@ public sealed unsafe class TransformerModel : IModel
     /// <summary>Total bytes allocated for inference scratch buffers.</summary>
     public long ComputeMemoryBytes => _state.AllocatedBytes;
 
+    /// <inheritdoc/>
+    public long RepackedWeightBytes => _weights.RepackedBytes;
+
     /// <summary>Debug: limit the number of transformer layers processed. 0 = all layers (default). -1 = skip all layers (embedding + LM head only).</summary>
     internal int DebugMaxLayers { get; set; }
 

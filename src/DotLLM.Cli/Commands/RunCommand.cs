@@ -463,7 +463,10 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 kvCacheBytes = (long)config.NumLayers * 2 * cacheSize
                     * config.NumKvHeads * config.HeadDim
                     * (model is DotLLM.Cuda.CudaTransformerModel ? sizeof(ushort) : sizeof(float));
-            long totalMemory = modelWeightsBytes + computeBytes + kvCacheBytes;
+            // R4-interleaved buffers are a second, committed copy of the weights held alongside
+            // the mapped file — counting only the mapping understates the footprint by ~2x.
+            long repackedBytes = model.RepackedWeightBytes;
+            long totalMemory = modelWeightsBytes + repackedBytes + computeBytes + kvCacheBytes;
 
             // Detect tool calls in generated output
             string outputText = generatedText.ToString();
@@ -521,6 +524,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                     Memory = new RunMemoryDto
                     {
                         WeightsBytes = modelWeightsBytes,
+                        RepackedBytes = repackedBytes,
                         ComputeBytes = computeBytes,
                         KvCacheBytes = kvCacheBytes,
                         TotalBytes = totalMemory,
@@ -552,7 +556,10 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 bodyLines.Add(new Markup(PerfLine("Load", loadMs, null, null)));
                 bodyLines.Add(new Text(""));
                 bodyLines.Add(new Markup("  [bold]Memory[/]"));
-                bodyLines.Add(new Markup(MemLine("Weights", modelWeightsBytes, "(memory-mapped)")));
+                bodyLines.Add(new Markup(MemLine("Weights", modelWeightsBytes,
+                    repackedBytes > 0 ? "(memory-mapped, +repacked below)" : "(memory-mapped)")));
+                if (repackedBytes > 0)
+                    bodyLines.Add(new Markup(MemLine("Repacked (R4)", repackedBytes, "(committed)")));
                 bodyLines.Add(new Markup(MemLine("Compute", computeBytes, null)));
                 string kvLabel = kvConfig.IsQuantized
                     ? $"({cacheSize} slots, K:{settings.CacheTypeK} V:{settings.CacheTypeV})"
