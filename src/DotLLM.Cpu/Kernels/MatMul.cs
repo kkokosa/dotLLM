@@ -131,7 +131,25 @@ public static unsafe partial class MatMul
     {
         int rowBytes = blockCount * Q8_0BlockBytes;
 
-        if (Avx512BW.IsSupported)
+        if (Avx512BW.IsSupported && AvxVnni.IsSupported)
+        {
+            int row = 0;
+            // Process 4 rows at a time for cache efficiency.
+            for (; row + 3 < m; row += 4)
+            {
+                VecDotQ8_0Vnni_4Rows(
+                    weightsQ8 + row * rowBytes,
+                    weightsQ8 + (row + 1) * rowBytes,
+                    weightsQ8 + (row + 2) * rowBytes,
+                    weightsQ8 + (row + 3) * rowBytes,
+                    xQ8, blockCount, result + row);
+            }
+            for (; row < m; row++)
+            {
+                result[row] = VecDotQ8_0Avx512(weightsQ8 + row * rowBytes, xQ8, blockCount);
+            }
+        }
+        else if (Avx512BW.IsSupported)
         {
             int row = 0;
             // Process 4 rows at a time for cache efficiency.
@@ -701,6 +719,100 @@ public static unsafe partial class MatMul
         Vector256<int> isum0 = Avx2.MultiplyAddAdjacent(prod0, ones256);
         Vector256<short> prod1 = Avx2.MultiplyAddAdjacent(absX1.AsByte(), adjW1);
         Vector256<int> isum1 = Avx2.MultiplyAddAdjacent(prod1, ones256);
+
+        Vector512<int> isum512 = Vector512.Create(isum0, isum1);
+        Vector512<float> fsum512 = Avx512F.ConvertToVector512Single(isum512);
+
+        Vector512<float> scale = Vector512.Create(
+            Vector256.Create(dx0 * dw0),
+            Vector256.Create(dx1 * dw1));
+
+        acc = Avx512F.FusedMultiplyAdd(fsum512, scale, acc);
+    }
+
+    /// <summary>
+    /// AVX-VNNI multi-row (4 rows) Q8_0 dot product. Identical to
+    /// <see cref="VecDotQ8_0Avx512_4Rows"/> except the u8xi8 widening pair
+    /// (<c>vpmaddubsw</c> + <c>vpmaddwd</c>) is replaced by a single <c>vpdpbusd</c>.
+    /// </summary>
+    /// <remarks>
+    /// Both forms group 4 consecutive byte products into one int32 lane, so results match
+    /// bit-for-bit over the Q8_0 value range: the i16 intermediate in the non-VNNI path
+    /// saturates only above 32767, and |x|,|w| &lt;= 127 bounds each lane at 2*127*127 = 32258.
+    /// <c>vpdpbusd</c> accumulates directly in int32 and cannot saturate at all.
+    /// </remarks>
+    [SkipLocalsInit]
+    internal static void VecDotQ8_0Vnni_4Rows(
+        byte* w0, byte* w1, byte* w2, byte* w3,
+        byte* x, int blockCount, float* results)
+    {
+        Vector512<float> acc0 = Vector512<float>.Zero;
+        Vector512<float> acc1 = Vector512<float>.Zero;
+        Vector512<float> acc2 = Vector512<float>.Zero;
+        Vector512<float> acc3 = Vector512<float>.Zero;
+
+        int block = 0;
+
+        for (; block + 1 < blockCount; block += 2)
+        {
+            byte* xBlock0 = x + block * Q8_0BlockBytes;
+            byte* xBlock1 = x + (block + 1) * Q8_0BlockBytes;
+            float dx0 = (float)Unsafe.ReadUnaligned<Half>(xBlock0);
+            float dx1 = (float)Unsafe.ReadUnaligned<Half>(xBlock1);
+
+            Vector256<sbyte> vx0 = Unsafe.ReadUnaligned<Vector256<sbyte>>(xBlock0 + 2);
+            Vector256<sbyte> vx1 = Unsafe.ReadUnaligned<Vector256<sbyte>>(xBlock1 + 2);
+            Vector256<sbyte> absX0 = Avx2.Sign(vx0, vx0);
+            Vector256<sbyte> absX1 = Avx2.Sign(vx1, vx1);
+
+            ProcessVnniDualBlock(w0, block, vx0, vx1, absX0, absX1, dx0, dx1, ref acc0);
+            ProcessVnniDualBlock(w1, block, vx0, vx1, absX0, absX1, dx0, dx1, ref acc1);
+            ProcessVnniDualBlock(w2, block, vx0, vx1, absX0, absX1, dx0, dx1, ref acc2);
+            ProcessVnniDualBlock(w3, block, vx0, vx1, absX0, absX1, dx0, dx1, ref acc3);
+        }
+
+        results[0] = HorizontalSumAvx512Float(acc0);
+        results[1] = HorizontalSumAvx512Float(acc1);
+        results[2] = HorizontalSumAvx512Float(acc2);
+        results[3] = HorizontalSumAvx512Float(acc3);
+
+        if (block < blockCount)
+        {
+            byte* xBlock = x + block * Q8_0BlockBytes;
+            float dx = (float)Unsafe.ReadUnaligned<Half>(xBlock);
+            Vector256<sbyte> vx = Unsafe.ReadUnaligned<Vector256<sbyte>>(xBlock + 2);
+            Vector256<sbyte> absX = Avx2.Sign(vx, vx);
+            Vector256<short> ones = Vector256.Create((short)1);
+
+            results[0] += ProcessAvx2SingleBlock(w0, block, vx, absX, dx, ones);
+            results[1] += ProcessAvx2SingleBlock(w1, block, vx, absX, dx, ones);
+            results[2] += ProcessAvx2SingleBlock(w2, block, vx, absX, dx, ones);
+            results[3] += ProcessAvx2SingleBlock(w3, block, vx, absX, dx, ones);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ProcessVnniDualBlock(
+        byte* w, int block,
+        Vector256<sbyte> vx0, Vector256<sbyte> vx1,
+        Vector256<sbyte> absX0, Vector256<sbyte> absX1,
+        float dx0, float dx1,
+        ref Vector512<float> acc)
+    {
+        byte* wBlock0 = w + block * Q8_0BlockBytes;
+        byte* wBlock1 = w + (block + 1) * Q8_0BlockBytes;
+        float dw0 = (float)Unsafe.ReadUnaligned<Half>(wBlock0);
+        float dw1 = (float)Unsafe.ReadUnaligned<Half>(wBlock1);
+
+        Vector256<sbyte> vw0 = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock0 + 2);
+        Vector256<sbyte> vw1 = Unsafe.ReadUnaligned<Vector256<sbyte>>(wBlock1 + 2);
+
+        Vector256<sbyte> adjW0 = Avx2.Sign(vw0, vx0);
+        Vector256<sbyte> adjW1 = Avx2.Sign(vw1, vx1);
+
+        // Single vpdpbusd each, replacing vpmaddubsw + vpmaddwd.
+        Vector256<int> isum0 = AvxVnni.MultiplyWideningAndAdd(Vector256<int>.Zero, absX0.AsByte(), adjW0);
+        Vector256<int> isum1 = AvxVnni.MultiplyWideningAndAdd(Vector256<int>.Zero, absX1.AsByte(), adjW1);
 
         Vector512<int> isum512 = Vector512.Create(isum0, isum1);
         Vector512<float> fsum512 = Avx512F.ConvertToVector512Single(isum512);
