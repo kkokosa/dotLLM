@@ -620,9 +620,25 @@ public sealed unsafe class TransformerModel : IModel
                                  int m, int k, int n, byte* preQuantizedInput,
                                  in WeightRepacking.RepackedWeight rw)
     {
-        if (rw.Ptr == 0 || n > 1 || rw.RowBytes < InterleavedMinRowBytes)
+        if (rw.Ptr == 0 || rw.RowBytes < InterleavedMinRowBytes)
         {
-            // Multi-token or small row stride: use original tiled GEMM path
+            // No repacked copy, or rows too short for interleaving to pay: original path.
+            Gemm(origWeights, qt, b, c, m, k, n, preQuantizedInput);
+            return;
+        }
+
+        if (n > 1)
+        {
+            // Multi-token: L2-tiled GEMM over the R4 layout. Same tiling shape as the row-major
+            // path, so it inherits the interleaved dot kernel's advantage instead of fighting
+            // register pressure the way the outer-product microkernels do (Step 26, #61).
+            if (qt == QuantizationType.Q8_0 && preQuantizedInput != null)
+            {
+                MatMul.GemmR4TiledQ8_0((byte*)rw.Ptr, preQuantizedInput, c,
+                    rw.FullGroupCount, rw.TailRows, k / 32, m, n, _threadPool);
+                return;
+            }
+
             Gemm(origWeights, qt, b, c, m, k, n, preQuantizedInput);
             return;
         }

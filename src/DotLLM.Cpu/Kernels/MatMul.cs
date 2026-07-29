@@ -357,6 +357,144 @@ public static unsafe partial class MatMul
     }
 
     /// <summary>
+    /// L2-tiled multi-token GEMM over R4-interleaved Q8_0 weights.
+    /// C is [N x M] row-major (<c>C[token * m + row]</c>), matching <see cref="ComputeGemmTiled"/>.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately mirrors <see cref="ComputeGemmTiled"/>'s shape — tile over rows, iterate all
+    /// tokens inside the tile so a tile's weights are streamed once and reused across the batch —
+    /// rather than the outer-product microkernel approach in <c>OuterProductGemmQ8_0</c>,
+    /// which measured slower than the row-major tiled GEMM on both AVX2 (Step 26, #61) and
+    /// AVX-512. Tiling is over 4-row groups since that is the R4 interleave unit.
+    /// </remarks>
+    /// <param name="repackedWeights">R4-interleaved weight data.</param>
+    /// <param name="inputQ8">Pre-quantized Q8_0 input, [N x q8RowBytes].</param>
+    /// <param name="c">Output [N x M], row-major.</param>
+    /// <param name="fullGroups">Complete 4-row groups (M / 4).</param>
+    /// <param name="tailRows">Leftover rows (M % 4), stored row-major after the interleaved data.</param>
+    /// <param name="blockCount">Blocks per row (K / 32).</param>
+    /// <param name="m">Total output rows.</param>
+    /// <param name="n">Token count.</param>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void GemmR4TiledQ8_0(byte* repackedWeights, byte* inputQ8, float* c,
+        int fullGroups, int tailRows, int blockCount, int m, int n)
+    {
+        int q8RowBytes = blockCount * Q8_0BlockBytes;
+        int groupBytes = 4 * q8RowBytes;
+        // Same L2 budget as the row-major path, expressed in groups rather than rows.
+        int tileGroups = Math.Max(1, ComputeTileM(q8RowBytes) / 4);
+
+        for (int gStart = 0; gStart < fullGroups; gStart += tileGroups)
+        {
+            int gCount = Math.Min(tileGroups, fullGroups - gStart);
+            byte* tileWeights = repackedWeights + (long)gStart * groupBytes;
+
+            for (int t = 0; t < n; t++)
+            {
+                ComputeRowsQ8_0Interleaved(
+                    tileWeights,
+                    inputQ8 + (long)t * q8RowBytes,
+                    c + (long)t * m + gStart * 4,
+                    gCount, tailRows: 0, blockCount);
+            }
+        }
+
+        // Tail rows live row-major after all interleaved groups, so the row-major kernel applies.
+        if (tailRows > 0)
+        {
+            byte* tailBase = repackedWeights + (long)fullGroups * groupBytes;
+            for (int t = 0; t < n; t++)
+            {
+                ComputeRows(
+                    tailBase,
+                    inputQ8 + (long)t * q8RowBytes,
+                    c + (long)t * m + fullGroups * 4,
+                    tailRows, blockCount);
+            }
+        }
+    }
+
+    private struct GemmR4TiledQ8Ctx
+    {
+        public byte* RepackedWeights;
+        public byte* InputQ8;
+        public float* C;
+        public int FullGroups;
+        public int TailRows;
+        public int BlockCount;
+        public int M;
+        public int N;
+        public int TileGroups;
+    }
+
+    /// <summary>
+    /// Parallel <c>GemmR4TiledQ8_0</c>. Partitions row-group tiles across threads; each
+    /// thread owns a disjoint row range of C, so no synchronisation is needed.
+    /// </summary>
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static void GemmR4TiledQ8_0(byte* repackedWeights, byte* inputQ8, float* c,
+        int fullGroups, int tailRows, int blockCount, int m, int n, ComputeThreadPool? pool)
+    {
+        if (pool is null || m < ParallelMinRows)
+        {
+            GemmR4TiledQ8_0(repackedWeights, inputQ8, c, fullGroups, tailRows, blockCount, m, n);
+            return;
+        }
+
+        var ctx = new GemmR4TiledQ8Ctx
+        {
+            RepackedWeights = repackedWeights, InputQ8 = inputQ8, C = c,
+            FullGroups = fullGroups, TailRows = tailRows, BlockCount = blockCount,
+            M = m, N = n, TileGroups = Math.Max(1, ComputeTileM(blockCount * Q8_0BlockBytes) / 4),
+        };
+        pool.Dispatch((nint)(&ctx), &GemmR4TiledQ8Worker);
+    }
+
+    private static void GemmR4TiledQ8Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<GemmR4TiledQ8Ctx>((void*)ctxPtr);
+
+        int q8RowBytes = ctx.BlockCount * Q8_0BlockBytes;
+        int groupBytes = 4 * q8RowBytes;
+
+        // Partition groups across threads, then tile within each thread's share.
+        int groupsPerThread = (ctx.FullGroups + threadCount - 1) / threadCount;
+        int startGroup = threadIdx * groupsPerThread;
+        int endGroup = Math.Min(startGroup + groupsPerThread, ctx.FullGroups);
+
+        for (int gStart = startGroup; gStart < endGroup; gStart += ctx.TileGroups)
+        {
+            int gCount = Math.Min(ctx.TileGroups, endGroup - gStart);
+            byte* tileWeights = ctx.RepackedWeights + (long)gStart * groupBytes;
+
+            for (int t = 0; t < ctx.N; t++)
+            {
+                ComputeRowsQ8_0Interleaved(
+                    tileWeights,
+                    ctx.InputQ8 + (long)t * q8RowBytes,
+                    ctx.C + (long)t * ctx.M + gStart * 4,
+                    gCount, tailRows: 0, ctx.BlockCount);
+            }
+        }
+
+        // Thread 0 handles the row-major tail rows.
+        if (threadIdx == 0 && ctx.TailRows > 0)
+        {
+            byte* tailBase = ctx.RepackedWeights + (long)ctx.FullGroups * groupBytes;
+            for (int t = 0; t < ctx.N; t++)
+            {
+                ComputeRows(
+                    tailBase,
+                    ctx.InputQ8 + (long)t * q8RowBytes,
+                    ctx.C + (long)t * ctx.M + ctx.FullGroups * 4,
+                    ctx.TailRows, ctx.BlockCount);
+            }
+        }
+    }
+
+    /// <summary>
     /// Parallel R4-interleaved Q8_0 ComputeRows. Partitions groups across threads.
     /// Falls back to single-threaded when pool is null or M is small.
     /// </summary>
