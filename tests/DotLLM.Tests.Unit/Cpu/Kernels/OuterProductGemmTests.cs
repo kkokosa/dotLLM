@@ -402,6 +402,74 @@ public sealed unsafe class OuterProductGemmTests
         return r4;
     }
 
+    // ──────────────────── Tiled R4 GEMM ────────────────────
+
+    /// <summary>
+    /// GemmR4TiledQ8_0 must agree with the row-major tiled GEMM it is a candidate to replace
+    /// for the prefill path. Covers M values with and without a 4-row remainder, and N values
+    /// spanning single-token through a realistic prefill batch.
+    /// </summary>
+    [Theory]
+    [InlineData(8, 1, 16)]
+    [InlineData(8, 3, 16)]
+    [InlineData(16, 7, 18)]    // SmolLM-135M: 576/32
+    [InlineData(32, 16, 64)]   // Llama-3.2-1B: 2048/32
+    [InlineData(37, 5, 18)]    // M not a multiple of 4 -> exercises the row-major tail
+    [InlineData(130, 11, 48)]  // 1536/32, tail of 2 rows
+    public void GemmR4Tiled_MatchesRowMajorGemm(int m, int n, int blockCount)
+    {
+        var rng = new Random(4242);
+        int rowBytes = blockCount * Q8_0BlockBytes;
+        int fullGroups = m / 4;
+        int tailRows = m % 4;
+
+        byte* rowMajor = (byte*)NativeMemory.AlignedAlloc((nuint)(m * rowBytes), 64);
+        byte* r4 = (byte*)NativeMemory.AlignedAlloc((nuint)(m * rowBytes), 64);
+        byte* input = (byte*)NativeMemory.AlignedAlloc((nuint)(n * rowBytes), 64);
+        float* cR4 = (float*)NativeMemory.AlignedAlloc((nuint)(n * m * sizeof(float)), 64);
+        float* cRef = (float*)NativeMemory.AlignedAlloc((nuint)(n * m * sizeof(float)), 64);
+
+        try
+        {
+            for (int r = 0; r < m; r++)
+                FillRandomQ8_0Blocks(rowMajor + r * rowBytes, blockCount, rng);
+            for (int t = 0; t < n; t++)
+                FillRandomQ8_0Blocks(input + t * rowBytes, blockCount, rng);
+
+            // Repack: full groups interleaved, tail rows appended row-major.
+            for (int g = 0; g < fullGroups; g++)
+                for (int b = 0; b < blockCount; b++)
+                    for (int r = 0; r < 4; r++)
+                        Buffer.MemoryCopy(
+                            rowMajor + (g * 4 + r) * rowBytes + b * Q8_0BlockBytes,
+                            r4 + g * 4 * rowBytes + (b * 4 + r) * Q8_0BlockBytes,
+                            Q8_0BlockBytes, Q8_0BlockBytes);
+            if (tailRows > 0)
+                Buffer.MemoryCopy(
+                    rowMajor + fullGroups * 4 * rowBytes,
+                    r4 + fullGroups * 4 * rowBytes,
+                    (long)tailRows * rowBytes, (long)tailRows * rowBytes);
+
+            // Reference: per-token row-major ComputeRows, which is what the tiled GEMM dispatches to.
+            for (int t = 0; t < n; t++)
+                MatMul.ComputeRows(rowMajor, input + t * rowBytes, cRef + t * m, m, blockCount);
+
+            MatMul.GemmR4TiledQ8_0(r4, input, cR4, fullGroups, tailRows, blockCount, m, n);
+
+            for (int t = 0; t < n; t++)
+                for (int r = 0; r < m; r++)
+                    Assert.Equal(cRef[t * m + r], cR4[t * m + r], 1e-2f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree(rowMajor);
+            NativeMemory.AlignedFree(r4);
+            NativeMemory.AlignedFree(input);
+            NativeMemory.AlignedFree(cR4);
+            NativeMemory.AlignedFree(cRef);
+        }
+    }
+
     private static void FillRandomQ8_0Blocks(byte* ptr, int blockCount, Random rng)
     {
         for (int b = 0; b < blockCount; b++)

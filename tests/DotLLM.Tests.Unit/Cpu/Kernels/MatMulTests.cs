@@ -173,6 +173,60 @@ public sealed unsafe class MatMulTests
 
     // ──────────────────── VecDot AVX-512 accuracy ────────────────────
 
+    /// <summary>
+    /// The VNNI 4-row kernel replaces vpmaddubsw+vpmaddwd with a single vpdpbusd. Both group
+    /// 4 byte-products per int32 lane, and the i16 intermediate cannot saturate over the Q8_0
+    /// range (|x|,|w| &lt;= 127 bounds each lane at 32258 &lt; 32767), so results must match the
+    /// non-VNNI kernel exactly — not merely within tolerance.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(7)]
+    [InlineData(16)]
+    [InlineData(128)]
+    [InlineData(344)]
+    public void VecDotQ8_0_Vnni4Rows_BitIdenticalToAvx512(int blockCount)
+    {
+        if (!Avx512BW.IsSupported || !AvxVnni.IsSupported)
+            return;
+
+        var rng = new Random(1234);
+        nuint rowBytes = (nuint)(blockCount * Q8_0BlockBytes);
+
+        nint w0 = (nint)NativeMemory.AlignedAlloc(rowBytes, 64);
+        nint w1 = (nint)NativeMemory.AlignedAlloc(rowBytes, 64);
+        nint w2 = (nint)NativeMemory.AlignedAlloc(rowBytes, 64);
+        nint w3 = (nint)NativeMemory.AlignedAlloc(rowBytes, 64);
+        nint xPtr = (nint)NativeMemory.AlignedAlloc(rowBytes, 64);
+        try
+        {
+            foreach (nint p in new[] { w0, w1, w2, w3, xPtr })
+                FillRandomQ8_0Blocks((byte*)p, blockCount, rng);
+
+            float* expected = stackalloc float[4];
+            float* actual = stackalloc float[4];
+
+            MatMul.VecDotQ8_0Avx512_4Rows((byte*)w0, (byte*)w1, (byte*)w2, (byte*)w3,
+                (byte*)xPtr, blockCount, expected);
+            MatMul.VecDotQ8_0Vnni_4Rows((byte*)w0, (byte*)w1, (byte*)w2, (byte*)w3,
+                (byte*)xPtr, blockCount, actual);
+
+            for (int r = 0; r < 4; r++)
+            {
+                Assert.Equal(
+                    BitConverter.SingleToInt32Bits(expected[r]),
+                    BitConverter.SingleToInt32Bits(actual[r]));
+            }
+        }
+        finally
+        {
+            foreach (nint p in new[] { w0, w1, w2, w3, xPtr })
+                NativeMemory.AlignedFree((void*)p);
+        }
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
