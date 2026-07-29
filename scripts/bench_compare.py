@@ -412,6 +412,7 @@ def run_dotllm(
     skip_bdn_build: bool,
     iterations: int | None = None,
     device: str = "cpu",
+    threads: int | None = None,
     **kwargs,
 ) -> list[EngineResult]:
     """Run dotLLM BDN benchmarks and parse results."""
@@ -443,6 +444,8 @@ def run_dotllm(
     env["DOTLLM_BENCH_MAX_TOKENS"] = str(max_tokens)
     if device != "cpu":
         env["DOTLLM_BENCH_DEVICE"] = device
+    if threads is not None:
+        env["DOTLLM_BENCH_THREADS"] = str(threads)
 
     print(f"[dotLLM] Running BDN: {' '.join(cmd)}")
     if model_path:
@@ -631,6 +634,7 @@ def run_dotllm_cli(
     runs: int,
     device: str = "gpu",
     gpu_layers: int | None = None,
+    threads: int | None = None,
     **kwargs,
 ) -> list[EngineResult]:
     """Run dotLLM via CLI N times (for GPU benchmarking) and compute stats.
@@ -644,11 +648,13 @@ def run_dotllm_cli(
         return []
 
     cli_prefix = _find_dotllm_cli()
+    # -t 0 means auto (all logical cores). An explicit --threads is passed through
+    # unchanged so both engines can be pinned to the same count.
     cmd = cli_prefix + [
         "run", model_path,
         "-p", prompt,
         "-n", str(max_tokens),
-        "-t", "0",
+        "-t", str(threads if threads is not None else 0),
         "--json",
     ]
     if gpu_layers is not None:
@@ -789,6 +795,7 @@ def run_llamacpp(
     runs: int,
     llamacpp_bin: str | None,
     device: str = "cpu",
+    threads: int | None = None,
     **kwargs,
 ) -> list[EngineResult]:
     """Run llama.cpp llama-completion N times and parse perf output."""
@@ -828,6 +835,10 @@ def run_llamacpp(
         "--perf",           # enable timing output (off by default)
         "--mlock",          # lock model in RAM — eliminates mmap page faults during timing
     ]
+    # Without -t, llama.cpp auto-detects and uses PHYSICAL cores, while dotLLM's
+    # -t 0 uses all LOGICAL cores. Pass --threads to pin both to the same count.
+    if threads is not None:
+        cmd.extend(["-t", str(threads)])
     if device == "gpu":
         cmd.extend(["-ngl", "99"])  # offload all layers to GPU
 
@@ -1290,6 +1301,7 @@ def export_results_json(
     max_tokens: int,
     models: list[str],
     device: str = "cpu",
+    threads: int | None = None,
 ) -> None:
     """Export benchmark results to a structured JSON file."""
     export = {
@@ -1302,6 +1314,8 @@ def export_results_json(
             "max_tokens": max_tokens,
             "models": [Path(m).name for m in models],
             "device": device,
+            # null means each engine used its own default, which differ between engines.
+            "threads": threads,
         },
         "results": [asdict(r) for r in results],
     }
@@ -1337,6 +1351,11 @@ def main() -> int:
                         help="Predefined prompt size: short (~5 tok), medium (~256 tok), large (~1024 tok)")
     parser.add_argument("--tokens", type=int, default=20,
                         help="Max tokens to generate (default: 20)")
+    parser.add_argument("--threads", type=int, default=None,
+                        help="CPU threads for BOTH engines (-t N). Omit to keep each engine's "
+                             "own default, which are NOT the same: dotLLM auto-selects all "
+                             "logical cores, llama.cpp auto-selects physical cores. Set this "
+                             "when comparing engines.")
     parser.add_argument("--runs", type=int, default=5,
                         help="Number of llama.cpp runs (default: 5; BDN has its own iteration config)")
     parser.add_argument("--iterations", type=int, default=None,
@@ -1441,7 +1460,11 @@ def main() -> int:
     prompt_preview = prompt[:60] + "..." if len(prompt) > 60 else prompt
     print()
     devices = ["cpu", "gpu"] if args.device == "both" else [args.device]
-    print(f"[config] Models: {len(resolved_models)}, Device: {args.device}, Threads: {os.cpu_count()} (auto)")
+    threads_desc = (
+        f"{args.threads} (matched across engines)" if args.threads is not None
+        else f"dotLLM {os.cpu_count()} (all logical) / llama.cpp auto (physical) — UNMATCHED"
+    )
+    print(f"[config] Models: {len(resolved_models)}, Device: {args.device}, Threads: {threads_desc}")
     print(f'[config] Prompt ({prompt_size_label}): "{prompt_preview}" (~{estimated_tokens} tokens est.)')
     print(f"[config] Max tokens: {args.tokens}")
     print()
@@ -1456,6 +1479,15 @@ def main() -> int:
             engine_names.append("llamacpp")
     else:
         engine_names = list(ENGINES.keys())
+
+    # Cross-engine comparisons are only meaningful at a matched thread count. The two
+    # engines' defaults differ (dotLLM: all logical cores; llama.cpp: physical cores),
+    # so warn rather than silently produce a lopsided comparison.
+    if args.threads is None and "dotllm" in engine_names and "llamacpp" in engine_names:
+        print("[warn] Comparing dotLLM and llama.cpp without --threads. Their defaults "
+              "differ (dotLLM uses all logical cores, llama.cpp uses physical cores), "
+              "so the result is not like-for-like. Pass --threads N to match them.",
+              file=sys.stderr)
 
     # Resolve llama.cpp binary
     llamacpp_bin = _find_llamacpp_bin(args.llamacpp_bin)
@@ -1490,6 +1522,7 @@ def main() -> int:
                     skip_bdn_build=args.skip_bdn_build,
                     iterations=args.iterations,
                     device=device,
+                    threads=args.threads,
                 )
                 all_results.extend(results)
 
@@ -1526,6 +1559,7 @@ def main() -> int:
             args.tokens,
             resolved_models,
             device=args.device,
+            threads=args.threads,
         )
 
     return 0

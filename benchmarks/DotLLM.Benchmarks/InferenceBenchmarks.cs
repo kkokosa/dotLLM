@@ -111,8 +111,16 @@ public class InferenceBenchmarks
         }
         else
         {
-            _model = TransformerModel.LoadFromGguf(_gguf, config, ThreadingConfig.Auto);
-            Console.WriteLine($"Device: CPU ({ThreadingConfig.Auto.EffectiveThreadCount} threads)");
+            // DOTLLM_BENCH_THREADS lets the harness pin the thread count so cross-engine
+            // comparisons are like-for-like; 0/unset keeps auto (all logical cores).
+            var threading = int.TryParse(
+                Environment.GetEnvironmentVariable("DOTLLM_BENCH_THREADS"), out int envThreads)
+                && envThreads > 0
+                ? new ThreadingConfig(envThreads)
+                : ThreadingConfig.Auto;
+
+            _model = TransformerModel.LoadFromGguf(_gguf, config, threading);
+            Console.WriteLine($"Device: CPU ({threading.EffectiveThreadCount} threads)");
         }
 
         _generator = new TextGenerator(_model, _tokenizer, kvFactory);

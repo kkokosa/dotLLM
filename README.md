@@ -586,13 +586,17 @@ To run comparison benchmarks against [llama.cpp](https://github.com/ggerganov/ll
    ```
 
 2. **Point bench_compare to the binary** -- either:
-   - Set `LLAMACPP_BIN` environment variable to the path of `llama-cli`
-   - Or pass `--llamacpp-bin /path/to/llama-cli` on each invocation
+   - Set `LLAMACPP_BIN` environment variable to the path of `llama-completion` (older builds name it `llama-cli`)
+   - Or pass `--llamacpp-bin /path/to/llama-completion` on each invocation
 
-3. **Run comparison:**
+   Without either, bench_compare looks for `llama-completion` on `PATH`.
+
+3. **Run comparison -- match the thread count:**
    ```bash
-   python scripts/bench_compare.py --model QuantFactory/SmolLM-135M-GGUF --dotllm --llamacpp
+   python scripts/bench_compare.py --model QuantFactory/SmolLM-135M-GGUF --dotllm --llamacpp --threads 16
    ```
+
+> **Always pass `--threads` when comparing engines.** Their defaults are different: dotLLM auto-selects *all logical cores*, llama.cpp auto-selects *physical cores*. On a 32-logical/16-physical machine that is 32 vs 16, which makes the comparison meaningless. bench_compare warns when you omit it.
 
 > [llama.cpp](https://github.com/ggerganov/llama.cpp) is optional. All dotLLM benchmarks work without it. The `--llamacpp` flag simply adds a side-by-side comparison column.
 
