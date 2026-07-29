@@ -19,7 +19,7 @@ internal sealed class DebugGgufMetadataCommand : Command<DebugGgufMetadataComman
         public string FilePath { get; set; } = string.Empty;
     }
 
-    public override int Execute(CommandContext context, Settings settings)
+    protected override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         var resolvedPath = GgufFileResolver.Resolve(settings.FilePath);
         if (resolvedPath is null)

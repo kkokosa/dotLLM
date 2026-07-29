@@ -32,7 +32,7 @@ internal sealed class DebugEmbedLookupCommand : Command<DebugEmbedLookupCommand.
         public int TokenId { get; set; } = -1;
     }
 
-    public override int Execute(CommandContext context, Settings settings)
+    protected override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         if (settings.TokenId < 0)
         {

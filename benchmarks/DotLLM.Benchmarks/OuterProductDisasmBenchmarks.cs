@@ -91,9 +91,9 @@ public unsafe class OuterProductDisasmBenchmarks : IDisposable
     public void VecDot4Rows_x3Tokens()
     {
         byte* groupBase = (byte*)_repackedWeights;
-        MatMul.VecDotQ8_0Avx2_4RowsR4(groupBase, (byte*)_inputQ8_0, BlockCount, _output);
-        MatMul.VecDotQ8_0Avx2_4RowsR4(groupBase, (byte*)_inputQ8_1, BlockCount, _output + M);
-        MatMul.VecDotQ8_0Avx2_4RowsR4(groupBase, (byte*)_inputQ8_2, BlockCount, _output + 2 * M);
+        MatMul.VecDotQ8_0Vector256_4RowsR4(groupBase, (byte*)_inputQ8_0, BlockCount, _output);
+        MatMul.VecDotQ8_0Vector256_4RowsR4(groupBase, (byte*)_inputQ8_1, BlockCount, _output + M);
+        MatMul.VecDotQ8_0Vector256_4RowsR4(groupBase, (byte*)_inputQ8_2, BlockCount, _output + 2 * M);
     }
 
     /// <summary>
@@ -104,7 +104,7 @@ public unsafe class OuterProductDisasmBenchmarks : IDisposable
     public void OuterProduct4x3()
     {
         byte* groupBase = (byte*)_repackedWeights;
-        MatMul.OuterProductQ8_0Avx2_4x3(
+        MatMul.OuterProductQ8_0Vector256_4x3(
             groupBase,
             (byte*)_inputQ8_0,
             (byte*)_inputQ8_1,

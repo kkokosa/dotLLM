@@ -4,18 +4,18 @@
   </PropertyGroup>
   <ItemGroup>
     <!-- Runtime -->
-    <PackageVersion Include="System.Numerics.Tensors" Version="9.0.3" />
+    <PackageVersion Include="System.Numerics.Tensors" Version="10.0.6" />
     <!-- Testing -->
     <PackageVersion Include="xunit" Version="2.9.3" />
-    <PackageVersion Include="xunit.runner.visualstudio" Version="3.0.2" />
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.4.0" />
     <!-- Benchmarking -->
-    <PackageVersion Include="BenchmarkDotNet" Version="0.14.0" />
+    <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
     <!-- CLI -->
-    <PackageVersion Include="Spectre.Console" Version="0.49.1" />
-    <PackageVersion Include="Spectre.Console.Cli" Version="0.49.1" />
+    <PackageVersion Include="Spectre.Console" Version="0.55.2" />
+    <PackageVersion Include="Spectre.Console.Cli" Version="0.55.0" />
     <PackageVersion Include="Xunit.SkippableFact" Version="1.5.61" />
     <!-- Versioning -->
-    <PackageVersion Include="MinVer" Version="6.0.0" />
+    <PackageVersion Include="MinVer" Version="7.0.0" />
   </ItemGroup>
 </Project>

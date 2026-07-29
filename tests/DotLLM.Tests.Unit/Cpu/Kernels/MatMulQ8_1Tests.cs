@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Kernels;
@@ -73,7 +74,7 @@ public sealed unsafe class MatMulQ8_1Tests
     [InlineData(1536)]
     public void QuantizeF32ToQ8_1_ScalarMatchesAvx2(int elementCount)
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         var rng = new Random(42);
         float* src = (float*)NativeMemory.AlignedAlloc((nuint)(elementCount * sizeof(float)), 64);
@@ -88,7 +89,7 @@ public sealed unsafe class MatMulQ8_1Tests
                 src[i] = (rng.NextSingle() - 0.5f) * 10f;
 
             MatMul.QuantizeF32ToQ8_1Scalar(src, destScalar, elementCount);
-            MatMul.QuantizeF32ToQ8_1Avx2(src, destAvx2, elementCount);
+            MatMul.QuantizeF32ToQ8_1Vector256(src, destAvx2, elementCount);
 
             for (int b = 0; b < blockCount; b++)
             {
@@ -174,7 +175,7 @@ public sealed unsafe class MatMulQ8_1Tests
     [InlineData(18)]
     public void VecDotQ5_0Q8_1_ScalarMatchesAvx2(int blockCount)
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         var rng = new Random(42);
         nint q5Ptr = AllocRandomQ5_0Blocks(blockCount, rng);
@@ -182,7 +183,7 @@ public sealed unsafe class MatMulQ8_1Tests
         try
         {
             float scalar = MatMul.VecDotQ5_0Q8_1Scalar((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
-            float avx2 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
+            float avx2 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
 
             Assert.Equal(scalar, avx2, MathF.Abs(scalar) * 1e-5f + 1e-4f);
         }
@@ -198,7 +199,7 @@ public sealed unsafe class MatMulQ8_1Tests
     [Fact]
     public void VecDotQ5_0Q8_1_4Row_MatchesSingleRow()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int blockCount = 18;
         var rng = new Random(42);
@@ -210,13 +211,13 @@ public sealed unsafe class MatMulQ8_1Tests
         nint q8 = AllocRandomQ8_1Blocks(blockCount, rng);
         try
         {
-            float r0 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)w0, (byte*)q8, blockCount);
-            float r1 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)w1, (byte*)q8, blockCount);
-            float r2 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)w2, (byte*)q8, blockCount);
-            float r3 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)w3, (byte*)q8, blockCount);
+            float r0 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)w0, (byte*)q8, blockCount);
+            float r1 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)w1, (byte*)q8, blockCount);
+            float r2 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)w2, (byte*)q8, blockCount);
+            float r3 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)w3, (byte*)q8, blockCount);
 
             float* results = stackalloc float[4];
-            MatMul.VecDotQ5_0Q8_1Avx2_4Rows((byte*)w0, (byte*)w1, (byte*)w2, (byte*)w3,
+            MatMul.VecDotQ5_0Q8_1Vector256_4Rows((byte*)w0, (byte*)w1, (byte*)w2, (byte*)w3,
                 (byte*)q8, blockCount, results);
 
             // Allow float rounding tolerance: single-row uses 2-block unrolling, 4-row does not
@@ -244,7 +245,7 @@ public sealed unsafe class MatMulQ8_1Tests
     [InlineData(19)]  // odd, 9 unrolled pairs + 1 tail
     public void VecDotQ5_0Q8_1_2BlockUnroll_OddAndEvenCounts(int blockCount)
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         var rng = new Random(42);
         nint q5Ptr = AllocRandomQ5_0Blocks(blockCount, rng);
@@ -252,7 +253,7 @@ public sealed unsafe class MatMulQ8_1Tests
         try
         {
             float scalar = MatMul.VecDotQ5_0Q8_1Scalar((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
-            float avx2 = MatMul.VecDotQ5_0Q8_1Avx2((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
+            float avx2 = MatMul.VecDotQ5_0Q8_1Vector256((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
 
             Assert.Equal(scalar, avx2, MathF.Abs(scalar) * 1e-5f + 1e-4f);
         }

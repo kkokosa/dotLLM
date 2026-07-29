@@ -23,7 +23,7 @@ internal sealed class DebugTokenizeCommand : Command<DebugTokenizeCommand.Settin
         public string? Text { get; set; }
     }
 
-    public override int Execute(CommandContext context, Settings settings)
+    protected override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(settings.Text))
         {

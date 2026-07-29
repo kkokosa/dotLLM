@@ -2,7 +2,6 @@ using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
 
 namespace DotLLM.Cpu.Kernels;
@@ -127,34 +126,35 @@ public static unsafe class FusedOps
         int blockCount = dim / Q8_0GroupSize;
         float* normBuf = stackalloc float[Q8_0GroupSize];
 
-        if (Avx2.IsSupported)
+        if (Vector256.IsHardwareAccelerated)
         {
             fixed (float* wPtr = weight)
             {
                 Vector256<float> vScale = Vector256.Create(rmsScale);
-                Vector256<int> permMask = Vector256.Create(0, 4, 1, 5, 2, 6, 3, 7);
 
                 for (int block = 0; block < blockCount; block++)
                 {
                     float* blockInput = input + block * Q8_0GroupSize;
                     byte* blockDst = dest + block * Q8_0BlockBytes;
                     float* wBlock = wPtr + block * Q8_0GroupSize;
+                    ref float blockInputRef = ref Unsafe.AsRef<float>(blockInput);
+                    ref float wBlockRef = ref Unsafe.AsRef<float>(wBlock);
+                    ref float normBufRef = ref Unsafe.AsRef<float>(normBuf);
 
                     // Normalize: input * rmsScale * weight → normBuf (4 × 8-wide)
                     for (int j = 0; j < Q8_0GroupSize; j += 8)
                     {
-                        var norm = Avx.Multiply(Avx.Multiply(
-                            Avx.LoadVector256(blockInput + j), vScale),
-                            Avx.LoadVector256(wBlock + j));
-                        Avx.Store(normBuf + j, norm);
+                        var norm = (Vector256.LoadUnsafe(ref blockInputRef, (nuint)j) * vScale)
+                            * Vector256.LoadUnsafe(ref wBlockRef, (nuint)j);
+                        norm.StoreUnsafe(ref normBufRef, (nuint)j);
                     }
 
                     // MaxAbs scan from normBuf
-                    Vector256<float> v0 = Vector256.Abs(Avx.LoadVector256(normBuf));
-                    Vector256<float> v1 = Vector256.Abs(Avx.LoadVector256(normBuf + 8));
-                    Vector256<float> v2 = Vector256.Abs(Avx.LoadVector256(normBuf + 16));
-                    Vector256<float> v3 = Vector256.Abs(Avx.LoadVector256(normBuf + 24));
-                    float maxAbs = HorizontalMaxAvx2(Avx.Max(Avx.Max(v0, v1), Avx.Max(v2, v3)));
+                    Vector256<float> v0 = Vector256.Abs(Vector256.LoadUnsafe(ref normBufRef));
+                    Vector256<float> v1 = Vector256.Abs(Vector256.LoadUnsafe(ref normBufRef, 8));
+                    Vector256<float> v2 = Vector256.Abs(Vector256.LoadUnsafe(ref normBufRef, 16));
+                    Vector256<float> v3 = Vector256.Abs(Vector256.LoadUnsafe(ref normBufRef, 24));
+                    float maxAbs = HorizontalMaxVector256(Vector256.MaxNative(Vector256.MaxNative(v0, v1), Vector256.MaxNative(v2, v3)));
 
                     float scale = maxAbs / 127.0f;
                     Unsafe.WriteUnaligned(blockDst, (Half)scale);
@@ -168,21 +168,20 @@ public static unsafe class FusedOps
                     {
                         Vector256<float> vInvScale = Vector256.Create(1.0f / scale);
 
-                        Vector256<int> i0 = Avx.ConvertToVector256Int32(
-                            Avx.Multiply(Avx.LoadVector256(normBuf), vInvScale));
-                        Vector256<int> i1 = Avx.ConvertToVector256Int32(
-                            Avx.Multiply(Avx.LoadVector256(normBuf + 8), vInvScale));
-                        Vector256<int> i2 = Avx.ConvertToVector256Int32(
-                            Avx.Multiply(Avx.LoadVector256(normBuf + 16), vInvScale));
-                        Vector256<int> i3 = Avx.ConvertToVector256Int32(
-                            Avx.Multiply(Avx.LoadVector256(normBuf + 24), vInvScale));
+                        Vector256<int> i0 = Vector256.ConvertToInt32Native(
+                            Vector256.Round(Vector256.LoadUnsafe(ref normBufRef) * vInvScale));
+                        Vector256<int> i1 = Vector256.ConvertToInt32Native(
+                            Vector256.Round(Vector256.LoadUnsafe(ref normBufRef, 8) * vInvScale));
+                        Vector256<int> i2 = Vector256.ConvertToInt32Native(
+                            Vector256.Round(Vector256.LoadUnsafe(ref normBufRef, 16) * vInvScale));
+                        Vector256<int> i3 = Vector256.ConvertToInt32Native(
+                            Vector256.Round(Vector256.LoadUnsafe(ref normBufRef, 24) * vInvScale));
 
-                        Vector256<short> s01 = Avx2.PackSignedSaturate(i0, i1);
-                        Vector256<short> s23 = Avx2.PackSignedSaturate(i2, i3);
-                        Vector256<sbyte> packed = Avx2.PackSignedSaturate(s01, s23);
+                        Vector256<short> s01 = Vector256.NarrowWithSaturation(i0, i1);
+                        Vector256<short> s23 = Vector256.NarrowWithSaturation(i2, i3);
+                        Vector256<sbyte> packed = Vector256.NarrowWithSaturation(s01, s23);
 
-                        Vector256<int> permuted = Avx2.PermuteVar8x32(packed.AsInt32(), permMask);
-                        permuted.AsByte().StoreUnsafe(ref Unsafe.AsRef<byte>((byte*)qs));
+                        packed.StoreUnsafe(ref Unsafe.AsRef<sbyte>(qs));
                     }
                 }
             }
@@ -243,34 +242,35 @@ public static unsafe class FusedOps
         int blockCount = dim / Q8_1GroupSize;
         float* normBuf = stackalloc float[Q8_1GroupSize];
 
-        if (Avx2.IsSupported)
+        if (Vector256.IsHardwareAccelerated)
         {
             fixed (float* wPtr = weight)
             {
                 Vector256<float> vScale = Vector256.Create(rmsScale);
-                Vector256<int> permMask = Vector256.Create(0, 4, 1, 5, 2, 6, 3, 7);
 
                 for (int block = 0; block < blockCount; block++)
                 {
                     float* blockInput = input + block * Q8_1GroupSize;
                     byte* blockDst = dest + block * Q8_1BlockBytes;
                     float* wBlock = wPtr + block * Q8_1GroupSize;
+                    ref float blockInputRef = ref Unsafe.AsRef<float>(blockInput);
+                    ref float wBlockRef = ref Unsafe.AsRef<float>(wBlock);
+                    ref float normBufRef = ref Unsafe.AsRef<float>(normBuf);
 
                     // Normalize: input * rmsScale * weight → normBuf
                     for (int j = 0; j < Q8_1GroupSize; j += 8)
                     {
-                        var norm = Avx.Multiply(Avx.Multiply(
-                            Avx.LoadVector256(blockInput + j), vScale),
-                            Avx.LoadVector256(wBlock + j));
-                        Avx.Store(normBuf + j, norm);
+                        var norm = (Vector256.LoadUnsafe(ref blockInputRef, (nuint)j) * vScale)
+                            * Vector256.LoadUnsafe(ref wBlockRef, (nuint)j);
+                        norm.StoreUnsafe(ref normBufRef, (nuint)j);
                     }
 
                     // MaxAbs scan
-                    Vector256<float> v0 = Vector256.Abs(Avx.LoadVector256(normBuf));
-                    Vector256<float> v1 = Vector256.Abs(Avx.LoadVector256(normBuf + 8));
-                    Vector256<float> v2 = Vector256.Abs(Avx.LoadVector256(normBuf + 16));
-                    Vector256<float> v3 = Vector256.Abs(Avx.LoadVector256(normBuf + 24));
-                    float maxAbs = HorizontalMaxAvx2(Avx.Max(Avx.Max(v0, v1), Avx.Max(v2, v3)));
+                    Vector256<float> v0 = Vector256.Abs(Vector256.LoadUnsafe(ref normBufRef));
+                    Vector256<float> v1 = Vector256.Abs(Vector256.LoadUnsafe(ref normBufRef, 8));
+                    Vector256<float> v2 = Vector256.Abs(Vector256.LoadUnsafe(ref normBufRef, 16));
+                    Vector256<float> v3 = Vector256.Abs(Vector256.LoadUnsafe(ref normBufRef, 24));
+                    float maxAbs = HorizontalMaxVector256(Vector256.MaxNative(Vector256.MaxNative(v0, v1), Vector256.MaxNative(v2, v3)));
 
                     float scale = maxAbs / 127.0f;
                     Unsafe.WriteUnaligned(blockDst, (Half)scale);
@@ -285,35 +285,34 @@ public static unsafe class FusedOps
                     {
                         Vector256<float> vInvScale = Vector256.Create(1.0f / scale);
 
-                        Vector256<int> i0 = Avx.ConvertToVector256Int32(
-                            Avx.Multiply(Avx.LoadVector256(normBuf), vInvScale));
-                        Vector256<int> i1 = Avx.ConvertToVector256Int32(
-                            Avx.Multiply(Avx.LoadVector256(normBuf + 8), vInvScale));
-                        Vector256<int> i2 = Avx.ConvertToVector256Int32(
-                            Avx.Multiply(Avx.LoadVector256(normBuf + 16), vInvScale));
-                        Vector256<int> i3 = Avx.ConvertToVector256Int32(
-                            Avx.Multiply(Avx.LoadVector256(normBuf + 24), vInvScale));
+                        Vector256<int> i0 = Vector256.ConvertToInt32Native(
+                            Vector256.Round(Vector256.LoadUnsafe(ref normBufRef) * vInvScale));
+                        Vector256<int> i1 = Vector256.ConvertToInt32Native(
+                            Vector256.Round(Vector256.LoadUnsafe(ref normBufRef, 8) * vInvScale));
+                        Vector256<int> i2 = Vector256.ConvertToInt32Native(
+                            Vector256.Round(Vector256.LoadUnsafe(ref normBufRef, 16) * vInvScale));
+                        Vector256<int> i3 = Vector256.ConvertToInt32Native(
+                            Vector256.Round(Vector256.LoadUnsafe(ref normBufRef, 24) * vInvScale));
 
                         // Clamp to [-127, 127] before summing
                         Vector256<int> clampMin = Vector256.Create(-127);
                         Vector256<int> clampMax = Vector256.Create(127);
-                        i0 = Avx2.Min(Avx2.Max(i0, clampMin), clampMax);
-                        i1 = Avx2.Min(Avx2.Max(i1, clampMin), clampMax);
-                        i2 = Avx2.Min(Avx2.Max(i2, clampMin), clampMax);
-                        i3 = Avx2.Min(Avx2.Max(i3, clampMin), clampMax);
+                        i0 = Vector256.Min(Vector256.Max(i0, clampMin), clampMax);
+                        i1 = Vector256.Min(Vector256.Max(i1, clampMin), clampMax);
+                        i2 = Vector256.Min(Vector256.Max(i2, clampMin), clampMax);
+                        i3 = Vector256.Min(Vector256.Max(i3, clampMin), clampMax);
 
                         // Sum all 32 int32 values
-                        Vector256<int> isum = Avx2.Add(Avx2.Add(i0, i1), Avx2.Add(i2, i3));
+                        Vector256<int> isum = (i0 + i1) + (i2 + i3);
                         int sum = Vector256.Sum(isum);
                         Unsafe.WriteUnaligned(blockDst + 2, (Half)(scale * sum));
 
                         // Pack int32 → int16 → int8
-                        Vector256<short> s01 = Avx2.PackSignedSaturate(i0, i1);
-                        Vector256<short> s23 = Avx2.PackSignedSaturate(i2, i3);
-                        Vector256<sbyte> packed = Avx2.PackSignedSaturate(s01, s23);
+                        Vector256<short> s01 = Vector256.NarrowWithSaturation(i0, i1);
+                        Vector256<short> s23 = Vector256.NarrowWithSaturation(i2, i3);
+                        Vector256<sbyte> packed = Vector256.NarrowWithSaturation(s01, s23);
 
-                        Vector256<int> permuted = Avx2.PermuteVar8x32(packed.AsInt32(), permMask);
-                        permuted.AsByte().StoreUnsafe(ref Unsafe.AsRef<byte>((byte*)qs));
+                        packed.StoreUnsafe(ref Unsafe.AsRef<sbyte>(qs));
                     }
                 }
             }
@@ -379,31 +378,32 @@ public static unsafe class FusedOps
         int blockCount = dim / Q8_K_GroupSize;
         float* normBuf = stackalloc float[Q8_K_GroupSize];
 
-        if (Avx2.IsSupported)
+        if (Vector256.IsHardwareAccelerated)
         {
             fixed (float* wPtr = weight)
             {
                 Vector256<float> vScale = Vector256.Create(rmsScale);
-                Vector256<int> permMask = Vector256.Create(0, 4, 1, 5, 2, 6, 3, 7);
 
                 for (int block = 0; block < blockCount; block++)
                 {
                     float* blockInput = input + block * Q8_K_GroupSize;
                     byte* blockDst = dest + block * Q8_K_BlockBytes;
                     float* wBlock = wPtr + block * Q8_K_GroupSize;
+                    ref float blockInputRef = ref Unsafe.AsRef<float>(blockInput);
+                    ref float wBlockRef = ref Unsafe.AsRef<float>(wBlock);
+                    ref float normBufRef = ref Unsafe.AsRef<float>(normBuf);
 
                     // Normalize 256 floats: input * rmsScale * weight → normBuf (32 × 8-wide)
                     // Interleave with maxAbs accumulation to avoid a second pass over normBuf
                     Vector256<float> maxVec = Vector256<float>.Zero;
                     for (int j = 0; j < Q8_K_GroupSize; j += 8)
                     {
-                        var norm = Avx.Multiply(Avx.Multiply(
-                            Avx.LoadVector256(blockInput + j), vScale),
-                            Avx.LoadVector256(wBlock + j));
-                        Avx.Store(normBuf + j, norm);
-                        maxVec = Avx.Max(maxVec, Vector256.Abs(norm));
+                        var norm = (Vector256.LoadUnsafe(ref blockInputRef, (nuint)j) * vScale)
+                            * Vector256.LoadUnsafe(ref wBlockRef, (nuint)j);
+                        norm.StoreUnsafe(ref normBufRef, (nuint)j);
+                        maxVec = Vector256.MaxNative(maxVec, Vector256.Abs(norm));
                     }
-                    float maxAbs = HorizontalMaxAvx2(maxVec);
+                    float maxAbs = HorizontalMaxVector256(maxVec);
 
                     float scale = maxAbs / 127.0f;
                     Unsafe.WriteUnaligned(blockDst, scale);
@@ -427,22 +427,22 @@ public static unsafe class FusedOps
                         {
                             float* chunkSrc = normBuf + chunk * 32;
                             sbyte* chunkDst = qs + chunk * 32;
+                            ref float chunkSrcRef = ref Unsafe.AsRef<float>(chunkSrc);
 
-                            Vector256<int> i0 = Avx.ConvertToVector256Int32(
-                                Avx.Multiply(Avx.LoadVector256(chunkSrc), vInvScale));
-                            Vector256<int> i1 = Avx.ConvertToVector256Int32(
-                                Avx.Multiply(Avx.LoadVector256(chunkSrc + 8), vInvScale));
-                            Vector256<int> i2 = Avx.ConvertToVector256Int32(
-                                Avx.Multiply(Avx.LoadVector256(chunkSrc + 16), vInvScale));
-                            Vector256<int> i3 = Avx.ConvertToVector256Int32(
-                                Avx.Multiply(Avx.LoadVector256(chunkSrc + 24), vInvScale));
+                            Vector256<int> i0 = Vector256.ConvertToInt32Native(
+                                Vector256.Round(Vector256.LoadUnsafe(ref chunkSrcRef) * vInvScale));
+                            Vector256<int> i1 = Vector256.ConvertToInt32Native(
+                                Vector256.Round(Vector256.LoadUnsafe(ref chunkSrcRef, 8) * vInvScale));
+                            Vector256<int> i2 = Vector256.ConvertToInt32Native(
+                                Vector256.Round(Vector256.LoadUnsafe(ref chunkSrcRef, 16) * vInvScale));
+                            Vector256<int> i3 = Vector256.ConvertToInt32Native(
+                                Vector256.Round(Vector256.LoadUnsafe(ref chunkSrcRef, 24) * vInvScale));
 
-                            Vector256<short> s01 = Avx2.PackSignedSaturate(i0, i1);
-                            Vector256<short> s23 = Avx2.PackSignedSaturate(i2, i3);
-                            Vector256<sbyte> packed = Avx2.PackSignedSaturate(s01, s23);
+                            Vector256<short> s01 = Vector256.NarrowWithSaturation(i0, i1);
+                            Vector256<short> s23 = Vector256.NarrowWithSaturation(i2, i3);
+                            Vector256<sbyte> packed = Vector256.NarrowWithSaturation(s01, s23);
 
-                            Vector256<int> permuted = Avx2.PermuteVar8x32(packed.AsInt32(), permMask);
-                            permuted.AsByte().StoreUnsafe(ref Unsafe.AsRef<byte>((byte*)chunkDst));
+                            packed.StoreUnsafe(ref Unsafe.AsRef<sbyte>(chunkDst));
                         }
 
                         // Compute bsums: sum each group of 16 consecutive sbyte values
@@ -515,16 +515,16 @@ public static unsafe class FusedOps
     /// Reduces a 256-bit float vector to its horizontal maximum (scalar).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float HorizontalMaxAvx2(Vector256<float> v)
+    private static float HorizontalMaxVector256(Vector256<float> v)
     {
         Vector128<float> lo = v.GetLower();
         Vector128<float> hi = v.GetUpper();
-        Vector128<float> max128 = Sse.Max(lo, hi);
+        Vector128<float> max128 = Vector128.MaxNative(lo, hi);
 
-        Vector128<float> shuf = Sse.MoveHighToLow(max128, max128);
-        max128 = Sse.Max(max128, shuf);
-        shuf = Sse.Shuffle(max128, max128, 0b_00_01_00_01);
-        max128 = Sse.Max(max128, shuf);
+        Vector128<float> shuf = Vector128.ShuffleNative(max128, Vector128.Create(2, 3, 0, 1));
+        max128 = Vector128.MaxNative(max128, shuf);
+        shuf = Vector128.ShuffleNative(max128, Vector128.Create(1, 0, 3, 2));
+        max128 = Vector128.MaxNative(max128, shuf);
 
         return max128.ToScalar();
     }

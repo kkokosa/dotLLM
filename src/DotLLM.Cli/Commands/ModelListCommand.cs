@@ -12,7 +12,7 @@ internal sealed class ModelListCommand : Command<ModelListCommand.Settings>
 {
     public sealed class Settings : CommandSettings;
 
-    public override int Execute(CommandContext context, Settings settings)
+    protected override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         var models = HuggingFaceDownloader.ListLocalModels();
 
@@ -42,5 +42,4 @@ internal sealed class ModelListCommand : Command<ModelListCommand.Settings>
         AnsiConsole.Write(table);
         return 0;
     }
-
 }

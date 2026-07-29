@@ -23,7 +23,7 @@ internal sealed class DebugGgufTensorsCommand : Command<DebugGgufTensorsCommand.
         public string? Filter { get; set; }
     }
 
-    public override int Execute(CommandContext context, Settings settings)
+    protected override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         var resolvedPath = GgufFileResolver.Resolve(settings.FilePath);
         if (resolvedPath is null)

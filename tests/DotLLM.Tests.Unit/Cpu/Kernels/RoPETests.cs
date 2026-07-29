@@ -1,4 +1,4 @@
-using System.Runtime.Intrinsics.X86;
+using System.Runtime.Intrinsics;
 using DotLLM.Cpu.Kernels;
 using Xunit;
 
@@ -130,7 +130,7 @@ public sealed class RoPETests
     [Fact]
     public void ApplyRotation_ScalarMatchesSIMD()
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return; // SIMD path not available
 
         const int headDim = 128;
@@ -233,7 +233,7 @@ public sealed class RoPETests
     [Fact]
     public void Execute_ScalarMatchesSIMD_LargeInput()
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         const int headDim = 128;

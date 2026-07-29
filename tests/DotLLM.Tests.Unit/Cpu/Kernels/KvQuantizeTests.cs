@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using DotLLM.Cpu.Kernels;
 using Xunit;
 
@@ -40,7 +41,7 @@ public sealed unsafe class KvQuantizeTests
     [Fact]
     public void Q4_0_Avx2_MatchesScalar()
     {
-        if (!System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return; // Skip on non-AVX2 hardware
 
         float[] input = GenerateTestData(BlockSize * 8);
@@ -52,7 +53,7 @@ public sealed unsafe class KvQuantizeTests
         fixed (byte* ap = quantAvx2)
         {
             KvQuantize.F32ToQ4_0Scalar(ip, sp, input.Length);
-            KvQuantize.F32ToQ4_0Avx2(ip, ap, input.Length);
+            KvQuantize.F32ToQ4_0Vector256(ip, ap, input.Length);
         }
 
         Assert.Equal(quantScalar, quantAvx2);
@@ -80,7 +81,7 @@ public sealed unsafe class KvQuantizeTests
     [Fact]
     public void Q4_0_Dequant_Avx2_MatchesScalar()
     {
-        if (!System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         float[] input = GenerateTestData(BlockSize * 4);
@@ -99,7 +100,7 @@ public sealed unsafe class KvQuantizeTests
         fixed (float* ap = outAvx2)
         {
             KvQuantize.Q4_0ToF32Scalar(qp, sp, input.Length);
-            KvQuantize.Q4_0ToF32Avx2(qp, ap, input.Length);
+            KvQuantize.Q4_0ToF32Vector256(qp, ap, input.Length);
         }
 
         for (int i = 0; i < input.Length; i++)
@@ -138,7 +139,7 @@ public sealed unsafe class KvQuantizeTests
     [Fact]
     public void Q8_0_Dequant_Avx2_MatchesScalar()
     {
-        if (!System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         float[] input = GenerateTestData(BlockSize * 4);
@@ -157,7 +158,7 @@ public sealed unsafe class KvQuantizeTests
         fixed (float* ap = outAvx2)
         {
             KvQuantize.Q8_0ToF32Scalar(qp, sp, input.Length);
-            KvQuantize.Q8_0ToF32Avx2(qp, ap, input.Length);
+            KvQuantize.Q8_0ToF32Vector256(qp, ap, input.Length);
         }
 
         for (int i = 0; i < input.Length; i++)

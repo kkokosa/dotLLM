@@ -1,7 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 
 namespace DotLLM.Cpu.Kernels;
 
@@ -60,8 +59,8 @@ public static unsafe partial class Dequantize
                 $"Q6_K element count must be a multiple of {KQuantGroupSize}, got {elementCount}",
                 nameof(elementCount));
 
-        if (Avx2.IsSupported)
-            DequantizeQ6_KAvx2(src, elementCount, dest);
+        if (Vector256.IsHardwareAccelerated)
+            DequantizeQ6_KVector256(src, elementCount, dest);
         else
             DequantizeQ6_KScalar(src, elementCount, dest);
     }
@@ -116,10 +115,10 @@ public static unsafe partial class Dequantize
     }
 
     /// <summary>
-    /// AVX2-accelerated Q6_K dequantization. Processes 32 values per iteration.
+    /// Vector256-accelerated Q6_K dequantization. Processes 32 values per iteration.
     /// </summary>
     [SkipLocalsInit]
-    internal static void DequantizeQ6_KAvx2(nint src, long elementCount, Span<float> dest)
+    internal static void DequantizeQ6_KVector256(nint src, long elementCount, Span<float> dest)
     {
         long blockCount = elementCount / KQuantGroupSize;
         byte* blockBase = (byte*)src;
@@ -157,48 +156,44 @@ public static unsafe partial class Dequantize
                     Vector256<byte> qlRaw = Unsafe.ReadUnaligned<Vector256<byte>>(ql + qlBase);
                     Vector256<byte> nibbles;
                     if (isUpper)
-                        nibbles = Avx2.And(
-                            Avx2.ShiftRightLogical(qlRaw.AsUInt16(), 4).AsByte(), mask0F);
+                        nibbles = Vector256.ShiftRightLogical(qlRaw.AsUInt16(), 4).AsByte() & mask0F;
                     else
-                        nibbles = Avx2.And(qlRaw, mask0F);
+                        nibbles = qlRaw & mask0F;
 
                     // Load 32 qh bytes, extract 2-bit field at qhShift
                     Vector256<byte> qhVec = Unsafe.ReadUnaligned<Vector256<byte>>(qh + qhBase);
                     Vector256<byte> qhBits = qhShift switch
                     {
-                        0 => Avx2.And(qhVec, mask03),
-                        2 => Avx2.And(Avx2.ShiftRightLogical(qhVec.AsUInt16(), 2).AsByte(), mask03),
-                        4 => Avx2.And(Avx2.ShiftRightLogical(qhVec.AsUInt16(), 4).AsByte(), mask03),
-                        _ => Avx2.And(Avx2.ShiftRightLogical(qhVec.AsUInt16(), 6).AsByte(), mask03),
+                        0 => qhVec & mask03,
+                        2 => Vector256.ShiftRightLogical(qhVec.AsUInt16(), 2).AsByte() & mask03,
+                        4 => Vector256.ShiftRightLogical(qhVec.AsUInt16(), 4).AsByte() & mask03,
+                        _ => Vector256.ShiftRightLogical(qhVec.AsUInt16(), 6).AsByte() & mask03,
                     };
 
                     // Combine: q6 = nibble | (qh2 << 4), mask to 6 bits
-                    Vector256<byte> q6 = Avx2.And(
-                        Avx2.Or(nibbles, Avx2.ShiftLeftLogical(qhBits.AsUInt16(), 4).AsByte()),
-                        Vector256.Create((byte)0x3F));
+                    Vector256<byte> q6 = (nibbles | Vector256.ShiftLeft(qhBits.AsUInt16(), 4).AsByte())
+                        & Vector256.Create((byte)0x3F);
 
-                    Vector256<sbyte> q6signed = Avx2.Subtract(q6.AsSByte(), bias32);
+                    Vector256<sbyte> q6signed = q6.AsSByte() - bias32;
 
                     // Two sub-blocks of 16: lower 128 bits → scales[sub], upper → scales[sub+1]
                     float s0 = d * scales[sub];
                     float s1 = d * scales[sub + 1];
 
-                    Vector128<sbyte> q6Lo = q6signed.GetLower();
-                    Vector128<sbyte> q6Hi = q6signed.GetUpper();
+                    Vector256<short> shorts0 = Vector256.WidenLower(q6signed);
+                    Vector256<int> ints0a = Vector256.WidenLower(shorts0);
+                    Vector256<int> ints0b = Vector256.WidenUpper(shorts0);
 
-                    Vector256<short> shorts0 = Avx2.ConvertToVector256Int16(q6Lo);
-                    Vector256<int> ints0a = Avx2.ConvertToVector256Int32(shorts0.GetLower());
-                    Vector256<int> ints0b = Avx2.ConvertToVector256Int32(shorts0.GetUpper());
+                    ref float outRef = ref Unsafe.AsRef<float>(outPtr);
+                    (Vector256.ConvertToSingle(ints0a) * Vector256.Create(s0)).StoreUnsafe(ref outRef);
+                    (Vector256.ConvertToSingle(ints0b) * Vector256.Create(s0)).StoreUnsafe(ref Unsafe.Add(ref outRef, 8));
 
-                    Avx.Store(outPtr, Avx.Multiply(Avx.ConvertToVector256Single(ints0a), Vector256.Create(s0)));
-                    Avx.Store(outPtr + 8, Avx.Multiply(Avx.ConvertToVector256Single(ints0b), Vector256.Create(s0)));
+                    Vector256<short> shorts1 = Vector256.WidenUpper(q6signed);
+                    Vector256<int> ints1a = Vector256.WidenLower(shorts1);
+                    Vector256<int> ints1b = Vector256.WidenUpper(shorts1);
 
-                    Vector256<short> shorts1 = Avx2.ConvertToVector256Int16(q6Hi);
-                    Vector256<int> ints1a = Avx2.ConvertToVector256Int32(shorts1.GetLower());
-                    Vector256<int> ints1b = Avx2.ConvertToVector256Int32(shorts1.GetUpper());
-
-                    Avx.Store(outPtr + 16, Avx.Multiply(Avx.ConvertToVector256Single(ints1a), Vector256.Create(s1)));
-                    Avx.Store(outPtr + 24, Avx.Multiply(Avx.ConvertToVector256Single(ints1b), Vector256.Create(s1)));
+                    (Vector256.ConvertToSingle(ints1a) * Vector256.Create(s1)).StoreUnsafe(ref Unsafe.Add(ref outRef, 16));
+                    (Vector256.ConvertToSingle(ints1b) * Vector256.Create(s1)).StoreUnsafe(ref Unsafe.Add(ref outRef, 24));
 
                     outPtr += 32;
                 }
@@ -219,8 +214,8 @@ public static unsafe partial class Dequantize
                 $"Q4_K element count must be a multiple of {KQuantGroupSize}, got {elementCount}",
                 nameof(elementCount));
 
-        if (Avx2.IsSupported)
-            DequantizeQ4_KAvx2(src, elementCount, dest);
+        if (Vector256.IsHardwareAccelerated)
+            DequantizeQ4_KVector256(src, elementCount, dest);
         else
             DequantizeQ4_KScalar(src, elementCount, dest);
     }
@@ -269,9 +264,9 @@ public static unsafe partial class Dequantize
         }
     }
 
-    /// <summary>AVX2-accelerated Q4_K dequantization.</summary>
+    /// <summary>Vector256-accelerated Q4_K dequantization.</summary>
     [SkipLocalsInit]
-    internal static void DequantizeQ4_KAvx2(nint src, long elementCount, Span<float> dest)
+    internal static void DequantizeQ4_KVector256(nint src, long elementCount, Span<float> dest)
     {
         long blockCount = elementCount / KQuantGroupSize;
         byte* blockBase = (byte*)src;
@@ -303,15 +298,12 @@ public static unsafe partial class Dequantize
 
                     // Load 32 bytes of qs for this pair
                     Vector256<byte> raw = Unsafe.ReadUnaligned<Vector256<byte>>(qs + (sb / 2) * 32);
-                    Vector256<byte> lo = Avx2.And(raw, mask0F);
-                    Vector256<byte> hi = Avx2.And(
-                        Avx2.ShiftRightLogical(raw.AsUInt16(), 4).AsByte(), mask0F);
+                    Vector256<byte> lo = raw & mask0F;
+                    Vector256<byte> hi = Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F;
 
                     // sb: lower nibbles (32 values), sb+1: upper nibbles (32 values)
-                    EmitDequantQ4K_16(lo.GetLower(), sc0, mn0, outPtr);
-                    EmitDequantQ4K_16(lo.GetUpper(), sc0, mn0, outPtr + 16);
-                    EmitDequantQ4K_16(hi.GetLower(), sc1, mn1, outPtr + 32);
-                    EmitDequantQ4K_16(hi.GetUpper(), sc1, mn1, outPtr + 48);
+                    EmitDequantQ4K_32(lo, sc0, mn0, outPtr);
+                    EmitDequantQ4K_32(hi, sc1, mn1, outPtr + 32);
 
                     outPtr += 64;
                 }
@@ -321,19 +313,26 @@ public static unsafe partial class Dequantize
         }
     }
 
-    /// <summary>Converts 16 unsigned nibbles to float: val = sc * nibble - mn.</summary>
+    /// <summary>Converts 32 unsigned nibbles to float: val = sc * nibble - mn.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void EmitDequantQ4K_16(Vector128<byte> nibbles, float sc, float mn, float* outPtr)
+    private static void EmitDequantQ4K_32(Vector256<byte> nibbles, float sc, float mn, float* outPtr)
     {
-        Vector256<short> shorts = Avx2.ConvertToVector256Int16(nibbles);
-        Vector256<int> ints0 = Avx2.ConvertToVector256Int32(shorts.GetLower());
-        Vector256<int> ints1 = Avx2.ConvertToVector256Int32(shorts.GetUpper());
+        Vector256<sbyte> signedNibbles = nibbles.AsSByte();
+        Vector256<short> shorts0 = Vector256.WidenLower(signedNibbles);
+        Vector256<short> shorts1 = Vector256.WidenUpper(signedNibbles);
+        Vector256<int> ints0 = Vector256.WidenLower(shorts0);
+        Vector256<int> ints1 = Vector256.WidenUpper(shorts0);
+        Vector256<int> ints2 = Vector256.WidenLower(shorts1);
+        Vector256<int> ints3 = Vector256.WidenUpper(shorts1);
 
         Vector256<float> vSc = Vector256.Create(sc);
         Vector256<float> vMn = Vector256.Create(mn);
+        ref float outRef = ref Unsafe.AsRef<float>(outPtr);
 
-        Avx.Store(outPtr, Avx.Subtract(Avx.Multiply(Avx.ConvertToVector256Single(ints0), vSc), vMn));
-        Avx.Store(outPtr + 8, Avx.Subtract(Avx.Multiply(Avx.ConvertToVector256Single(ints1), vSc), vMn));
+        (Vector256.ConvertToSingle(ints0) * vSc - vMn).StoreUnsafe(ref outRef);
+        (Vector256.ConvertToSingle(ints1) * vSc - vMn).StoreUnsafe(ref Unsafe.Add(ref outRef, 8));
+        (Vector256.ConvertToSingle(ints2) * vSc - vMn).StoreUnsafe(ref Unsafe.Add(ref outRef, 16));
+        (Vector256.ConvertToSingle(ints3) * vSc - vMn).StoreUnsafe(ref Unsafe.Add(ref outRef, 24));
     }
 
     // ──────────────────── Q5_K ────────────────────
@@ -347,8 +346,8 @@ public static unsafe partial class Dequantize
                 $"Q5_K element count must be a multiple of {KQuantGroupSize}, got {elementCount}",
                 nameof(elementCount));
 
-        if (Avx2.IsSupported)
-            DequantizeQ5_KAvx2(src, elementCount, dest);
+        if (Vector256.IsHardwareAccelerated)
+            DequantizeQ5_KVector256(src, elementCount, dest);
         else
             DequantizeQ5_KScalar(src, elementCount, dest);
     }
@@ -402,9 +401,9 @@ public static unsafe partial class Dequantize
         }
     }
 
-    /// <summary>AVX2-accelerated Q5_K dequantization.</summary>
+    /// <summary>Vector256-accelerated Q5_K dequantization.</summary>
     [SkipLocalsInit]
-    internal static void DequantizeQ5_KAvx2(nint src, long elementCount, Span<float> dest)
+    internal static void DequantizeQ5_KVector256(nint src, long elementCount, Span<float> dest)
     {
         long blockCount = elementCount / KQuantGroupSize;
         byte* blockBase = (byte*)src;
@@ -423,6 +422,7 @@ public static unsafe partial class Dequantize
                 UnpackQ4Q5Scales(blockBase + 4, scBuf, mnBuf);
                 byte* qh = blockBase + 16;
                 byte* qs = blockBase + 48;
+                Vector256<byte> qhVec = Unsafe.ReadUnaligned<Vector256<byte>>(qh);
 
                 // Process 2 sub-blocks at a time (64 values), matching llama.cpp.
                 // Lower nibbles → first 32 elements, upper nibbles → next 32.
@@ -438,32 +438,27 @@ public static unsafe partial class Dequantize
 
                     // Load 32 bytes of qs for this pair
                     Vector256<byte> raw = Unsafe.ReadUnaligned<Vector256<byte>>(qs + pairIdx * 32);
-                    Vector256<byte> lo = Avx2.And(raw, mask0F);
-                    Vector256<byte> hi = Avx2.And(
-                        Avx2.ShiftRightLogical(raw.AsUInt16(), 4).AsByte(), mask0F);
+                    Vector256<byte> lo = raw & mask0F;
+                    Vector256<byte> hi = Vector256.ShiftRightLogical(raw.AsUInt16(), 4).AsByte() & mask0F;
 
                     // Extract 5th bits from qh: bit sb from each byte for lo, bit sb+1 for hi
-                    Vector256<byte> qhVec = Unsafe.ReadUnaligned<Vector256<byte>>(qh);
-
                     byte bitMask0 = (byte)(1 << sb);
-                    Vector256<byte> hasBit0 = Avx2.CompareEqual(
-                        Avx2.And(qhVec, Vector256.Create(bitMask0)), Vector256.Create(bitMask0));
-                    Vector256<byte> bit5_0 = Avx2.And(hasBit0, Vector256.Create((byte)16));
+                    Vector256<byte> hasBit0 = Vector256.Equals(
+                        qhVec & Vector256.Create(bitMask0), Vector256.Create(bitMask0));
+                    Vector256<byte> bit5_0 = hasBit0 & Vector256.Create((byte)16);
 
                     byte bitMask1 = (byte)(1 << (sb + 1));
-                    Vector256<byte> hasBit1 = Avx2.CompareEqual(
-                        Avx2.And(qhVec, Vector256.Create(bitMask1)), Vector256.Create(bitMask1));
-                    Vector256<byte> bit5_1 = Avx2.And(hasBit1, Vector256.Create((byte)16));
+                    Vector256<byte> hasBit1 = Vector256.Equals(
+                        qhVec & Vector256.Create(bitMask1), Vector256.Create(bitMask1));
+                    Vector256<byte> bit5_1 = hasBit1 & Vector256.Create((byte)16);
 
                     // Combine nibbles with 5th bit
-                    Vector256<byte> q5_sb0 = Avx2.Or(lo, bit5_0);
-                    Vector256<byte> q5_sb1 = Avx2.Or(hi, bit5_1);
+                    Vector256<byte> q5_sb0 = lo | bit5_0;
+                    Vector256<byte> q5_sb1 = hi | bit5_1;
 
                     // sb: 32 values from lower nibbles + bit, sb+1: 32 values from upper nibbles + bit
-                    EmitDequantQ4K_16(q5_sb0.GetLower(), sc0, mn0, outPtr);
-                    EmitDequantQ4K_16(q5_sb0.GetUpper(), sc0, mn0, outPtr + 16);
-                    EmitDequantQ4K_16(q5_sb1.GetLower(), sc1, mn1, outPtr + 32);
-                    EmitDequantQ4K_16(q5_sb1.GetUpper(), sc1, mn1, outPtr + 48);
+                    EmitDequantQ4K_32(q5_sb0, sc0, mn0, outPtr);
+                    EmitDequantQ4K_32(q5_sb1, sc1, mn1, outPtr + 32);
 
                     outPtr += 64;
                 }

@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Cpu.Kernels;
 using Xunit;
@@ -109,7 +110,7 @@ public sealed unsafe class MatMulTests
     [Fact]
     public void VecDotQ8_0_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         var rng = new Random(42);
@@ -124,7 +125,7 @@ public sealed unsafe class MatMulTests
             FillRandomQ8_0Blocks((byte*)bPtr, blockCount, rng);
 
             float scalar = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
-            float avx2 = MatMul.VecDotQ8_0Avx2((byte*)aPtr, (byte*)bPtr, blockCount);
+            float avx2 = MatMul.VecDotQ8_0Vector256((byte*)aPtr, (byte*)bPtr, blockCount);
 
             Assert.Equal(scalar, avx2, 1e-2f);
         }
@@ -146,7 +147,7 @@ public sealed unsafe class MatMulTests
     [InlineData(344)]
     public void VecDotQ8_0_OptimizedAvx2_MatchesScalar(int blockCount)
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         var rng = new Random(42);
@@ -160,7 +161,7 @@ public sealed unsafe class MatMulTests
             FillRandomQ8_0Blocks((byte*)bPtr, blockCount, rng);
 
             float scalar = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
-            float avx2 = MatMul.VecDotQ8_0Avx2((byte*)aPtr, (byte*)bPtr, blockCount);
+            float avx2 = MatMul.VecDotQ8_0Vector256((byte*)aPtr, (byte*)bPtr, blockCount);
 
             Assert.Equal(scalar, avx2, 1e-2f);
         }
@@ -197,7 +198,7 @@ public sealed unsafe class MatMulTests
             FillRandomQ8_0Blocks((byte*)bPtr, blockCount, rng);
 
             float scalar = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
-            float avx512 = MatMul.VecDotQ8_0Avx512((byte*)aPtr, (byte*)bPtr, blockCount);
+            float avx512 = MatMul.VecDotQ8_0Vector512((byte*)aPtr, (byte*)bPtr, blockCount);
 
             Assert.Equal(scalar, avx512, 1e-2f);
         }
@@ -216,7 +217,7 @@ public sealed unsafe class MatMulTests
     [InlineData(344)]
     public void VecDotQ8_0_4Row_MatchesSingleRow(int blockCount)
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         var rng = new Random(42);
@@ -236,14 +237,14 @@ public sealed unsafe class MatMulTests
             FillRandomQ8_0Blocks((byte*)x, blockCount, rng);
 
             // Single-row reference.
-            float r0 = MatMul.VecDotQ8_0Avx2((byte*)w0, (byte*)x, blockCount);
-            float r1 = MatMul.VecDotQ8_0Avx2((byte*)w1, (byte*)x, blockCount);
-            float r2 = MatMul.VecDotQ8_0Avx2((byte*)w2, (byte*)x, blockCount);
-            float r3 = MatMul.VecDotQ8_0Avx2((byte*)w3, (byte*)x, blockCount);
+            float r0 = MatMul.VecDotQ8_0Vector256((byte*)w0, (byte*)x, blockCount);
+            float r1 = MatMul.VecDotQ8_0Vector256((byte*)w1, (byte*)x, blockCount);
+            float r2 = MatMul.VecDotQ8_0Vector256((byte*)w2, (byte*)x, blockCount);
+            float r3 = MatMul.VecDotQ8_0Vector256((byte*)w3, (byte*)x, blockCount);
 
             // Multi-row batched.
             float* results = stackalloc float[4];
-            MatMul.VecDotQ8_0Avx2_4Rows((byte*)w0, (byte*)w1, (byte*)w2, (byte*)w3,
+            MatMul.VecDotQ8_0Vector256_4Rows((byte*)w0, (byte*)w1, (byte*)w2, (byte*)w3,
                 (byte*)x, blockCount, results);
 
             Assert.Equal(r0, results[0], 1e-2f);
@@ -266,7 +267,7 @@ public sealed unsafe class MatMulTests
     [Fact]
     public void VecDotQ8_0_AllZeroScales()
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         const int blockCount = 4;
@@ -291,7 +292,7 @@ public sealed unsafe class MatMulTests
             }
 
             float scalar = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
-            float avx2 = MatMul.VecDotQ8_0Avx2((byte*)aPtr, (byte*)bPtr, blockCount);
+            float avx2 = MatMul.VecDotQ8_0Vector256((byte*)aPtr, (byte*)bPtr, blockCount);
 
             Assert.Equal(0f, scalar);
             Assert.Equal(0f, avx2);
@@ -306,7 +307,7 @@ public sealed unsafe class MatMulTests
     [Fact]
     public void VecDotQ8_0_MaxValues()
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         const int blockCount = 4;
@@ -330,7 +331,7 @@ public sealed unsafe class MatMulTests
             }
 
             float scalar = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
-            float avx2 = MatMul.VecDotQ8_0Avx2((byte*)aPtr, (byte*)bPtr, blockCount);
+            float avx2 = MatMul.VecDotQ8_0Vector256((byte*)aPtr, (byte*)bPtr, blockCount);
 
             Assert.True(float.IsFinite(scalar));
             Assert.Equal(scalar, avx2, 1e-2f);
@@ -349,7 +350,7 @@ public sealed unsafe class MatMulTests
     [InlineData(7)]
     public void VecDotQ8_0_OddBlockCount(int blockCount)
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         var rng = new Random(42);
@@ -363,13 +364,13 @@ public sealed unsafe class MatMulTests
             FillRandomQ8_0Blocks((byte*)bPtr, blockCount, rng);
 
             float scalar = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
-            float avx2 = MatMul.VecDotQ8_0Avx2((byte*)aPtr, (byte*)bPtr, blockCount);
+            float avx2 = MatMul.VecDotQ8_0Vector256((byte*)aPtr, (byte*)bPtr, blockCount);
 
             Assert.Equal(scalar, avx2, 1e-2f);
 
             if (Avx512BW.IsSupported)
             {
-                float avx512 = MatMul.VecDotQ8_0Avx512((byte*)aPtr, (byte*)bPtr, blockCount);
+                float avx512 = MatMul.VecDotQ8_0Vector512((byte*)aPtr, (byte*)bPtr, blockCount);
                 Assert.Equal(scalar, avx512, 1e-2f);
             }
         }
@@ -446,7 +447,7 @@ public sealed unsafe class MatMulTests
     [Fact]
     public void QuantizeF32ToQ8_0_Avx2_MatchesScalar()
     {
-        if (!Avx2.IsSupported)
+        if (!Vector256.IsHardwareAccelerated)
             return;
 
         var rng = new Random(42);
@@ -463,7 +464,7 @@ public sealed unsafe class MatMulTests
             fixed (float* srcPtr = src)
             {
                 MatMul.QuantizeF32ToQ8_0Scalar(srcPtr, (byte*)scalarPtr, k);
-                MatMul.QuantizeF32ToQ8_0Avx2(srcPtr, (byte*)avx2Ptr, k);
+                MatMul.QuantizeF32ToQ8_0Vector256(srcPtr, (byte*)avx2Ptr, k);
             }
 
             // Byte-for-byte comparison.

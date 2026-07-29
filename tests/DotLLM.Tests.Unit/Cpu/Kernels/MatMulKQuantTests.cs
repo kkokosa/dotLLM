@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Kernels;
@@ -59,7 +60,7 @@ public sealed unsafe class MatMulKQuantTests
     [Fact]
     public void QuantizeF32ToQ8_K_Avx2MatchesScalar()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int k = 512; // 2 blocks
         var rng = new Random(42);
@@ -74,7 +75,7 @@ public sealed unsafe class MatMulKQuantTests
         fixed (byte* dScalar = destScalar, dAvx2 = destAvx2)
         {
             MatMul.QuantizeF32ToQ8_KScalar(sp, dScalar, k);
-            MatMul.QuantizeF32ToQ8_KAvx2(sp, dAvx2, k);
+            MatMul.QuantizeF32ToQ8_KVector256(sp, dAvx2, k);
 
             // Scales must match exactly
             for (int b = 0; b < k / Q8_K_GroupSize; b++)
@@ -156,7 +157,7 @@ public sealed unsafe class MatMulKQuantTests
     [Fact]
     public void VecDotQ4_K_Q8_K_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int superBlockCount = 4;
         var rng = new Random(42);
@@ -166,7 +167,7 @@ public sealed unsafe class MatMulKQuantTests
         try
         {
             float scalar = MatMul.VecDotQ4_K_Q8_KScalar((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
-            float avx2 = MatMul.VecDotQ4_K_Q8_KAvx2((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
+            float avx2 = MatMul.VecDotQ4_K_Q8_KVector256((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
 
             Assert.Equal(scalar, avx2, MathF.Abs(scalar) * 0.01f + 0.1f);
         }
@@ -219,7 +220,7 @@ public sealed unsafe class MatMulKQuantTests
     [Fact]
     public void VecDotQ6_K_Q8_K_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int superBlockCount = 4;
         var rng = new Random(42);
@@ -232,7 +233,7 @@ public sealed unsafe class MatMulKQuantTests
                 Unsafe.WriteUnaligned((byte*)qkPtr + b * Q6_K_BlockBytes + 208, (Half)0.01f);
 
             float scalar = MatMul.VecDotQ6_K_Q8_KScalar((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
-            float avx2 = MatMul.VecDotQ6_K_Q8_KAvx2((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
+            float avx2 = MatMul.VecDotQ6_K_Q8_KVector256((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
 
             Assert.Equal(scalar, avx2, MathF.Abs(scalar) * 0.01f + 0.1f);
         }
@@ -283,7 +284,7 @@ public sealed unsafe class MatMulKQuantTests
     [Fact]
     public void VecDotQ5_K_Q8_K_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         const int superBlockCount = 4;
         var rng = new Random(42);
@@ -293,7 +294,7 @@ public sealed unsafe class MatMulKQuantTests
         try
         {
             float scalar = MatMul.VecDotQ5_K_Q8_KScalar((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
-            float avx2 = MatMul.VecDotQ5_K_Q8_KAvx2((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
+            float avx2 = MatMul.VecDotQ5_K_Q8_KVector256((byte*)qkPtr, (byte*)q8kPtr, superBlockCount);
 
             Assert.Equal(scalar, avx2, MathF.Abs(scalar) * 0.01f + 0.1f);
         }

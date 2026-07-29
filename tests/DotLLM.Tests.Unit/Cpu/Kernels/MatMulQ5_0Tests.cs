@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Kernels;
@@ -58,7 +59,7 @@ public sealed unsafe class MatMulQ5_0Tests
     [InlineData(18)]
     public void VecDotQ5_0Q8_0_ScalarMatchesAvx2(int blockCount)
     {
-        if (!Avx2.IsSupported) return;
+        if (!Vector256.IsHardwareAccelerated) return;
 
         var rng = new Random(42);
         nint q5Ptr = AllocRandomQ5_0Blocks(blockCount, rng);
@@ -66,7 +67,7 @@ public sealed unsafe class MatMulQ5_0Tests
         try
         {
             float scalar = MatMul.VecDotQ5_0Q8_0Scalar((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
-            float avx2 = MatMul.VecDotQ5_0Q8_0Avx2((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
+            float avx2 = MatMul.VecDotQ5_0Q8_0Vector256((byte*)q5Ptr, (byte*)q8Ptr, blockCount);
 
             Assert.Equal(scalar, avx2, MathF.Abs(scalar) * 1e-5f + 1e-4f);
         }

@@ -1,7 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
 
 namespace DotLLM.Cpu.Kernels;
@@ -53,8 +52,8 @@ public static unsafe partial class KvQuantize
                 $"elementCount must be a multiple of {BlockSize}, got {elementCount}",
                 nameof(elementCount));
 
-        if (Avx2.IsSupported)
-            Q8_0ToF32Avx2(src, dest, elementCount);
+        if (Vector256.IsHardwareAccelerated)
+            Q8_0ToF32Vector256(src, dest, elementCount);
         else
             Q8_0ToF32Scalar(src, dest, elementCount);
     }
@@ -78,7 +77,7 @@ public static unsafe partial class KvQuantize
     }
 
     [SkipLocalsInit]
-    internal static void Q8_0ToF32Avx2(byte* src, float* dest, int elementCount)
+    internal static void Q8_0ToF32Vector256(byte* src, float* dest, int elementCount)
     {
         int blockCount = elementCount / BlockSize;
 
@@ -90,18 +89,19 @@ public static unsafe partial class KvQuantize
             float d = (float)Unsafe.ReadUnaligned<Half>(blockSrc);
             Vector256<float> vScale = Vector256.Create(d);
             sbyte* qs = (sbyte*)(blockSrc + 2);
+            ref float blockDstRef = ref Unsafe.AsRef<float>(blockDst);
+            Vector256<sbyte> bytes = Vector256.LoadUnsafe(ref Unsafe.AsRef<sbyte>(qs));
+            Vector256<short> ints16Lo = Vector256.WidenLower(bytes);
+            Vector256<short> ints16Hi = Vector256.WidenUpper(bytes);
+            Vector256<int> i0 = Vector256.WidenLower(ints16Lo);
+            Vector256<int> i1 = Vector256.WidenUpper(ints16Lo);
+            Vector256<int> i2 = Vector256.WidenLower(ints16Hi);
+            Vector256<int> i3 = Vector256.WidenUpper(ints16Hi);
 
-            // Process 8 elements at a time (4 iterations for 32 elements)
-            for (int i = 0; i < BlockSize; i += 8)
-            {
-                // Load 8 sbytes, sign-extend to int32, convert to float
-                Vector128<byte> bytes = Vector128.CreateScalar(
-                    Unsafe.ReadUnaligned<long>(qs + i)).AsByte();
-                Vector256<int> ints = Avx2.ConvertToVector256Int32(bytes.AsSByte());
-                Vector256<float> floats = Avx.ConvertToVector256Single(ints);
-                Vector256<float> result = Avx.Multiply(floats, vScale);
-                Avx.Store(blockDst + i, result);
-            }
+            (Vector256.ConvertToSingle(i0) * vScale).StoreUnsafe(ref blockDstRef);
+            (Vector256.ConvertToSingle(i1) * vScale).StoreUnsafe(ref blockDstRef, 8);
+            (Vector256.ConvertToSingle(i2) * vScale).StoreUnsafe(ref blockDstRef, 16);
+            (Vector256.ConvertToSingle(i3) * vScale).StoreUnsafe(ref blockDstRef, 24);
         }
     }
 
@@ -122,8 +122,8 @@ public static unsafe partial class KvQuantize
                 $"elementCount must be a multiple of {BlockSize}, got {elementCount}",
                 nameof(elementCount));
 
-        if (Avx2.IsSupported)
-            F32ToQ4_0Avx2(src, dest, elementCount);
+        if (Vector256.IsHardwareAccelerated)
+            F32ToQ4_0Vector256(src, dest, elementCount);
         else
             F32ToQ4_0Scalar(src, dest, elementCount);
     }
@@ -174,11 +174,11 @@ public static unsafe partial class KvQuantize
     }
 
     /// <summary>
-    /// AVX2 SIMD implementation of FP32 → Q4_0 quantization.
+    /// Vector256 SIMD implementation of FP32 → Q4_0 quantization.
     /// Vectorizes the max-abs scan and rounding. Nibble packing is scalar.
     /// </summary>
     [SkipLocalsInit]
-    internal static void F32ToQ4_0Avx2(float* src, byte* dest, int elementCount)
+    internal static void F32ToQ4_0Vector256(float* src, byte* dest, int elementCount)
     {
         int blockCount = elementCount / BlockSize;
         Vector256<float> vEight = Vector256.Create(8.0f);
@@ -190,19 +190,21 @@ public static unsafe partial class KvQuantize
         {
             float* blockSrc = src + block * BlockSize;
             byte* blockDst = dest + block * Q4_0BlockBytes;
+            ref float blockSrcRef = ref Unsafe.AsRef<float>(blockSrc);
+            ref int roundedRef = ref Unsafe.AsRef<int>(rounded);
 
             // Max-abs scan: 4 loads of 8 floats.
-            Vector256<float> v0 = Vector256.Abs(Avx.LoadVector256(blockSrc));
-            Vector256<float> v1 = Vector256.Abs(Avx.LoadVector256(blockSrc + 8));
-            Vector256<float> v2 = Vector256.Abs(Avx.LoadVector256(blockSrc + 16));
-            Vector256<float> v3 = Vector256.Abs(Avx.LoadVector256(blockSrc + 24));
+            Vector256<float> v0 = Vector256.Abs(Vector256.LoadUnsafe(ref blockSrcRef));
+            Vector256<float> v1 = Vector256.Abs(Vector256.LoadUnsafe(ref blockSrcRef, 8));
+            Vector256<float> v2 = Vector256.Abs(Vector256.LoadUnsafe(ref blockSrcRef, 16));
+            Vector256<float> v3 = Vector256.Abs(Vector256.LoadUnsafe(ref blockSrcRef, 24));
 
-            Vector256<float> max01 = Avx.Max(v0, v1);
-            Vector256<float> max23 = Avx.Max(v2, v3);
-            Vector256<float> maxAll = Avx.Max(max01, max23);
+            Vector256<float> max01 = Vector256.MaxNative(v0, v1);
+            Vector256<float> max23 = Vector256.MaxNative(v2, v3);
+            Vector256<float> maxAll = Vector256.MaxNative(max01, max23);
 
             // Horizontal max via shuffles.
-            float maxAbs = HorizontalMaxAvx2(maxAll);
+            float maxAbs = HorizontalMaxVector256(maxAll);
 
             float d = maxAbs / 7.0f;
             Unsafe.WriteUnaligned(blockDst, (Half)d);
@@ -221,11 +223,12 @@ public static unsafe partial class KvQuantize
                 // Process 8 floats at a time.
                 for (int i = 0; i < BlockSize; i += 8)
                 {
-                    Vector256<float> vals = Avx.LoadVector256(blockSrc + i);
-                    Vector256<float> scaled = Avx.Multiply(vals, vInvD);
-                    Vector256<float> shifted = Avx.Add(scaled, vEight); // +8 offset
-                    Vector256<float> clamped = Avx.Min(Avx.Max(Avx.RoundToNearestInteger(shifted), vZero), vFifteen);
-                    Avx2.Store(rounded + i, Avx.ConvertToVector256Int32(clamped));
+                    Vector256<float> vals = Vector256.LoadUnsafe(ref blockSrcRef, (nuint)i);
+                    Vector256<float> shifted = vals * vInvD + vEight;
+                    Vector256<float> clamped = Vector256.MinNative(
+                        Vector256.MaxNative(Vector256.Round(shifted), vZero),
+                        vFifteen);
+                    Vector256.ConvertToInt32Native(clamped).StoreUnsafe(ref roundedRef, (nuint)i);
                 }
 
                 // Pack nibbles: lo = even element, hi = odd element.
@@ -249,8 +252,8 @@ public static unsafe partial class KvQuantize
                 $"elementCount must be a multiple of {BlockSize}, got {elementCount}",
                 nameof(elementCount));
 
-        if (Avx2.IsSupported)
-            Q4_0ToF32Avx2(src, dest, elementCount);
+        if (Vector256.IsHardwareAccelerated)
+            Q4_0ToF32Vector256(src, dest, elementCount);
         else
             Q4_0ToF32Scalar(src, dest, elementCount);
     }
@@ -283,12 +286,12 @@ public static unsafe partial class KvQuantize
     }
 
     /// <summary>
-    /// AVX2 SIMD implementation of Q4_0 → FP32 dequantization.
+    /// Vector256 SIMD implementation of Q4_0 → FP32 dequantization.
     /// Unpacks 16 packed nibble bytes into 32 floats per block.
     /// Output order matches scalar: dest[2j] = lo nibble, dest[2j+1] = hi nibble.
     /// </summary>
     [SkipLocalsInit]
-    internal static void Q4_0ToF32Avx2(byte* src, float* dest, int elementCount)
+    internal static void Q4_0ToF32Vector256(byte* src, float* dest, int elementCount)
     {
         int blockCount = elementCount / BlockSize;
         Vector256<int> vEight = Vector256.Create(8);
@@ -301,41 +304,29 @@ public static unsafe partial class KvQuantize
             float d = (float)Unsafe.ReadUnaligned<Half>(blockSrc);
             Vector256<float> vScale = Vector256.Create(d);
             byte* qs = blockSrc + 2;
-
             // Load 16 packed bytes and extract nibbles.
             Vector128<byte> packed = Vector128.LoadUnsafe(ref Unsafe.AsRef<byte>(qs));
             Vector128<byte> loMask = Vector128.Create((byte)0x0F);
             Vector128<byte> loNibbles = packed & loMask;
             Vector128<byte> hiNibbles = Vector128.ShiftRightLogical(packed.AsUInt16(), 4).AsByte() & loMask;
 
-            // Interleave lo and hi to get correct output order:
-            // [lo0,hi0,lo1,hi1,...,lo7,hi7] in lower 128, [lo8,hi8,...,lo15,hi15] in upper 128
-            Vector128<byte> interLo = Sse2.UnpackLow(loNibbles, hiNibbles);  // lo0,hi0,lo1,hi1,...,lo7,hi7
-            Vector128<byte> interHi = Sse2.UnpackHigh(loNibbles, hiNibbles); // lo8,hi8,...,lo15,hi15
+            ref float blockDstRef = ref Unsafe.AsRef<float>(blockDst);
+            Vector256<byte> combinedNibbles = Vector256.Create(loNibbles, hiNibbles);
+            Vector256<ushort> lo16 = Vector256.WidenLower(combinedNibbles);
+            Vector256<ushort> hi16 = Vector256.WidenUpper(combinedNibbles);
+            Vector256<byte> interleavedBytes = (lo16 | Vector256.ShiftLeft(hi16, 8)).AsByte();
+            Vector256<sbyte> interleaved = interleavedBytes.AsSByte();
+            Vector256<short> ints16Lo = Vector256.WidenLower(interleaved);
+            Vector256<short> ints16Hi = Vector256.WidenUpper(interleaved);
+            Vector256<int> i0 = Vector256.WidenLower(ints16Lo);
+            Vector256<int> i1 = Vector256.WidenUpper(ints16Lo);
+            Vector256<int> i2 = Vector256.WidenLower(ints16Hi);
+            Vector256<int> i3 = Vector256.WidenUpper(ints16Hi);
 
-            // Process first 16 elements (from interLo): 2 groups of 8
-            // Group 1: bytes 0..7 → 8 floats
-            Vector256<int> i0 = Avx2.ConvertToVector256Int32(interLo.AsSByte());
-            Vector256<float> f0 = Avx.Multiply(Avx.ConvertToVector256Single(Avx2.Subtract(i0, vEight)), vScale);
-            Avx.Store(blockDst, f0);
-
-            // Group 2: bytes 8..15 → 8 floats
-            Vector128<byte> interLoHigh = Vector128.Shuffle(interLo, Vector128.Create(
-                (byte)8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, 0, 0, 0, 0));
-            Vector256<int> i1 = Avx2.ConvertToVector256Int32(interLoHigh.AsSByte());
-            Vector256<float> f1 = Avx.Multiply(Avx.ConvertToVector256Single(Avx2.Subtract(i1, vEight)), vScale);
-            Avx.Store(blockDst + 8, f1);
-
-            // Process second 16 elements (from interHi)
-            Vector256<int> i2 = Avx2.ConvertToVector256Int32(interHi.AsSByte());
-            Vector256<float> f2 = Avx.Multiply(Avx.ConvertToVector256Single(Avx2.Subtract(i2, vEight)), vScale);
-            Avx.Store(blockDst + 16, f2);
-
-            Vector128<byte> interHiHigh = Vector128.Shuffle(interHi, Vector128.Create(
-                (byte)8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, 0, 0, 0, 0));
-            Vector256<int> i3 = Avx2.ConvertToVector256Int32(interHiHigh.AsSByte());
-            Vector256<float> f3 = Avx.Multiply(Avx.ConvertToVector256Single(Avx2.Subtract(i3, vEight)), vScale);
-            Avx.Store(blockDst + 24, f3);
+            ((Vector256.ConvertToSingle(i0 - vEight)) * vScale).StoreUnsafe(ref blockDstRef);
+            ((Vector256.ConvertToSingle(i1 - vEight)) * vScale).StoreUnsafe(ref blockDstRef, 8);
+            ((Vector256.ConvertToSingle(i2 - vEight)) * vScale).StoreUnsafe(ref blockDstRef, 16);
+            ((Vector256.ConvertToSingle(i3 - vEight)) * vScale).StoreUnsafe(ref blockDstRef, 24);
         }
     }
 
@@ -343,15 +334,15 @@ public static unsafe partial class KvQuantize
     /// Horizontal max of a 256-bit float vector via reduction.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float HorizontalMaxAvx2(Vector256<float> v)
+    private static float HorizontalMaxVector256(Vector256<float> v)
     {
         // Compare upper and lower 128-bit halves.
         Vector128<float> hi = v.GetUpper();
         Vector128<float> lo = v.GetLower();
-        Vector128<float> max = Sse.Max(hi, lo);
+        Vector128<float> max = Vector128.MaxNative(hi, lo);
         // Reduce 4-element 128-bit vector.
-        max = Sse.Max(max, Sse.MoveHighToLow(max, max));
-        max = Sse.Max(max, Sse.Shuffle(max, max, 0x01));
+        max = Vector128.MaxNative(max, Vector128.ShuffleNative(max, Vector128.Create(2, 3, 0, 1)));
+        max = Vector128.MaxNative(max, Vector128.ShuffleNative(max, Vector128.Create(1, 0, 3, 2)));
         return max.ToScalar();
     }
 }
