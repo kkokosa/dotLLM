@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Constraints;
+using DotLLM.Core.Lora;
 using DotLLM.Core.Models;
 using DotLLM.Core.Sampling;
 using DotLLM.Core.Tensors;
@@ -64,9 +65,11 @@ public sealed class TextGenerator
     /// <param name="prompt">Input text prompt.</param>
     /// <param name="options">Inference options controlling sampling and stopping. Null uses defaults.</param>
     /// <param name="onTokenGenerated">Optional callback invoked after each token is generated, receiving the token ID.</param>
+    /// <param name="adapter">Optional LoRA adapter to apply during the forward passes (Phase 4c).</param>
     /// <returns>The inference response with generated text, metadata, and timings.</returns>
     public InferenceResponse Generate(string prompt, InferenceOptions? options = null,
-        Action<int>? onTokenGenerated = null)
+        Action<int>? onTokenGenerated = null,
+        ILoraAdapter? adapter = null)
     {
         options ??= new InferenceOptions();
 
@@ -185,7 +188,7 @@ public sealed class TextGenerator
                     for (int i = 0; i < prefillLen; i++)
                         positions[i] = prefillStart + i;
 
-                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
+                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache, adapter))
                     {
                         long ts1 = Stopwatch.GetTimestamp();
                         prefillTicks = ts1 - ts0;
@@ -215,7 +218,7 @@ public sealed class TextGenerator
             else if (promptLen > 0)
             {
                 // 100% cache hit — re-forward last prompt token to get logits
-                using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache))
+                using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache, adapter))
                 {
                     long ts1 = Stopwatch.GetTimestamp();
                     prefillTicks = ts1 - ts0;
@@ -352,7 +355,7 @@ public sealed class TextGenerator
                     int nextTokenId;
 
                     long fwdStart = Stopwatch.GetTimestamp();
-                    using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
+                    using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache, adapter))
                     {
                         decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
 
@@ -411,11 +414,13 @@ public sealed class TextGenerator
     /// <param name="prompt">Input text prompt.</param>
     /// <param name="options">Inference options controlling sampling and stopping. Null uses defaults.</param>
     /// <param name="cancellationToken">Token to cancel generation cooperatively between decode steps.</param>
+    /// <param name="adapter">Optional LoRA adapter to apply during the forward passes (Phase 4c).</param>
     /// <returns>An async enumerable of <see cref="GenerationToken"/> values.</returns>
     public async IAsyncEnumerable<GenerationToken> GenerateStreamingTokensAsync(
         string prompt,
         InferenceOptions? options = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
+        ILoraAdapter? adapter = null)
     {
         options ??= new InferenceOptions();
 
@@ -527,7 +532,7 @@ public sealed class TextGenerator
                     for (int i = 0; i < prefillLen; i++)
                         positions[i] = prefillStart + i;
 
-                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
+                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache, adapter))
                     {
                         long ts1 = Stopwatch.GetTimestamp();
                         prefillTicks = ts1 - ts0;
@@ -555,7 +560,7 @@ public sealed class TextGenerator
             else if (promptLen > 0)
             {
                 // 100% cache hit — re-forward last prompt token to get logits
-                using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache))
+                using (ITensor logits = _model.Forward([promptIds[^1]], [promptLen - 1], deviceId: -1, kvCache, adapter))
                 {
                     long ts1 = Stopwatch.GetTimestamp();
                     prefillTicks = ts1 - ts0;
@@ -734,7 +739,7 @@ public sealed class TextGenerator
                     TokenLogprobInfo? tokenLogprob;
 
                     long fwdStart = Stopwatch.GetTimestamp();
-                    using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache))
+                    using (ITensor logits = _model.Forward([lastToken], [pos], deviceId: -1, kvCache, adapter))
                     {
                         decodeTicks += Stopwatch.GetTimestamp() - fwdStart;
 
@@ -808,13 +813,15 @@ public sealed class TextGenerator
     /// <param name="prompt">Input text prompt.</param>
     /// <param name="options">Inference options controlling sampling and stopping. Null uses defaults.</param>
     /// <param name="cancellationToken">Token to cancel generation cooperatively between decode steps.</param>
+    /// <param name="adapter">Optional LoRA adapter to apply during the forward passes (Phase 4c).</param>
     /// <returns>An async enumerable of incremental text strings.</returns>
     public async IAsyncEnumerable<string> GenerateStreamingAsync(
         string prompt,
         InferenceOptions? options = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
+        ILoraAdapter? adapter = null)
     {
-        await foreach (var token in GenerateStreamingTokensAsync(prompt, options, cancellationToken))
+        await foreach (var token in GenerateStreamingTokensAsync(prompt, options, cancellationToken, adapter))
             yield return token.Text;
     }
 

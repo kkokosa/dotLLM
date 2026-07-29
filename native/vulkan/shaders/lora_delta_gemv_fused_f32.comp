@@ -1,0 +1,53 @@
+#version 450
+// Fused LoRA delta — A stage + in-place accumulate.
+//
+// y[t, m] += sum_r A[m, r] * tmp[t, r]
+//
+// where tmp[t, r] = dot(B[r, :], x[t, :]) was produced by the companion
+// shader lora_delta_b_reduce_f32. This pair replaces the original
+// 4-dispatch chain (matmul B → matmul A → add → vkCmdCopyBuffer) with
+// two dispatches per delta site:
+//   1. lora_delta_b_reduce_f32: tmp[t, r] cooperative reduction.
+//   2. lora_delta_gemv_fused_f32 (this shader): y[t, m] += A * tmp.
+//
+// B is pre-scaled by alpha/rank at upload time (see VulkanLoraAdapter.Upload),
+// so tmp[t, r] already carries the scale; this shader just does the up-projection.
+//
+// Layout:
+//   tmp:  row-major [seqLen, rank]      F32 — workspace from B-stage
+//   A:    row-major [outputDim, rank]   F32 — LoRA up-projection
+//   y:    row-major [seqLen, outputDim] F32 — base-projection output, += in place
+//
+// Dispatch:
+//   workgroup = (WG, 1, 1)
+//   groupCount = (ceil(outputDim / WG), seqLen, 1)
+// Each thread owns ONE output row in the WG-wide tile.
+
+#define WG 64
+
+layout(local_size_x = WG, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer BufTmp { float tmp[]; };
+layout(set = 0, binding = 1, std430) readonly buffer BufA   { float aWeight[]; };
+layout(set = 0, binding = 2, std430)          buffer BufY   { float y[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint outputDim;
+    uint rank;
+    uint seqLen;
+} pc;
+
+void main() {
+    uint t = gl_WorkGroupID.y;
+    uint m = gl_WorkGroupID.x * WG + gl_LocalInvocationID.x;
+    if (t >= pc.seqLen || m >= pc.outputDim) return;
+
+    uint aBase   = m * pc.rank;
+    uint tmpBase = t * pc.rank;
+
+    float delta = 0.0;
+    for (uint r = 0u; r < pc.rank; r++) {
+        delta += aWeight[aBase + r] * tmp[tmpBase + r];
+    }
+    y[t * pc.outputDim + m] += delta;
+}

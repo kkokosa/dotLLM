@@ -1,0 +1,119 @@
+#version 450
+// Q8_0 matrix-vector multiplication (decode-path GEMV).
+//
+//   y[m] = sum_k  W_q8[m, k] * x[k]        with W_q8 dequantized on the fly.
+//
+// Weight layout mirrors llama.cpp / DotLLM.Cpu.Kernels.MatMul.GemvQ8_0:
+//   Each 32 contiguous elements of a row form one Q8_0 block of 34 bytes:
+//       bytes [0,1]   = fp16 scale d
+//       bytes [2..33] = 32 signed int8 values qs[0..31]
+//   Row stride = (K / 32) * 34 bytes.
+//
+// x[] is FP32 (not pre-quantized). Matches the CUDA
+// `quantized_gemv_q8_0_f32in` variant used for the N=1 decode path. Output
+// y[] is also FP32.
+//
+// Dispatch:
+//   One workgroup per output row (blockIdx.x = m).
+//   local_size_x = 128 threads — each thread strides across blocks and
+//   accumulates a partial sum, then the workgroup reduces in shared memory.
+//
+// Storage-buffer access:
+//   `weight` is bound as `uint[]` because GLSL storage buffers cannot hold
+//   int8 / float16 scalars without optional extensions. We read bytes out of
+//   the uint array with explicit shifts. Per-block base uint index is
+//   `(m * rowBytes + b * 34) / 4`; the 34-byte block may start at byte
+//   offsets 0, 2, 4, 6 (mod 8) across successive blocks, so we handle
+//   straddling.
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly  buffer BufW { uint weight[]; };  // Q8_0 blob, 4-byte indexable
+layout(set = 0, binding = 1, std430) readonly  buffer BufX { float x[]; };      // [K]
+layout(set = 0, binding = 2, std430) writeonly buffer BufY { float y[]; };      // [M]
+
+layout(push_constant) uniform PushConstants {
+    uint M;                // number of output rows
+    uint K;                // columns (must be a multiple of 32)
+    uint blocksPerRow;     // = K / 32
+    uint rowUints;         // = (blocksPerRow * 34) / 4  (exact, because row stride is 4-byte-aligned only when blocksPerRow*34 is divisible by 4; we keep it as an absolute uint-count per row for safety)
+} pc;
+
+// Fetch the i-th byte (0..31) of the qs[] portion of block `b` in row `mRowUint` (uint index of row start).
+// The block's qs region starts at absolute byte offset `mRowBytes + b*34 + 2`.
+// Returns the byte as a signed int (-128..127).
+int readQsByte(uint absByteOff) {
+    uint u = weight[absByteOff >> 2u];
+    uint shift = (absByteOff & 3u) * 8u;
+    int b = int((u >> shift) & 0xFFu);
+    // Sign extend 8-bit → 32-bit
+    return (b ^ 0x80) - 0x80;
+}
+
+// Fetch the fp16 scale `d` (2 bytes at `absByteOff`) and convert to float.
+// May straddle a uint boundary: lower byte at (absByteOff&3), upper byte at (absByteOff&3)+1.
+float readHalf(uint absByteOff) {
+    uint alignedIdx = absByteOff >> 2u;
+    uint byteInWord = absByteOff & 3u;
+    uint u = weight[alignedIdx];
+    uint half16;
+    if (byteInWord <= 2u) {
+        // Both bytes fit in this word.
+        half16 = (u >> (byteInWord * 8u)) & 0xFFFFu;
+    } else {
+        // Straddles: low byte in this word, high byte in next.
+        uint uNext = weight[alignedIdx + 1u];
+        half16 = ((u >> 24) & 0xFFu) | ((uNext & 0xFFu) << 8);
+    }
+    // unpackHalf2x16 takes a uint whose low 16 bits encode one fp16.
+    return unpackHalf2x16(half16).x;
+}
+
+shared float partials[128];
+
+void main() {
+    uint m = gl_WorkGroupID.x;
+    if (m >= pc.M) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint threads = gl_WorkGroupSize.x;
+
+    // Absolute byte offset of the start of this row in the raw weight blob.
+    // Compute the stride from blocksPerRow directly rather than rowUints*4 —
+    // rowUints is rounded up to the next uint multiple for buffer-bounds
+    // safety, so it overstates the per-row stride when blocksPerRow*34 is
+    // not itself a multiple of 4 (e.g. K=32 yields rowBytes=34, rowUints=9,
+    // rowUints*4=36 ≠ 34). Mirrors the convention used by matmul_q8_0_gemm
+    // and rmsnorm_matmul_q8_0. Fixes issue #1: latent stride bug at K=32
+    // with M>1 — earlier rev silently returned garbage past the first row
+    // for any K where blocksPerRow*34 % 4 != 0 (blocksPerRow odd).
+    uint rowByteStride = pc.blocksPerRow * 34u;
+    uint rowByteBase = m * rowByteStride;
+
+    float acc = 0.0;
+
+    for (uint b = tid; b < pc.blocksPerRow; b += threads) {
+        uint blockByteBase = rowByteBase + b * 34u;
+        float d = readHalf(blockByteBase);
+
+        // 32-element qs sum-of-products, convolved with the corresponding x slice.
+        uint xBase = b * 32u;
+        float blockSum = 0.0;
+        for (uint j = 0u; j < 32u; j++) {
+            int qv = readQsByte(blockByteBase + 2u + j);
+            blockSum += float(qv) * x[xBase + j];
+        }
+        acc += d * blockSum;
+    }
+
+    // Workgroup reduction via shared memory. No subgroup intrinsics here —
+    // broadest driver portability is worth the tiny overhead.
+    partials[tid] = acc;
+    barrier();
+    for (uint stride = threads / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) partials[tid] = partials[tid] + partials[tid + stride];
+        barrier();
+    }
+
+    if (tid == 0u) y[m] = partials[0];
+}

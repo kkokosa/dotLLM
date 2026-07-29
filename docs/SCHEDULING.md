@@ -13,29 +13,58 @@ IScheduler:
   GetMetrics() → SchedulerMetrics
 ```
 
+Concrete implementation: `ContinuousBatchScheduler` (step-driven, exposed via `IBatchScheduler`) wrapped by `ContinuousBatchSchedulerService` (async, exposed via `IScheduler`).
+
 ## Iteration-Level Scheduling
 
-Each scheduler iteration:
+Each `ContinuousBatchScheduler.Step()` call:
 
-1. **Check completions**: Sequences hitting EOS/max tokens/stop conditions → evict, free KV blocks.
-2. **Admit new requests**: Fill freed capacity from the priority queue.
-3. **Prefill**: For newly admitted sequences, process full prompt tokens (batch prefill).
-4. **Decode**: For all active sequences, generate one token each (batched decode).
+1. **Sweep cancelled sequences** — caller-side `CancellationToken` may have flipped state; release their KV-cache.
+2. **Admit** new sequences up to `MaxActiveSequences` and (when paged) sufficient free blocks. Admission allocates the KV-cache, consults the optional `ISchedulerPrefixCache` for reuse, and transitions to `Prefilling`. **Actual prefill work happens in step 3** — admission is purely a slot/cache assignment.
+3. **Build a batch** containing one entry per active sequence that needs a forward pass this iteration:
+   - `Prefilling` sequences contribute their next prefill chunk, sized by `MaxPrefillTokensPerStep` (0 = unlimited, single shot).
+   - `Decoding` sequences contribute their last sampled token.
+   When the batch has ≥2 entries, the scheduler calls `IModel.ForwardBatch(requests, deviceId)` — a single dispatch that backends can fuse into one batched kernel (the default interface implementation falls back to a per-sequence `Forward` loop). For a 1-entry batch, the scheduler calls `Forward` directly to avoid the batch-allocation overhead and keep single-tenant decode latency unchanged from `TextGenerator`.
+4. **Process forward results**: for prefilling sequences that just consumed their final chunk, sample the first token and transition to `Decoding`; for decoding sequences, sample the next token. Apply stop conditions (EOS, max-tokens) and transition to `Completed` when fired.
+5. **Sweep completed/cancelled** active entries — build their `InferenceResponse`, release the KV-cache, complete the task.
 
 ```
 while (!cancelled):
-  completed = batch.RemoveCompleted()
-  FreeKvBlocks(completed)
-  NotifyClients(completed)
-
-  admitted = AdmitFromQueue(available_kv_blocks)
-  RunPrefill(admitted)
-
-  tokens = RunDecode(batch.ActiveSequences)
-  ApplySamplerPipeline(tokens)
-  CheckStopConditions(tokens)
-  StreamTokensToClients(tokens)
+  SweepCancelled()
+  Admit(pendingQueue, MaxActiveSequences, prefixCache?)
+  batch = BuildBatch(active)           # mix of prefill chunks and decode tokens
+  results = batch.Count >= 2 ? Model.ForwardBatch(batch) : Model.Forward(batch[0])
+  for entry in batch:
+    ProcessResult(entry, results[i])   # sample, advance constraint, check stops
+  SweepCompleted()
 ```
+
+## Chunked Prefill
+
+`MaxPrefillTokensPerStep` controls how many prompt tokens a single Step iteration may push through the model in aggregate. When non-zero, a prompt longer than the cap is split across multiple Step iterations: the sequence stays in `Prefilling` state until its `PrefilledTokens == PromptLength`, advancing one chunk per Step. **Decode tokens of already-decoding sequences keep running every step** regardless of the prefill budget — this is the head-of-line-blocking property that lets a 4096-token user prompt land without freezing every other concurrent chat session.
+
+The trade-off: a very small chunk size raises per-step overhead (lots of small kernel dispatches); a very large chunk size lets one long prompt dominate the GPU for several steps before decode catches up. Production setups tune chunk size against expected prompt-length distribution and decode-batch size.
+
+## Kernel-Batched Forward (`IModel.ForwardBatch`)
+
+`IModel.ForwardBatch(IReadOnlyList<SequenceForwardRequest>, int deviceId)` is the seam for true batched compute across sequences:
+
+```csharp
+readonly record struct SequenceForwardRequest
+{
+    public required ReadOnlyMemory<int> TokenIds { get; init; }   // 1 (decode) or N (prefill chunk)
+    public required ReadOnlyMemory<int> Positions { get; init; }
+    public required IKvCache KvCache { get; init; }                // independent per sequence
+    public ILoraAdapter? Adapter { get; init; }
+}
+```
+
+The default interface implementation loops over `Forward` per request — backends pay the per-sequence kernel-dispatch overhead until they override with a fused implementation. Override candidates:
+
+- **CPU**: bundle N sequences into a single GEMM (currently N GEMVs) for matmul-bound layers; attention stays per-sequence because each has its own K/V.
+- **CUDA / Vulkan**: launch one merged kernel with a per-sequence offset table — same Q·K·V GEMM, separate attention scratch regions.
+
+The acceptance test (`FourConcurrentSchedulerTests`) drives 4 distinct prompts concurrently through the scheduler and verifies each gets its own per-request response — the API contract is in place even when the underlying backend is still using the per-sequence-loop fallback.
 
 ## Prefill/Decode Separation
 

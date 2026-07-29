@@ -23,6 +23,7 @@ public static class EndpointExtensions
         ConfigEndpoint.Map(app);
         ModelManagementEndpoint.Map(app);
         ModelInspectEndpoint.Map(app);
+        LoraEndpoints.Map(app);
 
         if (serveUi)
             WebUIEndpoint.Map(app);

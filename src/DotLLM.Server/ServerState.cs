@@ -1,5 +1,6 @@
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
+using DotLLM.Core.Lora;
 using DotLLM.Core.Models;
 using DotLLM.Engine;
 using DotLLM.Engine.KvCache;
@@ -76,6 +77,13 @@ public sealed class ServerState : IDisposable
     public GgufFile? DraftGguf { get; set; }
 
     /// <summary>
+    /// Process-wide LoRA adapter registry (singleton). Set by
+    /// <see cref="ServerStartup"/> and shared between admin endpoints
+    /// (<c>POST /v1/lora/load</c>) and the inference pipeline.
+    /// </summary>
+    public ILoraAdapterRegistry? LoraRegistry { get; set; }
+
+    /// <summary>
     /// Executes a request with sequential access control.
     /// Only one request is processed at a time (Step 35 adds batching).
     /// </summary>
@@ -123,6 +131,7 @@ public sealed class ServerState : IDisposable
         DraftGguf?.Dispose();
         Model?.Dispose();
         CurrentGguf?.Dispose();
+        LoraRegistry?.Dispose();
         _requestGate.Dispose();
     }
 }
