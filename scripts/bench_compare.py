@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
 import platform
 import re
@@ -36,9 +37,23 @@ from statistics import median, stdev
 # ---------------------------------------------------------------------------
 # Predefined prompts for fair benchmarking at different lengths
 # ---------------------------------------------------------------------------
+# Prompts must ELICIT GENERATION, not merely fill context.
+#
+# A passage that ends on a completed sentence is a finished document, and an
+# instruction-tuned model's most likely next token is EOS — so decode produces zero tokens
+# and every decode measurement is empty. This was silently true for `medium` and `large`:
+# Llama-3.2-1B-Instruct returned `generated=0, finish=stop` on the bare article, and
+# llama.cpp likewise reported `eval time = 0.00 ms / 1 runs`.
+#
+# `medium` and `large` therefore wrap the passage in <article> tags and close with an
+# explicit task. `short` needs no wrapper — it is an unfinished sentence, so continuation is
+# already the natural next token.
+_ARTICLE_TASK = "\n</article>\n\nSummarize above article with few bullet points."
+
 PROMPTS = {
     "short": "The capital of France is",  # ~5 tokens
     "medium": (
+        "<article>\n"
         "The transformer architecture, introduced in the 2017 paper 'Attention Is All You Need' "
         "by Vaswani et al., revolutionized natural language processing by replacing recurrent "
         "neural networks with a self-attention mechanism. Unlike RNNs, which process tokens "
@@ -53,8 +68,10 @@ PROMPTS = {
         "sinusoidal encodings, enabling better length generalization. Grouped-Query Attention "
         "(GQA) reduces the KV-cache memory footprint by sharing key-value heads across multiple "
         "query heads, which is critical for efficient inference at long context lengths."
+        + _ARTICLE_TASK
     ),  # ~256 tokens
     "large": (
+        "<article>\n"
         "Large language models (LLMs) have become a cornerstone of modern artificial intelligence, "
         "demonstrating remarkable capabilities in text generation, reasoning, and code synthesis. "
         "The journey began with early neural language models that used simple recurrent architectures, "
@@ -92,6 +109,7 @@ PROMPTS = {
         "instructions to perform quantized matrix multiplications at near-theoretical throughput. "
         "The combination of better quantization methods, optimized memory access patterns, and "
         "hardware-aware kernel design continues to democratize access to powerful language models."
+        + _ARTICLE_TASK
     ),  # ~1024 tokens
 }
 
@@ -807,12 +825,26 @@ def run_llamacpp(
         return []
 
     # Regex patterns for llama.cpp common_perf_print output
+    # The throughput field accepts inf/nan as well as a number: llama.cpp prints
+    # "0.00 ms per token, inf tokens per second" when a run generates a single token
+    # (e.g. the model emits EOS immediately). Matching only [\d.]+ made the whole run
+    # unparseable, which discarded the engine entirely — including its valid prefill
+    # numbers. Non-finite values are normalised to 0.0 by _parse_tok_s below.
+    _TOK_S = r"(inf|-?nan|[\d.]+)"
     re_prefill = re.compile(
-        r"prompt eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens.*?([\d.]+)\s*tokens per second"
+        rf"prompt eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens.*?{_TOK_S}\s*tokens per second"
     )
     re_decode = re.compile(
-        r"eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*runs.*?([\d.]+)\s*tokens per second"
+        rf"eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*runs.*?{_TOK_S}\s*tokens per second"
     )
+
+    def _parse_tok_s(raw: str) -> float:
+        """Non-finite throughput means no meaningful measurement — report it as 0."""
+        try:
+            value = float(raw)
+        except ValueError:
+            return 0.0
+        return value if math.isfinite(value) else 0.0
 
     prefill_ms_list: list[float] = []
     decode_ms_list: list[float] = []
@@ -871,10 +903,10 @@ def run_llamacpp(
         if m_prefill and m_decode:
             prefill_ms_list.append(float(m_prefill.group(1)))
             prefill_tokens_list.append(int(m_prefill.group(2)))
-            prefill_tok_s_list.append(float(m_prefill.group(3)))
+            prefill_tok_s_list.append(_parse_tok_s(m_prefill.group(3)))
             decode_ms_list.append(float(m_decode.group(1)))
             decode_tokens_list.append(int(m_decode.group(2)))
-            decode_tok_s_list.append(float(m_decode.group(3)))
+            decode_tok_s_list.append(_parse_tok_s(m_decode.group(3)))
         else:
             print(f"[llama.cpp] Run {i + 1}: could not parse perf output", file=sys.stderr)
             print(f"  output (last 500 chars): {output[-500:]}", file=sys.stderr)
@@ -882,6 +914,14 @@ def run_llamacpp(
     if not prefill_ms_list:
         print("[llama.cpp] No successful runs.", file=sys.stderr)
         return []
+
+    # A model that stops immediately yields no usable decode measurement. Say so, rather than
+    # reporting a silent 0.0 that reads like a real result. Prefill is still valid and kept.
+    if decode_tokens_list and max(decode_tokens_list) <= 1:
+        print(f"[llama.cpp] Model generated {max(decode_tokens_list)} decode token(s) — "
+              f"decode throughput is not measurable with this prompt. Prefill results retained. "
+              f"Use a prompt that elicits generation (see PROMPTS in this script).",
+              file=sys.stderr)
 
     # Best-of-N: max for throughput, min for latency
     best_pf_tok_s = max(prefill_tok_s_list)
