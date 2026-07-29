@@ -44,6 +44,14 @@ import re as _re
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLI_PROJECT = REPO_ROOT / "src" / "DotLLM.Cli"
 
+# TEST_CASES exists for correctness checking and defaults to max_tokens=2, which is far too
+# few to measure throughput: in a freshly spawned process, 2 tokens measures JIT tiered
+# compilation warm-up rather than decode. Override to something that reaches steady state.
+DEFAULT_TOKENS = 128
+
+# Below this, treat reported decode throughput as an artefact and say so.
+MIN_MEANINGFUL_TOKENS = 32
+
 
 def _extract_param_billions(name: str) -> float | None:
     """Extract model parameter count in billions from a test case name.
@@ -196,18 +204,37 @@ class RunResult:
     prefill_ms: float = 0.0
     decode_ms: float = 0.0
     load_ms: float = 0.0
+    decode_tokens: int = 0
     error: str | None = None
+
+    @property
+    def init_ms(self) -> float:
+        """Runtime init + process startup: wall-clock minus the work the CLI accounted for.
+
+        This is the quantity Native AOT actually improves. Total wall-clock is a poor proxy
+        because model load and inference dominate it — on a 1B model, seconds of inference
+        swamp a startup difference measured in hundreds of milliseconds.
+        """
+        accounted = self.load_ms + self.prefill_ms + self.decode_ms
+        return max(0.0, self.elapsed_s * 1000.0 - accounted)
 
 
 def _run_once(exe: Path, model_path: Path, tc: TestCase,
-              device: str = "cpu", gpu_layers: int | None = None) -> RunResult:
-    """Run the CLI binary once and capture results."""
+              device: str = "cpu", gpu_layers: int | None = None,
+              max_tokens: int | None = None) -> RunResult:
+    """Run the CLI binary once and capture results.
+
+    `max_tokens` overrides the test case's own value. TEST_CASES defaults to 2 tokens
+    because test_models.py only checks that an expected substring appears; measuring
+    throughput over 2 tokens in a fresh process measures JIT warm-up, not decode.
+    """
+    tokens = max_tokens if max_tokens is not None else tc.max_tokens
     cmd = [str(exe)]
 
     cmd += [
         "run", str(model_path),
         "-p", tc.prompt,
-        "-n", str(tc.max_tokens),
+        "-n", str(tokens),
         "-t", "0",  # greedy
         "--json",
     ]
@@ -260,6 +287,7 @@ def _run_once(exe: Path, model_path: Path, tc: TestCase,
         prefill_ms=timings.get("prefill_ms", 0) or 0,
         decode_ms=timings.get("decode_ms", 0) or 0,
         load_ms=timings.get("load_ms", 0) or 0,
+        decode_tokens=(data.get("usage", {}) or {}).get("generated_tokens", 0) or 0,
         error=None if passed else f"expected '{tc.expected}' not in '{text[:60]}'",
     )
 
@@ -293,19 +321,28 @@ class CompareResult:
     # Derived
     startup_speedup: float   # jit_elapsed / aot_elapsed
     decode_ratio: float      # aot_decode_tok_s / jit_decode_tok_s (>1 = AOT faster)
+    # Runtime init + process startup, isolated from load/prefill/decode. This is what AOT
+    # actually improves; total wall-clock buries it under inference time.
+    jit_init_ms: float = 0.0
+    aot_init_ms: float = 0.0
+    init_speedup: float = 0.0
+    # Tokens actually generated — guards against reading throughput off a 2-token run.
+    decode_tokens: int = 0
     error: str | None = None
 
 
 def _run_comparison(jit_exe: Path, aot_exe: Path, model_path: Path, tc: TestCase,
                     runs: int, device: str = "cpu",
-                    gpu_layers: int | None = None) -> CompareResult:
+                    gpu_layers: int | None = None,
+                    max_tokens: int | None = None) -> CompareResult:
     """Run JIT and AOT binaries multiple times and compare best results."""
     quant = tc.quant or "default"
 
     def best_of(exe: Path) -> RunResult:
         results = []
         for _ in range(runs):
-            r = _run_once(exe, model_path, tc, device=device, gpu_layers=gpu_layers)
+            r = _run_once(exe, model_path, tc, device=device, gpu_layers=gpu_layers,
+                          max_tokens=max_tokens)
             results.append(r)
         # Pick the run with best decode throughput (or first if all failed)
         passed_runs = [r for r in results if r.passed]
@@ -318,6 +355,7 @@ def _run_comparison(jit_exe: Path, aot_exe: Path, model_path: Path, tc: TestCase
 
     startup_speedup = jit.elapsed_s / aot.elapsed_s if aot.elapsed_s > 0 else 0
     decode_ratio = aot.decode_tok_s / jit.decode_tok_s if jit.decode_tok_s > 0 else 0
+    init_speedup = jit.init_ms / aot.init_ms if aot.init_ms > 0 else 0
 
     error = None
     if jit.error and aot.error:
@@ -338,6 +376,8 @@ def _run_comparison(jit_exe: Path, aot_exe: Path, model_path: Path, tc: TestCase
         aot_decode_tok_s=aot.decode_tok_s, aot_prefill_tok_s=aot.prefill_tok_s,
         aot_load_ms=aot.load_ms, aot_text=aot.text,
         startup_speedup=startup_speedup, decode_ratio=decode_ratio,
+        jit_init_ms=jit.init_ms, aot_init_ms=aot.init_ms, init_speedup=init_speedup,
+        decode_tokens=max(jit.decode_tokens, aot.decode_tokens),
         error=error,
     )
 
@@ -349,51 +389,63 @@ def _run_comparison(jit_exe: Path, aot_exe: Path, model_path: Path, tc: TestCase
 def _print_results(results: list[CompareResult]) -> None:
     """Print the comparison table."""
     print()
-    print(f"  {'Model':<26} {'Arch':<8} {'Quant':<7} {'Dev':<9} │ "
-          f"{'JIT wall':>9} {'JIT dec':>9} │ "
-          f"{'AOT wall':>9} {'AOT dec':>9} │ "
-          f"{'Startup':>8} {'Decode':>8} │ {'OK'}")
-    print(f"  {'':26} {'':8} {'':7} {'':9} │ "
-          f"{'(sec)':>9} {'(tok/s)':>9} │ "
-          f"{'(sec)':>9} {'(tok/s)':>9} │ "
-          f"{'speedup':>8} {'ratio':>8} │")
-    print("  " + "─" * 128)
+    print(f"  {'Model':<26} {'Quant':<7} {'Dev':<8} {'Tok':>4} │ "
+          f"{'JIT init':>9} {'AOT init':>9} {'Init':>7} │ "
+          f"{'JIT dec':>9} {'AOT dec':>9} {'Decode':>7} │ "
+          f"{'Wall':>7} │ {'OK'}")
+    print(f"  {'':26} {'':7} {'':8} {'':4} │ "
+          f"{'(ms)':>9} {'(ms)':>9} {'speedup':>7} │ "
+          f"{'(tok/s)':>9} {'(tok/s)':>9} {'ratio':>7} │ "
+          f"{'speedup':>7} │")
+    print("  " + "─" * 130)
 
     for r in results:
         if r.error:
-            print(f"  {r.name:<26} {r.arch:<8} {r.quant:<7} {r.device:<9} │  ERROR: {r.error}")
+            print(f"  {r.name:<26} {r.quant:<7} {r.device:<8} {'':>4} │  ERROR: {r.error}")
             continue
 
         jit_ok = "+" if r.jit_passed else "X"
         aot_ok = "+" if r.aot_passed else "X"
 
-        startup_str = f"{r.startup_speedup:.2f}x" if r.startup_speedup > 0 else "---"
+        wall_str = f"{r.startup_speedup:.2f}x" if r.startup_speedup > 0 else "---"
         decode_str = f"{r.decode_ratio:.2f}x" if r.decode_ratio > 0 else "---"
+        init_str = f"{r.init_speedup:.2f}x" if r.init_speedup > 0 else "---"
+        # Flag throughput read off too few tokens to be meaningful.
+        tok_str = f"{r.decode_tokens}" + ("!" if 0 < r.decode_tokens < MIN_MEANINGFUL_TOKENS else "")
 
         print(
-            f"  {r.name:<26} {r.arch:<8} {r.quant:<7} {r.device:<9} │ "
-            f"{r.jit_elapsed_s:>8.2f}s {r.jit_decode_tok_s:>8.1f}  │ "
-            f"{r.aot_elapsed_s:>8.2f}s {r.aot_decode_tok_s:>8.1f}  │ "
-            f"{startup_str:>8} {decode_str:>8} │ "
-            f"JIT:{jit_ok} AOT:{aot_ok}"
+            f"  {r.name:<26} {r.quant:<7} {r.device:<8} {tok_str:>4} │ "
+            f"{r.jit_init_ms:>9.0f} {r.aot_init_ms:>9.0f} {init_str:>7} │ "
+            f"{r.jit_decode_tok_s:>9.1f} {r.aot_decode_tok_s:>9.1f} {decode_str:>7} │ "
+            f"{wall_str:>7} │ JIT:{jit_ok} AOT:{aot_ok}"
         )
 
-    print("  " + "─" * 128)
+    print("  " + "─" * 130)
     print()
-    print("  Startup speedup = JIT wall-clock / AOT wall-clock (>1 = AOT faster overall)")
-    print("  Decode ratio    = AOT tok/s / JIT tok/s (>1 = AOT faster decode, <1 = JIT faster)")
+    print("  Init speedup  = JIT init / AOT init (>1 = AOT starts faster). Init is wall-clock")
+    print("                  minus load/prefill/decode, so it isolates runtime startup — the")
+    print("                  thing AOT actually improves. Total wall-clock buries it.")
+    print("  Decode ratio  = AOT tok/s / JIT tok/s (>1 = AOT faster decode, <1 = JIT faster).")
+    print("                  Expect <=1: AOT gives up tiered JIT and dynamic PGO.")
+    print("  Wall speedup  = JIT wall / AOT wall — whole-invocation, load and inference included.")
     print()
 
-    valid = [r for r in results if not r.error and r.startup_speedup > 0]
+    short = [r for r in results if not r.error and 0 < r.decode_tokens < MIN_MEANINGFUL_TOKENS]
+    if short:
+        print(f"  WARNING: {len(short)} model(s) marked '!' generated fewer than "
+              f"{MIN_MEANINGFUL_TOKENS} tokens. Their decode figures reflect JIT warm-up in a")
+        print(f"  fresh process, not steady-state throughput. Raise --tokens.")
+        print()
+
+    valid = [r for r in results if not r.error]
     if valid:
-        avg_startup = sum(r.startup_speedup for r in valid) / len(valid)
-        avg_decode = sum(r.decode_ratio for r in valid) / len(valid)
         jit_correct = sum(1 for r in valid if r.jit_passed)
         aot_correct = sum(1 for r in valid if r.aot_passed)
         print(f"  Summary ({len(valid)} models):")
-        print(f"    Avg startup speedup: {avg_startup:.2f}x (AOT vs JIT wall-clock)")
-        print(f"    Avg decode ratio:    {avg_decode:.2f}x (AOT/JIT tok/s)")
-        print(f"    Correctness:         JIT {jit_correct}/{len(valid)}, AOT {aot_correct}/{len(valid)}")
+        print(f"    Correctness: JIT {jit_correct}/{len(valid)}, AOT {aot_correct}/{len(valid)}")
+        # Deliberately no averaged speedup/ratio across models: these are ratios over models
+        # of different sizes, where an unweighted mean is dominated by whichever model has the
+        # largest fixed-overhead share and misrepresents the comparison.
         print()
 
 
@@ -412,6 +464,9 @@ def _save_results(path: str, results: list[CompareResult],
         "config": {
             "runs": args.runs,
             "device": args.device,
+            # 0 means each test case's own max_tokens was used; throughput from a low value
+            # reflects JIT warm-up rather than decode.
+            "tokens": args.tokens,
             "aot_binary_size_bytes": aot_size,
         },
         "results": [
@@ -430,6 +485,10 @@ def _save_results(path: str, results: list[CompareResult],
                 "aot_load_ms": round(r.aot_load_ms, 1),
                 "startup_speedup": round(r.startup_speedup, 3),
                 "decode_ratio": round(r.decode_ratio, 3),
+                "jit_init_ms": round(r.jit_init_ms, 1),
+                "aot_init_ms": round(r.aot_init_ms, 1),
+                "init_speedup": round(r.init_speedup, 3),
+                "decode_tokens": r.decode_tokens,
                 "error": r.error,
             }
             for r in results
@@ -479,6 +538,8 @@ def _show_results(path: str) -> int:
             aot_decode_tok_s=r["aot_decode_tok_s"], aot_prefill_tok_s=r["aot_prefill_tok_s"],
             aot_load_ms=r.get("aot_load_ms", 0), aot_text="",
             startup_speedup=r["startup_speedup"], decode_ratio=r["decode_ratio"],
+            jit_init_ms=r.get("jit_init_ms", 0), aot_init_ms=r.get("aot_init_ms", 0),
+            init_speedup=r.get("init_speedup", 0), decode_tokens=r.get("decode_tokens", 0),
             error=r.get("error"))
         for r in results_raw
     ]
@@ -516,6 +577,11 @@ def main() -> int:
                         help="Reuse existing publish output (skip dotnet publish)")
     parser.add_argument("--runs", type=int, default=1,
                         help="Number of runs per binary per model (best-of-N, default: 1)")
+    parser.add_argument("--tokens", type=int, default=DEFAULT_TOKENS,
+                        help=f"Tokens to generate per run (default: {DEFAULT_TOKENS}). "
+                             f"Overrides each test case's max_tokens, which defaults to 2 — "
+                             f"far too few for throughput, since a fresh process spends that "
+                             f"entirely in JIT warm-up. Pass 0 to use the per-case value.")
     parser.add_argument("--save", type=str, default=None,
                         help="Save results to JSON file")
     parser.add_argument("--show", type=str, default=None,
@@ -592,8 +658,9 @@ def main() -> int:
 
     total_runs = len(cases) * len(devices)
     print()
+    tokens_desc = f"{args.tokens} tokens" if args.tokens > 0 else "per-case max_tokens"
     print(f"JIT vs AOT comparison: {len(cases)} models, {len(devices)} device(s) "
-          f"({', '.join(devices)}), {args.runs} run(s) per binary")
+          f"({', '.join(devices)}), {args.runs} run(s) per binary, {tokens_desc}")
     print()
 
     # Run comparisons
@@ -627,6 +694,7 @@ def main() -> int:
                 jit_exe, aot_exe, model_path, tc, runs=args.runs,
                 device=device if gpu_layers is None else "gpu",
                 gpu_layers=gpu_layers,
+                max_tokens=args.tokens if args.tokens > 0 else None,
             )
             results.append(r)
 
