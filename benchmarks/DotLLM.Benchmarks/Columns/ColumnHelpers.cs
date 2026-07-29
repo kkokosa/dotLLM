@@ -32,10 +32,23 @@ internal static class ColumnHelpers
     public static string? TryGetMetricsKey(BenchmarkCase benchmarkCase)
     {
         var envPath = Environment.GetEnvironmentVariable("DOTLLM_BENCH_MODEL_PATH");
-        if (!string.IsNullOrEmpty(envPath))
-            return Path.GetFileNameWithoutExtension(envPath);
+        string? baseKey = !string.IsNullOrEmpty(envPath)
+            ? Path.GetFileNameWithoutExtension(envPath)
+            : TryGetModel(benchmarkCase)?.ToString();
 
-        var model = TryGetModel(benchmarkCase);
-        return model?.ToString();
+        if (baseKey is null)
+            return null;
+
+        // MultiRuntimeConfig names each job after its target framework, so a job id of the
+        // form "netN.M" identifies the runtime and selects that job's metrics file. Any other
+        // id (BDN's generated "Job-XXXX") means a single-runtime run — use the plain key.
+        string? jobId = benchmarkCase.Job?.Id;
+        return IsTfm(jobId)
+            ? InferenceMetricsFile.ComposeKey(baseKey, jobId!)
+            : baseKey;
     }
+
+    private static bool IsTfm(string? id) =>
+        id is not null && id.StartsWith("net", StringComparison.Ordinal)
+        && id.Length > 3 && char.IsDigit(id[3]);
 }

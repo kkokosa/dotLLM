@@ -27,7 +27,10 @@ public enum BenchmarkModel
 /// End-to-end inference benchmarks measuring prefill + decode throughput.
 /// Custom BDN columns display tok/s via a file-based metrics bridge.
 /// </summary>
-[SimpleJob(warmupCount: 2, iterationCount: 5)]
+// Job configuration lives in MultiRuntimeConfig so a single run can span several .NET
+// runtimes (DOTLLM_BENCH_RUNTIMES). It carries the same warmup/iteration counts the
+// [SimpleJob(warmupCount: 2, iterationCount: 5)] attribute used to set here.
+[Config(typeof(MultiRuntimeConfig))]
 public class InferenceBenchmarks
 {
     private static readonly Dictionary<BenchmarkModel, (string RepoId, string Filename, int ApproxSizeMB)> s_models = new()
@@ -201,7 +204,11 @@ public class InferenceBenchmarks
                 AllDecodeMs: decodeMsAll,
                 AllPrefillMs: prefillMsAll);
 
+            // Write both the plain key (single-runtime runs, and backward compatibility) and a
+            // runtime-qualified one, so a multi-runtime run keeps each job's metrics separate.
             InferenceMetricsFile.Write(_metricsKey, metrics);
+            InferenceMetricsFile.Write(
+                InferenceMetricsFile.ComposeKey(_metricsKey, InferenceMetricsFile.CurrentTfm), metrics);
         }
 
         _model?.Dispose();

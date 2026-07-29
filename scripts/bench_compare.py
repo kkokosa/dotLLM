@@ -129,6 +129,9 @@ class EngineResult:
     all_prefill_tok_per_sec: list[float] | None = None
     all_decode_ms: list[float] | None = None
     all_prefill_ms: list[float] | None = None
+    # Target framework this result was produced on, e.g. "net11.0". None when the engine has
+    # no runtime dimension (llama.cpp) or when a single-runtime BDN run was requested.
+    runtime: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +405,26 @@ def find_benchmark_project() -> Path:
     raise FileNotFoundError(f"Cannot find benchmark project. Tried: {csproj}")
 
 
+def _parse_bdn_runtime(display_info: str) -> str | None:
+    """Extract the target framework from a BDN DisplayInfo string.
+
+    MultiRuntimeConfig names each job after its TFM, so DisplayInfo reads:
+
+        InferenceBenchmarks.'E2E inference (prefill + decode)': net11.0(Toolchain=net11.0, ...) [Model=...]
+
+    Returns "net11.0" here. Returns None for BDN's generated job ids ("Job-ZVFABM"), which
+    indicate a single-runtime run with no explicit runtime dimension.
+
+    Note the method title may itself contain parentheses, so the job token is located by the
+    ": " separator rather than by scanning for the first "(".
+    """
+    match = re.search(r":\s([^\s(]+)\(", display_info)
+    if not match:
+        return None
+    job_id = match.group(1)
+    return job_id if re.fullmatch(r"net\d+\.\d+", job_id) else None
+
+
 def run_dotllm(
     model_path: str | None,
     prompt: str,
@@ -413,6 +436,7 @@ def run_dotllm(
     iterations: int | None = None,
     device: str = "cpu",
     threads: int | None = None,
+    runtimes: str | None = None,
     **kwargs,
 ) -> list[EngineResult]:
     """Run dotLLM BDN benchmarks and parse results."""
@@ -446,6 +470,8 @@ def run_dotllm(
         env["DOTLLM_BENCH_DEVICE"] = device
     if threads is not None:
         env["DOTLLM_BENCH_THREADS"] = str(threads)
+    if runtimes:
+        env["DOTLLM_BENCH_RUNTIMES"] = runtimes
 
     print(f"[dotLLM] Running BDN: {' '.join(cmd)}")
     if model_path:
@@ -484,9 +510,19 @@ def run_dotllm(
             continue
 
         for bench in report.get("Benchmarks", []):
-            stats = bench.get("Statistics", {})
+            # BDN writes "Statistics": null for a benchmark that produced no results (e.g. the
+            # toolchain failed to build). dict.get's default only applies when the key is
+            # ABSENT, so this must be `or {}` rather than a default argument.
+            stats = bench.get("Statistics") or {}
+            if not stats:
+                print(f"[dotLLM] No statistics for {bench.get('DisplayInfo', '<unknown>')} "
+                      f"— the benchmark produced no results (check the BDN build output above).",
+                      file=sys.stderr)
+                continue
             mean_ns = stats.get("Mean", 0)
             stddev_ns = stats.get("StandardDeviation", 0)
+
+            runtime = _parse_bdn_runtime(bench.get("DisplayInfo", ""))
 
             # Determine the model name for display and metrics file lookup
             model_name = metrics_key
@@ -498,9 +534,16 @@ def run_dotllm(
                         model_name = param.split("=", 1)[1]
                         break
 
-            # Read custom metrics from file bridge
+            # Read custom metrics from file bridge. With a job per runtime, every job
+            # benchmarks the same model, so the benchmark also writes a runtime-qualified file
+            # to stop the jobs overwriting each other. Prefer that; fall back to the plain key
+            # for single-runtime runs.
             metrics_dir = Path(tempfile.gettempdir()) / "dotllm-bdn-metrics"
             metrics_file = metrics_dir / f"{model_name}.json"
+            if runtime:
+                qualified = metrics_dir / f"{model_name}__{runtime}.json"
+                if qualified.exists():
+                    metrics_file = qualified
 
             median_prefill_ms = 0.0
             median_decode_ms = 0.0
@@ -553,10 +596,14 @@ def run_dotllm(
             total_tok_s = total_tokens / (total_ms / 1000.0) if total_ms > 0 else 0
             ms_per_tok = dc_ms / decode_tokens if decode_tokens > 0 else 0
 
-            engine_label = f"dotLLM ({device})" if device != "cpu" else "dotLLM"
+            # Qualify the label so multi-runtime rows stay distinct in the comparison and
+            # pivot tables, which group by engine name.
+            label_parts = [p for p in (device if device != "cpu" else None, runtime) if p]
+            engine_label = f"dotLLM ({', '.join(label_parts)})" if label_parts else "dotLLM"
             bdn_results.append(EngineResult(
                 engine=engine_label,
                 model=model_name,
+                runtime=runtime,
                 prefill_ms=pf_ms,
                 decode_ms=dc_ms,
                 prefill_tokens=prefill_tokens,
@@ -1302,6 +1349,7 @@ def export_results_json(
     models: list[str],
     device: str = "cpu",
     threads: int | None = None,
+    runtimes: str | None = None,
 ) -> None:
     """Export benchmark results to a structured JSON file."""
     export = {
@@ -1316,6 +1364,8 @@ def export_results_json(
             "device": device,
             # null means each engine used its own default, which differ between engines.
             "threads": threads,
+            # null means the host runtime only; results carry their own `runtime` field.
+            "runtimes": runtimes,
         },
         "results": [asdict(r) for r in results],
     }
@@ -1351,6 +1401,11 @@ def main() -> int:
                         help="Predefined prompt size: short (~5 tok), medium (~256 tok), large (~1024 tok)")
     parser.add_argument("--tokens", type=int, default=20,
                         help="Max tokens to generate (default: 20)")
+    parser.add_argument("--runtimes", type=str, default=None,
+                        help="Comma-separated target frameworks to benchmark dotLLM on, e.g. "
+                             "'net10.0,net11.0'. Each becomes a separate BenchmarkDotNet job "
+                             "and a separate result row. Requires an SDK able to target each "
+                             "one. Omit to use the host runtime only (current behaviour).")
     parser.add_argument("--threads", type=int, default=None,
                         help="CPU threads for BOTH engines (-t N). Omit to keep each engine's "
                              "own default, which are NOT the same: dotLLM auto-selects all "
@@ -1523,6 +1578,7 @@ def main() -> int:
                     iterations=args.iterations,
                     device=device,
                     threads=args.threads,
+                    runtimes=args.runtimes,
                 )
                 all_results.extend(results)
 
@@ -1560,6 +1616,7 @@ def main() -> int:
             resolved_models,
             device=args.device,
             threads=args.threads,
+            runtimes=args.runtimes,
         )
 
     return 0

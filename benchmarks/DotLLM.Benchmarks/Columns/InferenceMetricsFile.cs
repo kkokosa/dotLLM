@@ -37,6 +37,21 @@ internal sealed record InferenceMetricsFile(
     private static string GetFilePath(string key) =>
         Path.Combine(GetMetricsDir(), $"{key}.json");
 
+    /// <summary>
+    /// Composes a metrics key qualified by target framework, so jobs for different runtimes
+    /// benchmarking the same model do not overwrite each other's metrics.
+    /// </summary>
+    /// <remarks>
+    /// The bridge is keyed by model alone historically. With a job per runtime
+    /// (<see cref="MultiRuntimeConfig"/>) every job would otherwise write the same file and the
+    /// last one to finish would win, giving every runtime identical tok/s.
+    /// </remarks>
+    public static string ComposeKey(string modelKey, string? tfm) =>
+        string.IsNullOrEmpty(tfm) ? modelKey : $"{modelKey}__{tfm}";
+
+    /// <summary>Target framework moniker of the currently executing runtime, e.g. <c>net11.0</c>.</summary>
+    public static string CurrentTfm => $"net{Environment.Version.Major}.0";
+
     private static string GetFilePath(BenchmarkModel model) =>
         GetFilePath(model.ToString());
 

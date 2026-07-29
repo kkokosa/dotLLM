@@ -598,6 +598,25 @@ To run comparison benchmarks against [llama.cpp](https://github.com/ggerganov/ll
 
 > **Always pass `--threads` when comparing engines.** Their defaults are different: dotLLM auto-selects *all logical cores*, llama.cpp auto-selects *physical cores*. On a 32-logical/16-physical machine that is 32 vs 16, which makes the comparison meaningless. bench_compare warns when you omit it.
 
+### Comparing .NET runtimes
+
+`--runtimes` runs dotLLM on several target frameworks in one comparison, each as a separate BenchmarkDotNet job with its own result row:
+
+```bash
+python scripts/bench_compare.py --model QuantFactory/SmolLM-135M-GGUF \
+  --dotllm --llamacpp --threads 16 --runtimes net10.0,net11.0
+```
+
+```
+Decode Throughput (tok/s)                               * = fastest (highest)
+Model                Quant      llama.cpp  dotLLM (net10.0)  dotLLM (net11.0)
+SmolLM-135M          Q8_0          304.6     360.3    417.0*
+```
+
+Each requested framework needs an SDK able to target it -- benchmarking `net11.0` requires the .NET 11 SDK installed, otherwise the job fails with `NETSDK1045`. `global.json` uses `rollForward: latestMajor` with `allowPrerelease`, so machines with only the .NET 10 SDK keep resolving to it and the default (host runtime only) is unaffected.
+
+> Do **not** set `DOTNET_ROLL_FORWARD` to benchmark a newer runtime. BenchmarkDotNet generates its toolchain project to match the *host* runtime, so rolling the host forward makes it emit a project the pinned SDK cannot build. `--runtimes` is the supported mechanism.
+
 > [llama.cpp](https://github.com/ggerganov/llama.cpp) is optional. All dotLLM benchmarks work without it. The `--llamacpp` flag simply adds a side-by-side comparison column.
 
 ## NuGet Packages
