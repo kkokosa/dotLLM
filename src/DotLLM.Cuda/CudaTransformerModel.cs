@@ -87,7 +87,10 @@ public sealed unsafe class CudaTransformerModel : IModel
 
         // Resolve PTX directory
         ptxDir ??= Path.Combine(AppContext.BaseDirectory, "ptx");
-        var kernels = new CudaKernels(ptxDir);
+        // Pass device compute capability so arch-tiered PTX variants can be selected
+        // when shipped; falls back to the universal compute_61 PTX otherwise.
+        var device = CudaDevice.GetDevice(deviceId);
+        var kernels = new CudaKernels(ptxDir, device.ComputeCapabilityMajor, device.ComputeCapabilityMinor);
 
         // Check VRAM before loading — warn if model likely exceeds available memory.
         // Estimate: sum of quantized byte sizes for all GGUF tensors.

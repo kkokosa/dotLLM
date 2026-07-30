@@ -90,31 +90,45 @@ public sealed unsafe class CudaKernels : IDisposable
     /// Loads all PTX modules from the specified directory.
     /// </summary>
     /// <param name="ptxDir">Directory containing compiled .ptx files.</param>
-    public CudaKernels(string ptxDir)
+    /// <param name="ccMajor">
+    /// Device compute capability major version. When supplied (together with
+    /// <paramref name="ccMinor"/>), arch-tiered PTX variants named
+    /// <c>&lt;kernel&gt;.sm_&lt;arch&gt;.ptx</c> are preferred when shipped and <c>&lt;=</c> the device
+    /// arch; otherwise the universal <c>compute_61</c> <c>&lt;kernel&gt;.ptx</c> is used. The default
+    /// of <c>0</c> always selects the universal fallback (today's behavior).
+    /// </param>
+    /// <param name="ccMinor">Device compute capability minor version. See <paramref name="ccMajor"/>.</param>
+    public CudaKernels(string ptxDir, int ccMajor = 0, int ccMinor = 0)
     {
-        _rmsnormModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "rmsnorm.ptx"));
-        _ropeModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "rope.ptx"));
-        _swigluModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "swiglu.ptx"));
-        _addModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "add.ptx"));
-        _softmaxModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "softmax.ptx"));
-        _embeddingModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "embedding.ptx"));
-        _attentionModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "attention.ptx"));
-        _biasAddModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "bias_add.ptx"));
-        _perHeadRmsNormModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "per_head_rmsnorm.ptx"));
-        _convertModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "convert.ptx"));
-        _dequantModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant.ptx"));
-        _quantizedGemvModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "quantized_gemv.ptx"));
-        _fusedAddRmsNormModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "fused_add_rmsnorm.ptx"));
-        _rmsnormF32InModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "rmsnorm_f32in.ptx"));
-        _addF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "add_f32.ptx"));
-        _embeddingF32OutModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "embedding_f32out.ptx"));
-        _ropeF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "rope_f32.ptx"));
-        _attentionF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "attention_f32.ptx"));
-        _swigluF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "swiglu_f32.ptx"));
-        _biasAddF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "bias_add_f32.ptx"));
-        _perHeadRmsNormF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "per_head_rmsnorm_f32.ptx"));
-        _rmsnormF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "rmsnorm_f32.ptx"));
-        _quantizedGemvF32InModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "quantized_gemv_f32in.ptx"));
+        // Arch-aware load: prefer a shipped "<kernel>.sm_<arch>.ptx" variant whose arch
+        // is <= the device compute capability; fall back to the universal compute_61
+        // "<kernel>.ptx". No-op (identical to LoadFromFile) when no variants are shipped
+        // or when ccMajor/ccMinor are 0.
+        CudaModule Load(string fileName) => CudaModule.LoadForArch(ptxDir, fileName, ccMajor, ccMinor);
+
+        _rmsnormModule = Load("rmsnorm.ptx");
+        _ropeModule = Load("rope.ptx");
+        _swigluModule = Load("swiglu.ptx");
+        _addModule = Load("add.ptx");
+        _softmaxModule = Load("softmax.ptx");
+        _embeddingModule = Load("embedding.ptx");
+        _attentionModule = Load("attention.ptx");
+        _biasAddModule = Load("bias_add.ptx");
+        _perHeadRmsNormModule = Load("per_head_rmsnorm.ptx");
+        _convertModule = Load("convert.ptx");
+        _dequantModule = Load("dequant.ptx");
+        _quantizedGemvModule = Load("quantized_gemv.ptx");
+        _fusedAddRmsNormModule = Load("fused_add_rmsnorm.ptx");
+        _rmsnormF32InModule = Load("rmsnorm_f32in.ptx");
+        _addF32Module = Load("add_f32.ptx");
+        _embeddingF32OutModule = Load("embedding_f32out.ptx");
+        _ropeF32Module = Load("rope_f32.ptx");
+        _attentionF32Module = Load("attention_f32.ptx");
+        _swigluF32Module = Load("swiglu_f32.ptx");
+        _biasAddF32Module = Load("bias_add_f32.ptx");
+        _perHeadRmsNormF32Module = Load("per_head_rmsnorm_f32.ptx");
+        _rmsnormF32Module = Load("rmsnorm_f32.ptx");
+        _quantizedGemvF32InModule = Load("quantized_gemv_f32in.ptx");
 
         _rmsnormFunc = _rmsnormModule.GetFunction("rmsnorm_f16");
         _rmsnormF32Func = _rmsnormF32Module.GetFunction("rmsnorm_f32");
@@ -156,10 +170,9 @@ public sealed unsafe class CudaKernels : IDisposable
         _dequantQ6_KFunc = _dequantModule.GetFunction("dequant_q6_k_f16");
 
         // KV-cache quantization (optional — PTX may not be compiled yet)
-        string quantKvPath = Path.Combine(ptxDir, "quant_kv.ptx");
-        if (File.Exists(quantKvPath))
+        if (File.Exists(Path.Combine(ptxDir, "quant_kv.ptx")))
         {
-            _quantKvModule = CudaModule.LoadFromFile(quantKvPath);
+            _quantKvModule = Load("quant_kv.ptx");
             _quantKvQ8_0Func = _quantKvModule.GetFunction("quant_f16_to_q8_0");
             _quantKvQ4_0Func = _quantKvModule.GetFunction("quant_f16_to_q4_0");
         }

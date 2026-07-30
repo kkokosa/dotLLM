@@ -137,7 +137,10 @@ public sealed unsafe class HybridTransformerModel : IModel
         cublas.SetStream(stream);
 
         string? ptxDir = Path.Combine(AppContext.BaseDirectory, "ptx");
-        var kernels = new CudaKernels(ptxDir);
+        // Pass device compute capability so arch-tiered PTX variants can be selected
+        // when shipped; falls back to the universal compute_61 PTX otherwise.
+        var device = CudaDevice.GetDevice(deviceId);
+        var kernels = new CudaKernels(ptxDir, device.ComputeCapabilityMajor, device.ComputeCapabilityMinor);
 
         // 3. Upload only GPU layers to VRAM
         var gpuWeights = CudaWeights.LoadFromGguf(cpuWeights, config, kernels, stream.Handle, numGpuLayers);
