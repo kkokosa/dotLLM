@@ -8,4 +8,8 @@
     <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
+  </ItemGroup>
+
 </Project>

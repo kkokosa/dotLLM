@@ -20,6 +20,14 @@ public abstract record HookResult
     /// <returns>A result that replaces the activation.</returns>
     public static HookResult Replace(float[] activation) => new ReplaceResult(activation);
 
+    /// <summary>
+    /// Replace the activation with new values copied from the provided span.
+    /// Convenience overload for callers that hold spans (slices of larger buffers).
+    /// </summary>
+    /// <param name="activation">Replacement activation data. Must match the original shape.</param>
+    /// <returns>A result that replaces the activation.</returns>
+    public static HookResult Replace(ReadOnlySpan<float> activation) => new ReplaceResult(activation.ToArray());
+
     /// <summary>Read-only pass-through result.</summary>
     public sealed record ContinueResult : HookResult;
 
