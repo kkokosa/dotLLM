@@ -221,6 +221,152 @@ public sealed unsafe class MatMulParallelTests : IDisposable
         }
     }
 
+    // ──────────────────── GEMV/GEMM BF16 ────────────────────
+
+    [Theory]
+    [InlineData(32, 64)]
+    [InlineData(64, 128)]
+    [InlineData(256, 4096)]
+    public void GemvBF16_Parallel_MatchesSingleThreaded(int m, int k)
+    {
+        var rng = new Random(43);
+        ushort* weights = (ushort*)NativeMemory.AlignedAlloc((nuint)((long)m * k * sizeof(ushort)), 64);
+        float* x = (float*)NativeMemory.AlignedAlloc((nuint)(k * sizeof(float)), 64);
+        float* resultST = (float*)NativeMemory.AlignedAlloc((nuint)(m * sizeof(float)), 64);
+        float* resultMT = (float*)NativeMemory.AlignedAlloc((nuint)(m * sizeof(float)), 64);
+
+        try
+        {
+            // Convert float32 to BF16 (upper 16 bits)
+            for (long i = 0; i < (long)m * k; i++)
+            {
+                float val = rng.NextSingle() * 2f - 1f;
+                weights[i] = (ushort)(BitConverter.SingleToInt32Bits(val) >> 16);
+            }
+            FillFloats(x, k, rng);
+
+            MatMul.GemvBF16((nint)weights, x, resultST, m, k);
+            MatMul.GemvBF16((nint)weights, x, resultMT, m, k, _pool);
+
+            AssertBitIdentical(resultST, resultMT, m);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree(weights);
+            NativeMemory.AlignedFree(x);
+            NativeMemory.AlignedFree(resultST);
+            NativeMemory.AlignedFree(resultMT);
+        }
+    }
+
+    [Theory]
+    [InlineData(64, 128, 4)]
+    [InlineData(256, 4096, 8)]
+    [InlineData(4096, 4096, 16)]
+    public void GemmBF16_Parallel_MatchesSingleThreaded(int m, int k, int n)
+    {
+        var rng = new Random(44);
+        ushort* weights = (ushort*)NativeMemory.AlignedAlloc((nuint)((long)m * k * sizeof(ushort)), 64);
+        float* b = (float*)NativeMemory.AlignedAlloc((nuint)((long)n * k * sizeof(float)), 64);
+        float* cST = (float*)NativeMemory.AlignedAlloc((nuint)((long)n * m * sizeof(float)), 64);
+        float* cMT = (float*)NativeMemory.AlignedAlloc((nuint)((long)n * m * sizeof(float)), 64);
+
+        try
+        {
+            // Convert float32 to BF16 (upper 16 bits)
+            for (long i = 0; i < (long)m * k; i++)
+            {
+                float val = rng.NextSingle() * 2f - 1f;
+                weights[i] = (ushort)(BitConverter.SingleToInt32Bits(val) >> 16);
+            }
+            FillFloats(b, n * k, rng);
+
+            MatMul.GemmBF16((nint)weights, b, cST, m, k, n);
+            MatMul.GemmBF16((nint)weights, b, cMT, m, k, n, _pool);
+
+            AssertBitIdentical(cST, cMT, n * m);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree(weights);
+            NativeMemory.AlignedFree(b);
+            NativeMemory.AlignedFree(cST);
+            NativeMemory.AlignedFree(cMT);
+        }
+    }
+
+    [Fact]
+    public void GemmBF16_Parallel_SingleToken_FallsBackToGemvAndMatchesSingleThreaded()
+    {
+        const int m = 512;
+        const int k = 256;
+        const int n = 1;
+
+        var rng = new Random(45);
+        ushort* weights = (ushort*)NativeMemory.AlignedAlloc((nuint)((long)m * k * sizeof(ushort)), 64);
+        float* b = (float*)NativeMemory.AlignedAlloc((nuint)((long)n * k * sizeof(float)), 64);
+        float* cST = (float*)NativeMemory.AlignedAlloc((nuint)((long)n * m * sizeof(float)), 64);
+        float* cMT = (float*)NativeMemory.AlignedAlloc((nuint)((long)n * m * sizeof(float)), 64);
+
+        try
+        {
+            for (long i = 0; i < (long)m * k; i++)
+            {
+                float val = rng.NextSingle() * 2f - 1f;
+                weights[i] = (ushort)(BitConverter.SingleToInt32Bits(val) >> 16);
+            }
+            FillFloats(b, n * k, rng);
+
+            MatMul.GemmBF16((nint)weights, b, cST, m, k, n);
+            MatMul.GemmBF16((nint)weights, b, cMT, m, k, n, _pool);
+
+            AssertBitIdentical(cST, cMT, n * m);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree(weights);
+            NativeMemory.AlignedFree(b);
+            NativeMemory.AlignedFree(cST);
+            NativeMemory.AlignedFree(cMT);
+        }
+    }
+
+    [Fact]
+    public void GemmBF16_Parallel_SingleTile_FallsBackAndMatchesSingleThreaded()
+    {
+        const int m = 8;
+        const int k = 64;
+        const int n = 4;
+
+        var rng = new Random(46);
+        ushort* weights = (ushort*)NativeMemory.AlignedAlloc((nuint)((long)m * k * sizeof(ushort)), 64);
+        float* b = (float*)NativeMemory.AlignedAlloc((nuint)((long)n * k * sizeof(float)), 64);
+        float* cST = (float*)NativeMemory.AlignedAlloc((nuint)((long)n * m * sizeof(float)), 64);
+        float* cMT = (float*)NativeMemory.AlignedAlloc((nuint)((long)n * m * sizeof(float)), 64);
+
+        try
+        {
+            for (long i = 0; i < (long)m * k; i++)
+            {
+                float val = rng.NextSingle() * 2f - 1f;
+                weights[i] = (ushort)(BitConverter.SingleToInt32Bits(val) >> 16);
+            }
+            FillFloats(b, n * k, rng);
+
+            MatMul.GemmBF16((nint)weights, b, cST, m, k, n);
+            MatMul.GemmBF16((nint)weights, b, cMT, m, k, n, _pool);
+
+            AssertBitIdentical(cST, cMT, n * m);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree(weights);
+            NativeMemory.AlignedFree(b);
+            NativeMemory.AlignedFree(cST);
+            NativeMemory.AlignedFree(cMT);
+        }
+    }
+
     // ──────────────────── ComputeRows parallel ────────────────────
 
     [Theory]

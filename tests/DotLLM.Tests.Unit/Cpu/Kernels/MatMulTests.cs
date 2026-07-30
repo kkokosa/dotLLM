@@ -1037,6 +1037,48 @@ public sealed unsafe class MatMulTests
     }
 
     [Fact]
+    public void GemmBF16_MatchesSequentialGemvBF16()
+    {
+        var rng = new Random(43);
+        const int m = 8, k = 64, n = 4;
+
+        nint weightsPtr = (nint)NativeMemory.AlignedAlloc((nuint)(m * k * sizeof(ushort)), 64);
+        try
+        {
+            ushort* wbf16 = (ushort*)weightsPtr;
+            // Convert float32 to BF16 (upper 16 bits)
+            for (int i = 0; i < m * k; i++)
+            {
+                float val = rng.NextSingle() * 2f - 1f;
+                wbf16[i] = (ushort)(BitConverter.SingleToInt32Bits(val) >> 16);
+            }
+
+            float[] b = new float[n * k];
+            for (int i = 0; i < b.Length; i++) b[i] = rng.NextSingle() * 2f - 1f;
+
+            // Sequential GEMV
+            float[] seqResult = new float[n * m];
+            fixed (float* bp = b, sp = seqResult)
+            {
+                for (int t = 0; t < n; t++)
+                    MatMul.GemvBF16(weightsPtr, bp + t * k, sp + t * m, m, k);
+            }
+
+            // Batched GEMM
+            float[] gemmResult = new float[n * m];
+            fixed (float* bp = b, gp = gemmResult)
+                MatMul.GemmBF16(weightsPtr, bp, gp, m, k, n);
+
+            for (int i = 0; i < n * m; i++)
+                Assert.Equal(seqResult[i], gemmResult[i], 1e-3f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)weightsPtr);
+        }
+    }
+
+    [Fact]
     public void GemmQ8_0_NonAlignedK_Throws()
     {
         Assert.Throws<ArgumentException>(() =>

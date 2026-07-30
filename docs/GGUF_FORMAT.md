@@ -114,6 +114,7 @@ output.weight                        — LM head
 | 12 | Q4_K | 4.5 | 256 |
 | 13 | Q5_K | 5.5 | 256 |
 | 14 | Q6_K | 6.6 | 256 |
+| 30 | BF16 | 16 | 1 |
 
 ## Parsing Implementation
 

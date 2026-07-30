@@ -15,6 +15,7 @@ public static class QuantizationTypeExtensions
     {
         QuantizationType.F32 => elementCount * 4,
         QuantizationType.F16 => elementCount * 2,
+        QuantizationType.BF16 => elementCount * 2,
         QuantizationType.Q4_0 => elementCount / 32 * 18,
         QuantizationType.Q4_1 => elementCount / 32 * 20,
         QuantizationType.Q5_0 => elementCount / 32 * 22,

@@ -2773,6 +2773,241 @@ public static unsafe partial class MatMul
         pool.Dispatch((nint)(&ctx), &GemmTiledF16Worker);
     }
 
+    // ──────────────────── BF16 GEMV / GEMM ────────────────────
+
+    /// <summary>
+    /// BF16 GEMV: dequantize each row to f32 scratch, then dot product.
+    /// A is [M,K] BF16 row-major (weights), x is [K] f32, result is [M] f32.
+    /// </summary>
+    [SkipLocalsInit]
+    public static void GemvBF16(nint weights, float* x, float* y, int m, int k)
+    {
+        const int stackThreshold = 2048; // 8KB of floats
+        ushort* weightsBF16 = (ushort*)weights;
+
+        if (k <= stackThreshold)
+        {
+            float* rowBuf = stackalloc float[k];
+            for (int row = 0; row < m; row++)
+            {
+                DequantizeBF16Row(weightsBF16 + row * k, rowBuf, k);
+                y[row] = TensorPrimitives.Dot(new ReadOnlySpan<float>(rowBuf, k), new ReadOnlySpan<float>(x, k));
+            }
+        }
+        else
+        {
+            float[] rented = ArrayPool<float>.Shared.Rent(k);
+            try
+            {
+                fixed (float* rowBuf = rented)
+                {
+                    for (int row = 0; row < m; row++)
+                    {
+                        DequantizeBF16Row(weightsBF16 + row * k, rowBuf, k);
+                        y[row] = TensorPrimitives.Dot(new ReadOnlySpan<float>(rowBuf, k), new ReadOnlySpan<float>(x, k));
+                    }
+                }
+            }
+            finally
+            {
+                ArrayPool<float>.Shared.Return(rented);
+            }
+        }
+    }
+
+    /// <summary>
+    /// BF16 GEMM: <c>C[N,M] = B[N,K] × A[M,K]^T</c> where A is BF16 weights.
+    /// Uses cache-tiled traversal: weight-tile-first so tiles stay in L2 across tokens.
+    /// </summary>
+    [SkipLocalsInit]
+    public static void GemmBF16(nint weights, float* b, float* c, int m, int k, int n)
+    {
+        int rowBytes = k * sizeof(ushort);
+        int tileM = ComputeTileM(rowBytes);
+        ushort* weightsBF16 = (ushort*)weights;
+
+        float[] rented = ArrayPool<float>.Shared.Rent(k);
+        try
+        {
+            fixed (float* rowBuf = rented)
+            {
+                for (int mStart = 0; mStart < m; mStart += tileM)
+                {
+                    int tileRows = Math.Min(tileM, m - mStart);
+                    ushort* tileWeightsBF16 = weightsBF16 + (long)mStart * k;
+
+                    for (int t = 0; t < n; t++)
+                    {
+                        float* xPtr = b + t * k;
+                        float* outPtr = c + t * m + mStart;
+                        var xSpan = new ReadOnlySpan<float>(xPtr, k);
+                        var destRow = new Span<float>(rowBuf, k);
+
+                        for (int row = 0; row < tileRows; row++)
+                        {
+                            DequantizeBF16Row(tileWeightsBF16 + row * k, rowBuf, k);
+                            outPtr[row] = TensorPrimitives.Dot(destRow, xSpan);
+                        }
+                    }
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Converts a row of BF16 values to float32.
+    /// BF16 is the upper 16 bits of float32, so conversion is a left shift.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void DequantizeBF16Row(ushort* src, float* dest, int count)
+    {
+        for (int i = 0; i < count; i++)
+            dest[i] = BitConverter.Int32BitsToSingle(src[i] << 16);
+    }
+
+    /// <summary>
+    /// BF16 GEMV with optional parallelism. Uses per-worker scratch for dequantization.
+    /// </summary>
+    [SkipLocalsInit]
+    public static void GemvBF16(nint weights, float* x, float* y, int m, int k,
+                                ComputeThreadPool? pool)
+    {
+        if (pool is null || m < ParallelMinRows)
+        {
+            GemvBF16(weights, x, y, m, k);
+            return;
+        }
+
+        int threadCount = pool.ThreadCount;
+        nint* scratchPtrs = stackalloc nint[threadCount];
+        int scratchBytes = k * sizeof(float);
+        for (int i = 0; i < threadCount; i++)
+            scratchPtrs[i] = pool.GetWorkerScratch(i, scratchBytes);
+
+        var ctx = new GemvBF16Ctx
+        {
+            Weights = weights, X = x, Y = y,
+            M = m, K = k, ScratchPtrs = scratchPtrs
+        };
+        pool.Dispatch((nint)(&ctx), &GemvBF16Worker);
+    }
+
+    /// <summary>
+    /// BF16 GEMM with optional parallelism. Uses per-worker scratch for dequantization.
+    /// </summary>
+    [SkipLocalsInit]
+    public static void GemmBF16(nint weights, float* b, float* c, int m, int k, int n,
+                                ComputeThreadPool? pool)
+    {
+        if (pool is null)
+        {
+            GemmBF16(weights, b, c, m, k, n);
+            return;
+        }
+
+        if (n == 1)
+        {
+            GemvBF16(weights, b, c, m, k, pool);
+            return;
+        }
+
+        int rowBytes = k * sizeof(ushort);
+        int tileM = ComputeTileM(rowBytes);
+        int totalTiles = (m + tileM - 1) / tileM;
+
+        if (totalTiles < 2)
+        {
+            GemmBF16(weights, b, c, m, k, n);
+            return;
+        }
+
+        int threadCount = pool.ThreadCount;
+        nint* scratchPtrs = stackalloc nint[threadCount];
+        int scratchBytes = k * sizeof(float);
+        for (int i = 0; i < threadCount; i++)
+            scratchPtrs[i] = pool.GetWorkerScratch(i, scratchBytes);
+
+        var ctx = new GemmTiledBF16Ctx
+        {
+            Weights = weights, B = b, C = c,
+            M = m, K = k, N = n, TileM = tileM, ScratchPtrs = scratchPtrs
+        };
+        pool.Dispatch((nint)(&ctx), &GemmTiledBF16Worker);
+    }
+
+    private struct GemvBF16Ctx
+    {
+        public nint Weights;
+        public float* X;
+        public float* Y;
+        public int M;
+        public int K;
+        public nint* ScratchPtrs;
+    }
+
+    private struct GemmTiledBF16Ctx
+    {
+        public nint Weights;
+        public float* B;
+        public float* C;
+        public int M;
+        public int K;
+        public int N;
+        public int TileM;
+        public nint* ScratchPtrs;
+    }
+
+    private static void GemvBF16Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<GemvBF16Ctx>((void*)ctxPtr);
+        PartitionRows(ctx.M, threadIdx, threadCount, out int start, out int count);
+        if (count == 0) return;
+        ushort* weightsBF16 = (ushort*)ctx.Weights;
+        float* scratch = (float*)ctx.ScratchPtrs[threadIdx];
+        var xSpan = new ReadOnlySpan<float>(ctx.X, ctx.K);
+        var destRow = new Span<float>(scratch, ctx.K);
+        for (int row = start; row < start + count; row++)
+        {
+            DequantizeBF16Row(weightsBF16 + (long)row * ctx.K, scratch, ctx.K);
+            ctx.Y[row] = TensorPrimitives.Dot(destRow, xSpan);
+        }
+    }
+
+    private static void GemmTiledBF16Worker(nint ctxPtr, int threadIdx, int threadCount)
+    {
+        ref var ctx = ref Unsafe.AsRef<GemmTiledBF16Ctx>((void*)ctxPtr);
+        int totalTiles = (ctx.M + ctx.TileM - 1) / ctx.TileM;
+        int tilesPerThread = (totalTiles + threadCount - 1) / threadCount;
+        int startTile = threadIdx * tilesPerThread;
+        int endTile = Math.Min(startTile + tilesPerThread, totalTiles);
+
+        ushort* weightsBF16 = (ushort*)ctx.Weights;
+        float* rowBuf = (float*)ctx.ScratchPtrs[threadIdx];
+        var destRow = new Span<float>(rowBuf, ctx.K);
+
+        for (int tile = startTile; tile < endTile; tile++)
+        {
+            int mStart = tile * ctx.TileM;
+            int tileRows = Math.Min(ctx.TileM, ctx.M - mStart);
+            ushort* tileWeightsBF16 = weightsBF16 + (long)mStart * ctx.K;
+            for (int t = 0; t < ctx.N; t++)
+            {
+                float* xPtr = ctx.B + t * ctx.K;
+                float* outPtr = ctx.C + t * ctx.M + mStart;
+                var xSpan = new ReadOnlySpan<float>(xPtr, ctx.K);
+                for (int row = 0; row < tileRows; row++)
+                {
+                    DequantizeBF16Row(tileWeightsBF16 + row * ctx.K, rowBuf, ctx.K);
+                    outPtr[row] = TensorPrimitives.Dot(destRow, xSpan);
+                }
+            }
+        }
+    }
+
     // ──────────────────── Horizontal reduction helpers ────────────────────
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
