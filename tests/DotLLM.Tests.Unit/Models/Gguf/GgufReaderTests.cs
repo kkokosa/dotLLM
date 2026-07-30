@@ -193,6 +193,54 @@ public class GgufReaderTests
         Assert.Equal(42u, metadata["count"].Value);
     }
 
+    /// <summary>
+    /// Regression for the GGUF v2 width bug: v2 stores counts, string lengths and array lengths
+    /// as <c>uint64</c> (identical to v3 — the <c>uint32</c> form was v1 only). The reader and the
+    /// in-memory test writer both previously treated v2 as uint32, so they agreed with each other
+    /// while disagreeing with the spec — and every real v2 file (e.g. TheBloke's Llama-2-13B-GGUF)
+    /// mis-parsed: a uint32 string length consumed 4 bytes where the file wrote 8, cascading through
+    /// the string-array metadata into garbage tensor names and offsets (the latter surfaced as a
+    /// bogus "data extends beyond file boundary" with an empty tensor name). A scalar-only v2 case
+    /// can't catch this — it needs a multi-element array followed by tensor infos so misalignment
+    /// compounds. This asserts a full v2 parse (header → array metadata → tensor infos) is exact.
+    /// </summary>
+    [Fact]
+    public void Reads_V2_FullFile_ArrayMetadataThenTensors_Exactly()
+    {
+        var data = new GgufTestData(version: 2)
+            .AddString("general.architecture", "llama")
+            .AddStringArray("tokenizer.ggml.tokens", ["<s>", "</s>", "hello", "world"])
+            .AddUInt32("llama.block_count", 2)
+            .AddTensor("token_embd.weight", [8, 16], 0, new byte[8 * 16 * 4])   // F32
+            .AddTensor("blk.0.attn_q.weight", [16, 16], 1, new byte[16 * 16 * 2]) // F16
+            .AddTensor("output_norm.weight", [16], 0, new byte[16 * 4]);          // F32
+        byte[] bytes = data.Build();
+
+        using var stream = new MemoryStream(bytes);
+        using var reader = new BinaryReader(stream);
+
+        var header = GgufReader.ReadHeader(reader);
+        Assert.Equal(2u, header.Version);
+        Assert.Equal(3ul, header.TensorCount);
+        Assert.Equal(3ul, header.MetadataKvCount);
+
+        var metadata = GgufReader.ReadMetadata(reader, header);
+        Assert.Equal("llama", metadata["general.architecture"].Value);
+        Assert.Equal(["<s>", "</s>", "hello", "world"],
+            (string[])metadata["tokenizer.ggml.tokens"].Value);
+        Assert.Equal(2u, metadata["llama.block_count"].Value);
+
+        var tensors = GgufReader.ReadTensorInfos(reader, header);
+        Assert.Equal(3, tensors.Count);
+        Assert.Equal("token_embd.weight", tensors[0].Name);
+        Assert.Equal("blk.0.attn_q.weight", tensors[1].Name);
+        Assert.Equal("output_norm.weight", tensors[2].Name);
+        // Offsets are sequential blobs (no alignment between them in the writer).
+        Assert.Equal(0ul, tensors[0].DataOffset);
+        Assert.Equal((ulong)(8 * 16 * 4), tensors[1].DataOffset);
+        Assert.Equal((ulong)(8 * 16 * 4 + 16 * 16 * 2), tensors[2].DataOffset);
+    }
+
     #endregion
 
     #region Tensor Infos

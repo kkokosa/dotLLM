@@ -144,20 +144,11 @@ internal sealed class GgufTestData
         _stream.SetLength(0);
         _stream.Position = 0;
 
-        // Header
+        // Header. GGUF v2 and v3 both store counts as uint64 (only the obsolete v1 used uint32).
         _writer.Write(GgufReader.GgufMagic);
         _writer.Write(_version);
-
-        if (_version == 2)
-        {
-            _writer.Write((uint)_tensorWriters.Count);
-            _writer.Write((uint)_metadataWriters.Count);
-        }
-        else
-        {
-            _writer.Write((ulong)_tensorWriters.Count);
-            _writer.Write((ulong)_metadataWriters.Count);
-        }
+        _writer.Write((ulong)_tensorWriters.Count);
+        _writer.Write((ulong)_metadataWriters.Count);
 
         // Metadata
         foreach (var writeMetadata in _metadataWriters)
@@ -200,10 +191,8 @@ internal sealed class GgufTestData
 
     private void WriteLength(BinaryWriter writer, ulong length)
     {
-        if (_version == 2)
-            writer.Write((uint)length);
-        else
-            writer.Write(length);
+        // String and array lengths are uint64 in both supported versions (v2 and v3); v1 used uint32.
+        writer.Write(length);
     }
 
     private static long AlignUp(long value, uint alignment)

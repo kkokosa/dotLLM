@@ -5,7 +5,9 @@ namespace DotLLM.Models.Gguf;
 
 /// <summary>
 /// Static binary parser for the GGUF file format. Pure functions: bytes in, structs out.
-/// Handles both GGUF v2 (uint32 counts) and v3 (uint64 counts).
+/// Supports GGUF v2 and v3, which are identical on the wire: tensor/metadata counts,
+/// string lengths and array lengths are all <c>uint64</c>. (The <c>uint32</c> form belongs to
+/// the obsolete v1, which the header validation rejects.)
 /// </summary>
 public static class GgufReader
 {
@@ -30,19 +32,9 @@ public static class GgufReader
             throw new InvalidDataException(
                 $"Unsupported GGUF version: {version}. Only versions 2 and 3 are supported.");
 
-        ulong tensorCount;
-        ulong metadataKvCount;
-
-        if (version == 2)
-        {
-            tensorCount = reader.ReadUInt32();
-            metadataKvCount = reader.ReadUInt32();
-        }
-        else
-        {
-            tensorCount = reader.ReadUInt64();
-            metadataKvCount = reader.ReadUInt64();
-        }
+        // GGUF v2 and v3 both store these counts as uint64 (the uint32 form was v1 only).
+        ulong tensorCount = reader.ReadUInt64();
+        ulong metadataKvCount = reader.ReadUInt64();
 
         return new GgufHeader(version, tensorCount, metadataKvCount);
     }
@@ -109,11 +101,12 @@ public static class GgufReader
     }
 
     /// <summary>
-    /// Reads a GGUF length-prefixed UTF-8 string. V2 uses uint32 length, v3 uses uint64.
+    /// Reads a GGUF length-prefixed UTF-8 string. The length is uint64 in both supported
+    /// versions (v2 and v3); only the obsolete v1 used a uint32 length.
     /// </summary>
     internal static string ReadGgufString(BinaryReader reader, uint version)
     {
-        ulong length = version == 2 ? reader.ReadUInt32() : reader.ReadUInt64();
+        ulong length = reader.ReadUInt64();
 
         if (length == 0)
             return string.Empty;
@@ -149,7 +142,8 @@ public static class GgufReader
     private static object ReadArray(BinaryReader reader, uint version)
     {
         var elementType = (GgufValueType)reader.ReadUInt32();
-        ulong count = version == 2 ? reader.ReadUInt32() : reader.ReadUInt64();
+        // Array length is uint64 in both supported versions (v2 and v3); v1 used uint32.
+        ulong count = reader.ReadUInt64();
 
         if (count > int.MaxValue)
             throw new InvalidDataException($"GGUF array length {count} exceeds Int32.MaxValue.");

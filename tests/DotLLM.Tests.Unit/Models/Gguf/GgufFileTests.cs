@@ -68,6 +68,38 @@ public class GgufFileTests : IDisposable
     }
 
     [Fact]
+    public void Open_V2File_WithArrayMetadataAndTensors_Succeeds()
+    {
+        // Reproduces the real-world GGUF v2 failure (e.g. TheBloke/Llama-2-13B-GGUF): before the
+        // uint64 width fix, the reader mis-parsed v2 string/array lengths, producing garbage tensor
+        // offsets that tripped GgufFile.Open's "data extends beyond file boundary" guard (with an
+        // empty tensor name). A correctly parsed v2 file opens and exposes its tensors.
+        byte[] embd = new byte[8 * 16 * 4];
+        for (int i = 0; i < embd.Length; i++) embd[i] = (byte)((i % 255) + 1);
+
+        var data = new GgufTestData(version: 2)
+            .AddString("general.architecture", "llama")
+            .AddStringArray("tokenizer.ggml.tokens", ["<s>", "</s>", "hello", "world"])
+            .AddTensor("token_embd.weight", [8, 16], 0, embd)                 // F32
+            .AddTensor("output_norm.weight", [16], 0, new byte[16 * 4]);      // F32
+        string path = WriteTempGguf(data);
+
+        using var file = GgufFile.Open(path);
+
+        Assert.Equal(2u, file.Header.Version);
+        Assert.Equal(2ul, file.Header.TensorCount);
+        Assert.Equal("llama", file.Metadata.GetString("general.architecture"));
+        Assert.True(file.TensorsByName.ContainsKey("token_embd.weight"));
+        Assert.True(file.TensorsByName.ContainsKey("output_norm.weight"));
+        Assert.NotEqual(nint.Zero, file.DataBasePointer);
+        unsafe
+        {
+            byte* ptr = (byte*)file.DataBasePointer;
+            Assert.Equal(1, ptr[0]); // first byte of token_embd data
+        }
+    }
+
+    [Fact]
     public void Open_TensorsByName_LookupWorks()
     {
         var data = new GgufTestData(version: 3)
