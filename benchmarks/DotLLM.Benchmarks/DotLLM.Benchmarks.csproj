@@ -12,6 +12,7 @@
     <ProjectReference Include="..\..\src\DotLLM.Cuda\DotLLM.Cuda.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Engine\DotLLM.Engine.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.HuggingFace\DotLLM.HuggingFace.csproj" />
+    <ProjectReference Include="..\..\src\DotLLM.Tokenizers\DotLLM.Tokenizers.csproj" />
   </ItemGroup>
 
   <ItemGroup>

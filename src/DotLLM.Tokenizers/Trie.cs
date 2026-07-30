@@ -1,14 +1,6 @@
-namespace DotLLM.Tokenizers;
+using System.Threading;
 
-/// <summary>
-/// Trie node used internally by <see cref="Trie"/>.
-/// </summary>
-internal sealed class TrieNode
-{
-    public Dictionary<char, TrieNode>? Children;
-    public int TokenId = -1;
-    public float Score;
-}
+namespace DotLLM.Tokenizers;
 
 /// <summary>
 /// Prefix-matching data structure for fast vocabulary lookup during BPE encoding.
@@ -18,7 +10,11 @@ internal sealed class TrieNode
 /// </summary>
 internal sealed class Trie
 {
-    private readonly TrieNode _root = new();
+    private readonly object _freezeGate = new();
+    private List<BuilderNode>? _builderNodes = [new()];
+    private FlatNode[] _nodes = [new(0, 0, -1, 0f)];
+    private FlatEdge[] _edges = [];
+    private int _isFrozen;
 
     /// <summary>Inserts a token into the trie.</summary>
     /// <param name="key">Token string (e.g. "▁hello").</param>
@@ -26,19 +22,31 @@ internal sealed class Trie
     /// <param name="score">Merge priority score (higher = preferred merge in SentencePiece).</param>
     public void Add(ReadOnlySpan<char> key, int tokenId, float score)
     {
-        TrieNode node = _root;
-        foreach (char c in key)
+        if (Volatile.Read(ref _isFrozen) != 0)
+            throw new InvalidOperationException("Cannot add tokens after trie has been frozen.");
+
+        lock (_freezeGate)
         {
-            node.Children ??= [];
-            if (!node.Children.TryGetValue(c, out TrieNode? child))
+            if (Volatile.Read(ref _isFrozen) != 0 || _builderNodes is null)
+                throw new InvalidOperationException("Cannot add tokens after trie has been frozen.");
+
+            List<BuilderNode> builderNodes = _builderNodes;
+            int nodeIndex = 0;
+            foreach (char c in key)
             {
-                child = new TrieNode();
-                node.Children[c] = child;
+                Dictionary<char, int> children = builderNodes[nodeIndex].Children ??= [];
+                if (!children.TryGetValue(c, out int childIndex))
+                {
+                    childIndex = builderNodes.Count;
+                    children[c] = childIndex;
+                    builderNodes.Add(new BuilderNode());
+                }
+                nodeIndex = childIndex;
             }
-            node = child;
+
+            builderNodes[nodeIndex].TokenId = tokenId;
+            builderNodes[nodeIndex].Score = score;
         }
-        node.TokenId = tokenId;
-        node.Score = score;
     }
 
     /// <summary>
@@ -51,21 +59,25 @@ internal sealed class Trie
     /// <returns>True if at least one prefix matched.</returns>
     public bool TryMatchLongest(ReadOnlySpan<char> text, out int tokenId, out float score, out int matchLength)
     {
-        TrieNode node = _root;
+        EnsureFrozen();
+
+        int nodeIndex = 0;
         int bestLen = 0;
         int bestId = -1;
         float bestScore = 0f;
 
         for (int i = 0; i < text.Length; i++)
         {
-            if (node.Children == null || !node.Children.TryGetValue(text[i], out TrieNode? next))
+            int nextNodeIndex = FindChild(nodeIndex, text[i]);
+            if (nextNodeIndex < 0)
                 break;
-            node = next;
-            if (node.TokenId >= 0)
+
+            nodeIndex = nextNodeIndex;
+            if (_nodes[nodeIndex].TokenId >= 0)
             {
                 bestLen = i + 1;
-                bestId = node.TokenId;
-                bestScore = node.Score;
+                bestId = _nodes[nodeIndex].TokenId;
+                bestScore = _nodes[nodeIndex].Score;
             }
         }
 
@@ -82,4 +94,85 @@ internal sealed class Trie
         matchLength = bestLen;
         return true;
     }
+
+    private void EnsureFrozen()
+    {
+        if (Volatile.Read(ref _isFrozen) != 0)
+            return;
+
+        lock (_freezeGate)
+        {
+            if (Volatile.Read(ref _isFrozen) != 0)
+                return;
+
+            List<BuilderNode> builderNodes = _builderNodes ?? throw new InvalidOperationException("Trie builder state is not available.");
+            int edgeCount = 0;
+            for (int i = 0; i < builderNodes.Count; i++)
+                edgeCount += builderNodes[i].Children?.Count ?? 0;
+
+            var nodes = new FlatNode[builderNodes.Count];
+            var edges = new FlatEdge[edgeCount];
+
+            int edgeIndex = 0;
+            for (int i = 0; i < builderNodes.Count; i++)
+            {
+                BuilderNode builder = builderNodes[i];
+                Dictionary<char, int>? children = builder.Children;
+                int childCount = children?.Count ?? 0;
+                nodes[i] = new FlatNode(edgeIndex, childCount, builder.TokenId, builder.Score);
+
+                if (childCount == 0)
+                    continue;
+
+                var sorted = new KeyValuePair<char, int>[childCount];
+                int cursor = 0;
+                foreach (KeyValuePair<char, int> child in children!)
+                    sorted[cursor++] = child;
+
+                Array.Sort(sorted, static (left, right) => left.Key.CompareTo(right.Key));
+
+                for (int c = 0; c < sorted.Length; c++)
+                {
+                    edges[edgeIndex++] = new FlatEdge(sorted[c].Key, sorted[c].Value);
+                }
+            }
+
+            _nodes = nodes;
+            _edges = edges;
+            _builderNodes = null;
+            Volatile.Write(ref _isFrozen, 1);
+        }
+    }
+
+    private int FindChild(int nodeIndex, char c)
+    {
+        FlatNode node = _nodes[nodeIndex];
+        int lo = node.FirstEdgeIndex;
+        int hi = lo + node.EdgeCount - 1;
+
+        while (lo <= hi)
+        {
+            int mid = lo + ((hi - lo) >> 1);
+            FlatEdge edge = _edges[mid];
+            if (edge.Character == c)
+                return edge.ChildNodeIndex;
+
+            if (edge.Character < c)
+                lo = mid + 1;
+            else
+                hi = mid - 1;
+        }
+
+        return -1;
+    }
+
+    private sealed class BuilderNode
+    {
+        public Dictionary<char, int>? Children;
+        public int TokenId = -1;
+        public float Score;
+    }
+
+    private readonly record struct FlatNode(int FirstEdgeIndex, int EdgeCount, int TokenId, float Score);
+    private readonly record struct FlatEdge(char Character, int ChildNodeIndex);
 }

@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
+    <InternalsVisibleTo Include="DotLLM.Benchmarks" />
   </ItemGroup>
 
   <ItemGroup>
