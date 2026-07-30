@@ -20,6 +20,17 @@ public sealed unsafe class KvBlockPoolTests
         Assert.Equal(BlockSize, pool.BlockSize);
         Assert.Equal(TotalBlocks, pool.TotalBlocks);
         Assert.Equal(TotalBlocks, pool.FreeBlocks);
+        Assert.Equal(2L * NumLayers * TotalBlocks * BlockSize * KvStride * sizeof(float), pool.AllocatedBytes);
+    }
+
+    [Fact]
+    public void Constructor_RejectsInvalidDimensions()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new KvBlockPool(0, NumKvHeads, HeadDim, BlockSize, TotalBlocks));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new KvBlockPool(NumLayers, 0, HeadDim, BlockSize, TotalBlocks));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new KvBlockPool(NumLayers, NumKvHeads, 0, BlockSize, TotalBlocks));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new KvBlockPool(NumLayers, NumKvHeads, HeadDim, 0, TotalBlocks));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new KvBlockPool(NumLayers, NumKvHeads, HeadDim, BlockSize, 0));
     }
 
     [Fact]
@@ -68,6 +79,26 @@ public sealed unsafe class KvBlockPoolTests
         pool.Release(blockId);
         Assert.Equal(TotalBlocks, pool.FreeBlocks);
         Assert.Equal(0, pool.RefCount(blockId));
+    }
+
+    [Fact]
+    public void Release_ThrowsOnFreeBlock()
+    {
+        using var pool = new KvBlockPool(NumLayers, NumKvHeads, HeadDim, BlockSize, TotalBlocks);
+        int blockId = pool.Allocate();
+        pool.Release(blockId);
+
+        Assert.Throws<InvalidOperationException>(() => pool.Release(blockId));
+    }
+
+    [Fact]
+    public void AddRef_ThrowsOnFreeBlock()
+    {
+        using var pool = new KvBlockPool(NumLayers, NumKvHeads, HeadDim, BlockSize, TotalBlocks);
+        int blockId = pool.Allocate();
+        pool.Release(blockId);
+
+        Assert.Throws<InvalidOperationException>(() => pool.AddRef(blockId));
     }
 
     [Fact]

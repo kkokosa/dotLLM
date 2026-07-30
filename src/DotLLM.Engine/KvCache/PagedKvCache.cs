@@ -32,6 +32,12 @@ public sealed unsafe class PagedKvCache : IKvCache
     /// <inheritdoc/>
     public int MaxLength => _maxSeqLen;
 
+    /// <summary>
+    /// Unmanaged bytes reserved for this cache's contiguous K/V staging buffers.
+    /// Shared block-pool bytes are reported separately by <see cref="KvBlockPool.AllocatedBytes"/>.
+    /// </summary>
+    public long AllocatedBytes => 2 * _stagingBytes;
+
     /// <summary>The block table mapping logical positions to physical blocks.</summary>
     internal KvBlockTable BlockTable => _blockTable;
 
@@ -44,6 +50,15 @@ public sealed unsafe class PagedKvCache : IKvCache
     /// <param name="maxSeqLen">Maximum sequence length this cache can hold.</param>
     public PagedKvCache(KvBlockPool pool, int numLayers, int kvStride, int maxSeqLen)
     {
+        ArgumentNullException.ThrowIfNull(pool);
+        if (numLayers <= 0) throw new ArgumentOutOfRangeException(nameof(numLayers));
+        if (kvStride <= 0) throw new ArgumentOutOfRangeException(nameof(kvStride));
+        if (maxSeqLen <= 0) throw new ArgumentOutOfRangeException(nameof(maxSeqLen));
+        if (numLayers != pool.NumLayers)
+            throw new ArgumentException("Pool layer count does not match cache layer count.", nameof(pool));
+        if (kvStride != pool.KvStride)
+            throw new ArgumentException("Pool KV stride does not match cache KV stride.", nameof(pool));
+
         _pool = pool;
         _numLayers = numLayers;
         _kvStride = kvStride;

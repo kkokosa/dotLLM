@@ -13,6 +13,9 @@ public sealed class PagedKvCacheFactory : IDisposable
     /// <summary>The underlying block pool shared by all caches created from this factory.</summary>
     public KvBlockPool Pool => _pool;
 
+    /// <summary>Total unmanaged bytes reserved by the shared block pool.</summary>
+    public long AllocatedBytes => _pool.AllocatedBytes;
+
     /// <summary>
     /// Creates a new factory with a shared block pool.
     /// </summary>
@@ -25,6 +28,12 @@ public sealed class PagedKvCacheFactory : IDisposable
     public PagedKvCacheFactory(int numLayers, int numKvHeads, int headDim,
                                 int blockSize = 16, int maxTotalTokens = 65536)
     {
+        if (numLayers <= 0) throw new ArgumentOutOfRangeException(nameof(numLayers));
+        if (numKvHeads <= 0) throw new ArgumentOutOfRangeException(nameof(numKvHeads));
+        if (headDim <= 0) throw new ArgumentOutOfRangeException(nameof(headDim));
+        if (blockSize <= 0) throw new ArgumentOutOfRangeException(nameof(blockSize));
+        if (maxTotalTokens <= 0) throw new ArgumentOutOfRangeException(nameof(maxTotalTokens));
+
         _numLayers = numLayers;
         _kvStride = numKvHeads * headDim;
 

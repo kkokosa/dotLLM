@@ -49,6 +49,9 @@ public sealed unsafe class KvBlockPool : IDisposable
     /// <summary>KV stride (numKvHeads * headDim).</summary>
     public int KvStride => _kvStride;
 
+    /// <summary>Total unmanaged bytes reserved by this pool across key and value storage.</summary>
+    public long AllocatedBytes => 2L * _numLayers * _totalBlocks * _blockFloats * sizeof(float);
+
     /// <summary>
     /// Creates a new block pool with pre-allocated storage for all blocks across all layers.
     /// </summary>
@@ -60,6 +63,12 @@ public sealed unsafe class KvBlockPool : IDisposable
     public KvBlockPool(int numLayers, int numKvHeads, int headDim,
                        int blockSize = 16, int totalBlocks = 4096)
     {
+        if (numLayers <= 0) throw new ArgumentOutOfRangeException(nameof(numLayers));
+        if (numKvHeads <= 0) throw new ArgumentOutOfRangeException(nameof(numKvHeads));
+        if (headDim <= 0) throw new ArgumentOutOfRangeException(nameof(headDim));
+        if (blockSize <= 0) throw new ArgumentOutOfRangeException(nameof(blockSize));
+        if (totalBlocks <= 0) throw new ArgumentOutOfRangeException(nameof(totalBlocks));
+
         _blockSize = blockSize;
         _numLayers = numLayers;
         _kvStride = numKvHeads * headDim;
@@ -112,20 +121,39 @@ public sealed unsafe class KvBlockPool : IDisposable
     /// Increments the reference count for a block (used for shared prefix / beam search).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void AddRef(int blockId) => Interlocked.Increment(ref _refCounts[blockId]);
+    public void AddRef(int blockId)
+    {
+        ValidateBlockId(blockId);
+        int newCount = Interlocked.Increment(ref _refCounts[blockId]);
+        if (newCount <= 1)
+        {
+            Interlocked.Decrement(ref _refCounts[blockId]);
+            throw new InvalidOperationException($"Cannot add a reference to free block {blockId}.");
+        }
+    }
 
     /// <summary>
     /// Gets the current reference count for a block.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public int RefCount(int blockId) => Volatile.Read(ref _refCounts[blockId]);
+    public int RefCount(int blockId)
+    {
+        ValidateBlockId(blockId);
+        return Volatile.Read(ref _refCounts[blockId]);
+    }
 
     /// <summary>
     /// Decrements the reference count. When it reaches 0, returns the block to the free pool.
     /// </summary>
     public void Release(int blockId)
     {
+        ValidateBlockId(blockId);
         int newCount = Interlocked.Decrement(ref _refCounts[blockId]);
+        if (newCount < 0)
+        {
+            Interlocked.Increment(ref _refCounts[blockId]);
+            throw new InvalidOperationException($"Cannot release free block {blockId}.");
+        }
         if (newCount == 0)
         {
             lock (_lock)
@@ -141,6 +169,10 @@ public sealed unsafe class KvBlockPool : IDisposable
     /// <returns>New block ID with independent data.</returns>
     public int CopyBlock(int sourceBlockId)
     {
+        ValidateBlockId(sourceBlockId);
+        if (RefCount(sourceBlockId) <= 0)
+            throw new InvalidOperationException($"Cannot copy free block {sourceBlockId}.");
+
         int newBlockId = Allocate();
 
         long blockBytes = (long)_blockFloats * sizeof(float);
@@ -166,7 +198,11 @@ public sealed unsafe class KvBlockPool : IDisposable
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public float* GetKeyPtr(int blockId, int layerIndex)
-        => (float*)_keyBuffers[layerIndex] + (long)blockId * _blockFloats;
+    {
+        ValidateBlockId(blockId);
+        ValidateLayerIndex(layerIndex);
+        return (float*)_keyBuffers[layerIndex] + (long)blockId * _blockFloats;
+    }
 
     /// <summary>
     /// Gets a pointer to the start of value data for a specific block and layer.
@@ -174,7 +210,11 @@ public sealed unsafe class KvBlockPool : IDisposable
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public float* GetValuePtr(int blockId, int layerIndex)
-        => (float*)_valueBuffers[layerIndex] + (long)blockId * _blockFloats;
+    {
+        ValidateBlockId(blockId);
+        ValidateLayerIndex(layerIndex);
+        return (float*)_valueBuffers[layerIndex] + (long)blockId * _blockFloats;
+    }
 
     /// <summary>
     /// Gets a span over key data for a specific block, layer, and token offset within the block.
@@ -182,7 +222,10 @@ public sealed unsafe class KvBlockPool : IDisposable
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Span<float> GetKeySpan(int blockId, int layerIndex, int offsetInBlock)
-        => new(GetKeyPtr(blockId, layerIndex) + offsetInBlock * _kvStride, _kvStride);
+    {
+        ValidateOffset(offsetInBlock);
+        return new(GetKeyPtr(blockId, layerIndex) + offsetInBlock * _kvStride, _kvStride);
+    }
 
     /// <summary>
     /// Gets a span over value data for a specific block, layer, and token offset within the block.
@@ -190,7 +233,28 @@ public sealed unsafe class KvBlockPool : IDisposable
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Span<float> GetValueSpan(int blockId, int layerIndex, int offsetInBlock)
-        => new(GetValuePtr(blockId, layerIndex) + offsetInBlock * _kvStride, _kvStride);
+    {
+        ValidateOffset(offsetInBlock);
+        return new(GetValuePtr(blockId, layerIndex) + offsetInBlock * _kvStride, _kvStride);
+    }
+
+    private void ValidateBlockId(int blockId)
+    {
+        if ((uint)blockId >= (uint)_totalBlocks)
+            throw new ArgumentOutOfRangeException(nameof(blockId));
+    }
+
+    private void ValidateLayerIndex(int layerIndex)
+    {
+        if ((uint)layerIndex >= (uint)_numLayers)
+            throw new ArgumentOutOfRangeException(nameof(layerIndex));
+    }
+
+    private void ValidateOffset(int offsetInBlock)
+    {
+        if ((uint)offsetInBlock >= (uint)_blockSize)
+            throw new ArgumentOutOfRangeException(nameof(offsetInBlock));
+    }
 
     /// <inheritdoc/>
     public void Dispose()
