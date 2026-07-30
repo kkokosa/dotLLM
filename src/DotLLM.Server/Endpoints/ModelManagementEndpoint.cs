@@ -63,6 +63,10 @@ public static class ModelManagementEndpoint
                     state.KvCacheConfig = newState.KvCacheConfig;
                     state.KvCacheFactory = newState.KvCacheFactory;
                     state.PrefixCache = newState.PrefixCache;
+                    // PagedFactory owns the shared block pool. The previous instance was already
+                    // disposed by SwapModelAsync; transfer the new one so the next swap (or
+                    // shutdown) can dispose it instead of leaking VRAM/RAM.
+                    state.PagedFactory = newState.PagedFactory;
                     state.LoadedModelPath = resolvedPath;
                     state.CurrentGguf = newState.CurrentGguf;
                     state.DraftModel = newState.DraftModel;
