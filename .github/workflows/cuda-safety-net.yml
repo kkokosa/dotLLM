@@ -1,0 +1,40 @@
+name: CUDA Safety Net
+
+on:
+  pull_request:
+    paths:
+      - 'native/kernels/**'
+      - 'src/DotLLM.Cuda/**'
+      - 'tests/DotLLM.Tests.Unit/Cuda/**'
+      - 'native/run-cuda-safety-net.ps1'
+      - 'docs/CUDA.md'
+      - '.github/workflows/cuda-safety-net.yml'
+  workflow_dispatch:
+
+jobs:
+  kernel-safety-net:
+    if: vars.DOTLLM_ENABLE_CUDA_SAFETY_NET == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, windows, x64, cuda]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.x
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build unit tests
+        run: dotnet build tests/DotLLM.Tests.Unit/DotLLM.Tests.Unit.csproj -c Release --no-restore
+
+      - name: CUDA safety net (kernel-focused sanitizer coverage)
+        shell: pwsh
+        run: |
+          $full = "${{ vars.DOTLLM_CUDA_FULL_SANITIZER }}" -eq "true"
+          if ($full) {
+            .\native\run-cuda-safety-net.ps1 -Tool all -Configuration Release -FullSanitizer
+          }
+          else {
+            .\native\run-cuda-safety-net.ps1 -Tool all -Configuration Release
+          }

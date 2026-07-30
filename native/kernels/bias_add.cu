@@ -3,6 +3,15 @@
 // Vectorized: half2 packed operations when dim is even.
 
 #include <cuda_fp16.h>
+#include <stdint.h>
+#ifndef NDEBUG
+#include <assert.h>
+#endif
+
+__device__ __forceinline__ bool is_aligned_4(const void* ptr)
+{
+    return (reinterpret_cast<uintptr_t>(ptr) & 0x3) == 0;
+}
 
 extern "C" __global__ void __launch_bounds__(256) bias_add_f16(
     half* __restrict__ output,
@@ -14,9 +23,9 @@ extern "C" __global__ void __launch_bounds__(256) bias_add_f16(
     int total = dim * seq_len;
     int dim2 = dim / 2;
     int total2 = total / 2;
+    bool can_vectorize = is_aligned_4(output) && is_aligned_4(bias);
 
-    // dim is always even for transformer hidden sizes, so half2 is safe
-    if (idx < total2)
+    if (can_vectorize && idx < total2)
     {
         half2* out2 = reinterpret_cast<half2*>(output);
         const half2* bias2 = reinterpret_cast<const half2*>(bias);
@@ -24,11 +33,19 @@ extern "C" __global__ void __launch_bounds__(256) bias_add_f16(
         // Map half2 index back to row/col pair index
         // Each row has dim elements = dim/2 half2 elements
         int col2 = idx % dim2;
+#ifndef NDEBUG
+        assert(is_aligned_4(&out2[idx]));
+        assert(is_aligned_4(&bias2[col2]));
+#endif
         out2[idx] = __hadd2(out2[idx], bias2[col2]);
     }
+    else if (!can_vectorize && idx < total)
+    {
+        int col = idx % dim;
+        output[idx] = __float2half(__half2float(output[idx]) + __half2float(bias[col]));
+    }
 
-    // Handle odd dim (shouldn't happen for transformers, but be safe)
-    if ((total & 1) && idx == 0)
+    if (can_vectorize && (total & 1) && idx == total2)
     {
         int last = total - 1;
         int col = last % dim;

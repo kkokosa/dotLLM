@@ -247,6 +247,43 @@ internal static partial class CudaDriverApi
 }
 ```
 
+### Kernel Safety Net (Issue #123)
+
+To prevent misaligned-address regressions in vectorized kernels:
+
+- `native/kernels/add.cu`, `bias_add.cu`, `swiglu.cu`, and `convert.cu` now guard half2/float2 vector paths with pointer-alignment checks and automatically fall back to scalar element-wise paths when device pointers are not sufficiently aligned.
+- `CudaKernels` emits debug-only alignment assertions before launching these kernels.
+- The same kernels include debug-only PTX-side assertions (`assert`) on vectorized access addresses before issuing packed loads/stores.
+- `tests/DotLLM.Tests.Unit/Cuda/CudaKernelTests.cs` includes parity checks for intentionally misaligned device pointers (`Add`, `BiasAdd`, `SwiGLU`, `Convert`).
+
+Sanitizer coverage is split into practical default and full mode:
+
+| Mode | Suite filter(s) | Sanitizer tools | Purpose |
+|---|---|---|---|
+| Default (`.\native\run-cuda-safety-net.ps1`) | `CudaKernelTests`, `CudaKernelComparisonTests` (parity), `CudaKernelTests` (init/race) | `memcheck` on both suites; `initcheck` + `racecheck` on `CudaKernelTests` | Broad kernel coverage on PRs while keeping runtime practical |
+| Full (`-FullSanitizer`) | `CudaKernelTests`, `CudaKernelComparisonTests` | `memcheck`, `initcheck`, `racecheck` on both suites | Maximize sanitizer depth before release or when debugging kernel faults |
+
+Kernel families exercised by these suites include: add/convert/swiglu/bias_add (misalignment-sensitive vector paths), RMSNorm, RoPE, attention, embedding, and quantized GEMV.
+The safety-net script invokes `compute-sanitizer` directly with `--target-processes all` so instrumentation follows the actual .NET test host process tree.
+
+For sanitizer passes on a CUDA-enabled host:
+
+```powershell
+.\native\run-cuda-safety-net.ps1
+```
+
+For exhaustive follow-up:
+
+```powershell
+.\native\run-cuda-safety-net.ps1 -FullSanitizer
+```
+
+To extend coverage when adding kernels:
+
+1. Add/extend a GPU unit test that launches the new kernel in `tests/DotLLM.Tests.Unit/Cuda`.
+2. Include the test class in the safety-net filter set inside `native/run-cuda-safety-net.ps1`.
+3. If the kernel uses vectorized memory ops, add misalignment parity cases and update this section's coverage list.
+
 ### cuBLAS Declarations
 
 ~6 function declarations for GEMM operations:
