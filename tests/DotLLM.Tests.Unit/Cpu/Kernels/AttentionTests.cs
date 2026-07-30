@@ -1,4 +1,5 @@
 using System.Runtime.Intrinsics.X86;
+using DotLLM.Core.PositionEncoding;
 using DotLLM.Cpu.Kernels;
 using Xunit;
 
@@ -185,6 +186,83 @@ public sealed class AttentionTests
         // on the softmax distribution. Production sequences (100s-1000s of tokens) average better.
         for (int i = 0; i < outputSimd.Length; i++)
             Assert.Equal(outputScalar[i], outputSimd[i], 5e-2f);
+    }
+
+    [Fact]
+    public void Execute_AlibiBiasesTowardRecentTokens()
+    {
+        const int headDim = 2;
+        const int seqKv = 3;
+
+        float[] q = [0f, 0f];
+        float[] k = [0f, 0f, 0f, 0f, 0f, 0f];
+        float[] v = [0f, 0f, 10f, 0f, 20f, 0f];
+        float[] output = new float[headDim];
+
+        Attention.Execute(q, k, v, output, seqQ: 1, seqKv: seqKv,
+                          numHeads: 1, numKvHeads: 1, headDim: headDim,
+                          positionOffset: 2, alibiSlopes: [1f]);
+
+        float w0 = MathF.Exp(-2f);
+        float w1 = MathF.Exp(-1f);
+        float w2 = 1f;
+        float denom = w0 + w1 + w2;
+        float expected = (10f * w1 + 20f * w2) / denom;
+
+        Assert.Equal(expected, output[0], 1e-1f);
+        Assert.Equal(0f, output[1], 1e-4f);
+    }
+
+    [Fact]
+    public void Execute_AlibiMatchesScalarReference()
+    {
+        const int headDim = 8;
+        const int numHeads = 6;
+        const int numKvHeads = 2;
+        const int seqQ = 4;
+        const int seqKv = 6;
+        var rng = new Random(90);
+        float[] slopes = AlibiPositionEncoding.CreateSlopes(numHeads);
+
+        float[] q = RandomArray(rng, seqQ * numHeads * headDim);
+        float[] k = RandomArray(rng, seqKv * numKvHeads * headDim);
+        float[] v = RandomArray(rng, seqKv * numKvHeads * headDim);
+        float[] outputSimd = new float[seqQ * numHeads * headDim];
+        float[] outputScalar = new float[seqQ * numHeads * headDim];
+
+        Attention.Execute(q, k, v, outputSimd, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                          positionOffset: 1, alibiSlopes: slopes);
+        Attention.ExecuteScalar(q, k, v, outputScalar, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                                positionOffset: 1, alibiSlopes: slopes);
+
+        for (int i = 0; i < outputSimd.Length; i++)
+            Assert.Equal(outputScalar[i], outputSimd[i], 5e-2f);
+    }
+
+    [Fact]
+    public void Execute_AlibiTiledPathMatchesScalarReference()
+    {
+        const int headDim = 16;
+        const int numHeads = 4;
+        const int numKvHeads = 2;
+        const int seqQ = 32;
+        const int seqKv = 300;
+        var rng = new Random(91);
+        float[] slopes = AlibiPositionEncoding.CreateSlopes(numHeads);
+
+        float[] q = RandomArray(rng, seqQ * numHeads * headDim);
+        float[] k = RandomArray(rng, seqKv * numKvHeads * headDim);
+        float[] v = RandomArray(rng, seqKv * numKvHeads * headDim);
+        float[] outputTiled = new float[seqQ * numHeads * headDim];
+        float[] outputScalar = new float[seqQ * numHeads * headDim];
+
+        Attention.Execute(q, k, v, outputTiled, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                          positionOffset: 0, alibiSlopes: slopes);
+        Attention.ExecuteScalar(q, k, v, outputScalar, seqQ, seqKv, numHeads, numKvHeads, headDim,
+                                positionOffset: 0, alibiSlopes: slopes);
+
+        for (int i = 0; i < outputTiled.Length; i++)
+            Assert.Equal(outputScalar[i], outputTiled[i], 5e-2f);
     }
 
     [Fact]
