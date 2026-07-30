@@ -13,7 +13,7 @@
     <!-- DTOs are self-documenting via [JsonPropertyName] attributes -->
     <!-- IL2026: MapGet/MapPost use reflection at build time but Request Delegate Generator
          handles them at publish time when PublishAot=true -->
-    <NoWarn>CS1591;IL2026</NoWarn>
+    <NoWarn>$(NoWarn);CS1591;IL2026</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -29,6 +29,7 @@
   <ItemGroup>
     <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
     <ProjectReference Include="..\DotLLM.Engine\DotLLM.Engine.csproj" />
+    <ProjectReference Include="..\DotLLM.Metal\DotLLM.Metal.csproj" />
     <ProjectReference Include="..\DotLLM.Models\DotLLM.Models.csproj" />
     <ProjectReference Include="..\DotLLM.Tokenizers\DotLLM.Tokenizers.csproj" />
     <ProjectReference Include="..\DotLLM.Cpu\DotLLM.Cpu.csproj" />

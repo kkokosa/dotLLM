@@ -3,30 +3,20 @@ using DotLLM.Server;
 
 if (args.Length < 1)
 {
-    Console.Error.WriteLine("Usage: DotLLM.Sample.Server <model.gguf> [--port 8080]");
+    Console.Error.WriteLine("Usage: DotLLM.Sample.Server <model.gguf> [options]");
     Console.Error.WriteLine("  model.gguf  Path to a GGUF model file");
     Console.Error.WriteLine("  --port N    Port to listen on (default: 8080)");
+    Console.Error.WriteLine("  --device D  Compute device: cpu, gpu, gpu:0 (default: cpu)");
+    Console.Error.WriteLine("  --threads N CPU prefill threads; 0 = auto");
+    Console.Error.WriteLine("  --decode-threads N CPU decode threads; 0 = auto");
     return 1;
 }
 
-string modelPath = args[0];
-int port = 8080;
-for (int i = 1; i < args.Length - 1; i++)
-{
-    if (args[i] == "--port" && int.TryParse(args[i + 1], out var p))
-        port = p;
-}
+var options = ServerOptions.Parse(args);
 
-var options = new ServerOptions
-{
-    Model = modelPath,
-    Port = port,
-    Warmup = WarmupOptions.Disabled,
-};
-
-Console.WriteLine($"Loading model: {modelPath}");
+Console.WriteLine($"Loading model: {options.Model}");
 var resolvedPath = ServerStartup.ResolveModelPath(options.Model, options.Quant)
-    ?? modelPath;
+    ?? options.Model;
 
 var state = ServerStartup.LoadModel(resolvedPath, options);
 var app = ServerStartup.BuildApp(state, args, serveUi: true);

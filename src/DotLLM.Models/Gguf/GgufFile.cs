@@ -38,6 +38,18 @@ public sealed unsafe class GgufFile : IDisposable
     /// <summary>Byte offset of the tensor data section from the start of the file.</summary>
     public long DataSectionOffset { get; }
 
+    /// <summary>
+    /// Pointer to the very start of the memory-mapped region (file offset 0).
+    /// This is page-aligned by the OS and is the right pointer to register with
+    /// a GPU backend that wraps host memory as a zero-copy device buffer
+    /// (e.g. <c>MTLBuffer.newBufferWithBytesNoCopy</c>).
+    /// Returns <see cref="nint.Zero"/> if the file contains no tensors.
+    /// </summary>
+    public nint MmapBasePointer { get; }
+
+    /// <summary>Total length of the memory-mapped region in bytes (file size).</summary>
+    public long MmapLength { get; }
+
     private GgufFile(
         GgufHeader header,
         GgufMetadata metadata,
@@ -45,6 +57,8 @@ public sealed unsafe class GgufFile : IDisposable
         IReadOnlyDictionary<string, GgufTensorDescriptor> tensorsByName,
         long dataSectionOffset,
         nint dataBasePointer,
+        nint mmapBasePointer,
+        long mmapLength,
         MemoryMappedFile? mmf,
         MemoryMappedViewAccessor? accessor,
         byte* basePointer)
@@ -55,6 +69,8 @@ public sealed unsafe class GgufFile : IDisposable
         TensorsByName = tensorsByName;
         DataSectionOffset = dataSectionOffset;
         DataBasePointer = dataBasePointer;
+        MmapBasePointer = mmapBasePointer;
+        MmapLength = mmapLength;
         _mmf = mmf;
         _accessor = accessor;
         _basePointer = basePointer;
@@ -120,6 +136,7 @@ public sealed unsafe class GgufFile : IDisposable
         MemoryMappedViewAccessor? accessor = null;
         byte* basePointer = null;
         nint dataBasePointer = nint.Zero;
+        nint mmapBasePointer = nint.Zero;
 
         if (header.TensorCount > 0)
         {
@@ -128,7 +145,8 @@ public sealed unsafe class GgufFile : IDisposable
                 mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
                 accessor = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
                 accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref basePointer);
-                dataBasePointer = (nint)(basePointer + accessor.PointerOffset + dataSectionOffset);
+                mmapBasePointer = (nint)(basePointer + accessor.PointerOffset);
+                dataBasePointer = mmapBasePointer + (nint)dataSectionOffset;
             }
             catch
             {
@@ -147,6 +165,8 @@ public sealed unsafe class GgufFile : IDisposable
             tensorsByName,
             dataSectionOffset,
             dataBasePointer,
+            mmapBasePointer,
+            fileLength,
             mmf,
             accessor,
             basePointer);

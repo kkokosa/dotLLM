@@ -1,12 +1,18 @@
+using System.Runtime.InteropServices;
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
+using DotLLM.Cuda;
 using DotLLM.Engine;
 using DotLLM.Engine.KvCache;
 using DotLLM.Engine.PromptCache;
+using DotLLM.Metal;
+using DotLLM.Metal.Weights;
+using DotLLM.Metal.Weights.Strategies;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using DotLLM.Tokenizers;
+using DotLLM.Tokenizers.Bpe;
 using DotLLM.Tokenizers.ChatTemplates;
 
 namespace DotLLM.Server;
@@ -66,11 +72,11 @@ public static class ServerStartup
     public static ServerState LoadModel(string resolvedPath, ServerOptions options)
     {
         Console.WriteLine($"[dotllm] Loading model from {resolvedPath}...");
-        var gguf = GgufFile.Open(resolvedPath);
-        var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-        var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
+        GgufFile gguf = GgufFile.Open(resolvedPath);
+        ModelConfig config = GgufModelConfigExtractor.Extract(gguf.Metadata);
+        BpeTokenizer tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
-        var threading = new ThreadingConfig(options.Threads, options.DecodeThreads);
+        ThreadingConfig threading = new ThreadingConfig(options.Threads, options.DecodeThreads);
 
         int gpuLayers = options.GpuLayers.HasValue
             ? Math.Clamp(options.GpuLayers.Value, 0, config.NumLayers)
@@ -84,9 +90,24 @@ public static class ServerStartup
         }
         else if (gpuLayers >= config.NumLayers)
         {
-            int gpuId = ParseGpuId(options.Device);
-            Console.WriteLine($"[dotllm] GPU {gpuId} inference");
-            model = DotLLM.Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
+            if (CudaDevice.IsAvailable())
+            {
+                int gpuId = ParseGpuId(options.Device);
+                Console.WriteLine($"[dotllm] GPU {gpuId} inference");
+                model = DotLLM.Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                Console.WriteLine($"[dotllm] GPU METAL inference");
+
+                IWeightLoadStrategy weightLoadStrategy = new MmapOnlyStrategy();
+                //IWeightLoadStrategy weightLoadStrategy = new DequantToFp16Strategy();
+                model = MetalTransformerModel.LoadFromGguf(gguf, config, weightLoadStrategy);
+            }
+            else
+            {
+                throw new NotSupportedException("GPU inference is not supported on this platform.");
+            }
         }
         else
         {
@@ -107,10 +128,10 @@ public static class ServerStartup
                 bosToken, eosToken);
 
         // Tool call parser
-        var toolCallParser = GgufChatTemplateFactory.CreateToolCallParser(gguf.Metadata, config.Architecture);
+        IToolCallParser toolCallParser = GgufChatTemplateFactory.CreateToolCallParser(gguf.Metadata, config.Architecture);
 
         // KV-cache configuration
-        var kvConfig = new KvCacheConfig(
+        KvCacheConfig kvConfig = new KvCacheConfig(
             KvCacheConfig.ParseDType(options.CacheTypeK),
             KvCacheConfig.ParseDType(options.CacheTypeV));
 
@@ -123,6 +144,12 @@ public static class ServerStartup
             kvFactory = kvConfig.IsQuantized
                 ? (cfg, size) => cudaModel.CreateKvCache(size, kvConfig)
                 : (cfg, size) => cudaModel.CreateKvCache(size);
+        }
+        else if (model is MetalTransformerModel metalModel)
+        {
+            if (options.UsePaged)
+                Console.WriteLine("[dotllm] Paged KV-cache not supported with Metal, using GPU cache.");
+            kvFactory = (cfg, size) => new MetalKvCache(metalModel.Context, cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, size);
         }
         else if (model is DotLLM.Cuda.HybridTransformerModel hybridModel)
         {
@@ -161,12 +188,12 @@ public static class ServerStartup
         string draftModelPath = "";
         if (!string.IsNullOrEmpty(options.SpeculativeModel))
         {
-            var draftPath = ResolveModelPath(options.SpeculativeModel, null);
+            string? draftPath = ResolveModelPath(options.SpeculativeModel, null);
             if (draftPath is null)
                 throw new InvalidOperationException($"Speculative draft model not found: {options.SpeculativeModel}");
 
             draftGguf = GgufFile.Open(draftPath);
-            var draftConfig = GgufModelConfigExtractor.Extract(draftGguf.Metadata);
+            ModelConfig draftConfig = GgufModelConfigExtractor.Extract(draftGguf.Metadata);
             if (!SpeculativeConstants.AreVocabsCompatible(config.VocabSize, draftConfig.VocabSize))
             {
                 draftGguf.Dispose();
@@ -178,13 +205,13 @@ public static class ServerStartup
             if (draftConfig.VocabSize != config.VocabSize)
                 Console.WriteLine($"[dotllm] Note: vocab sizes differ slightly ({draftConfig.VocabSize} vs {config.VocabSize}) — using shared range for speculative comparison.");
 
-            var draftThreading = new ThreadingConfig(options.Threads, options.DecodeThreads);
+            ThreadingConfig draftThreading = new ThreadingConfig(options.Threads, options.DecodeThreads);
             draftModel = TransformerModel.LoadFromGguf(draftGguf, draftConfig, draftThreading);
             draftModelPath = draftPath;
             Console.WriteLine($"[dotllm] Speculative decoding: draft={Path.GetFileName(draftPath)}, K={options.SpeculativeCandidates}");
         }
 
-        var generator = new TextGenerator(model, tokenizer, kvFactory, prefixCache,
+        TextGenerator generator = new TextGenerator(model, tokenizer, kvFactory, prefixCache,
             draftModel: draftModel, speculativeCandidates: options.SpeculativeCandidates);
 
         // Warm-up: JIT pre-compilation + CUDA kernel loading

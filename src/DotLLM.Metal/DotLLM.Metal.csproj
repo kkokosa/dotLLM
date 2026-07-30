@@ -1,0 +1,56 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Description>Metal GPU backend for dotLLM.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
+    <InternalsVisibleTo Include="DotLLM.Tests.Integration" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
+    <ProjectReference Include="..\DotLLM.Cpu\DotLLM.Cpu.csproj" />
+    <ProjectReference Include="..\DotLLM.Engine\DotLLM.Engine.csproj" />
+    <ProjectReference Include="..\DotLLM.Models\DotLLM.Models.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Two files ship next to the managed assembly:
+        libdotllmmetal.dylib       — native bridge (P/Invoke target)
+        dotllm_kernels.metallib    — pre-compiled archive of all GPU shaders
+      The dylib uses dladdr() at runtime to locate dotllm_kernels.metallib
+      next to itself, so they MUST live in the same output directory.
+    -->
+    <None Include="../../Native/metal/bin/libdotllmmetal.dylib" Link="libdotllmmetal.dylib"
+          Condition="'$(OS)' == 'Unix'">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>libdotllmmetal.dylib</TargetPath>
+    </None>
+
+    <None Include="../../Native/metal/bin/dotllm_kernels.metallib" Link="dotllm_kernels.metallib"
+          Condition="'$(OS)' == 'Unix'">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>dotllm_kernels.metallib</TargetPath>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\native\metal\*.metal">
+      <Link>Kernels\Native\%(Filename).%(Extension)</Link>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Update="Interop\MetalNative.KvCache.cs">
+      <DependentUpon>MetalNative.cs</DependentUpon>
+    </Compile>
+    <Compile Update="Interop\MetalNative.Kernels.cs">
+      <DependentUpon>MetalNative.cs</DependentUpon>
+    </Compile>
+  </ItemGroup>
+
+</Project>

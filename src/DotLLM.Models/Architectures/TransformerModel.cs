@@ -454,13 +454,22 @@ public sealed unsafe class TransformerModel : IModel
     /// No-op when <paramref name="bias"/> is null (zero overhead for bias-less models).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void AddBias(float[]? bias, float* output, int outputDim, int seqLen)
+    internal static void AddBias(float[]? bias, float* output, int outputDim, int seqLen)
     {
         if (bias is null) return;
         for (int t = 0; t < seqLen; t++)
         {
             var row = new Span<float>(output + t * outputDim, outputDim);
-            TensorPrimitives.Add((ReadOnlySpan<float>)row, bias, row);
+            TensorPrimitives.Add(row, bias, row);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void AddBias(float[]? bias, float[] output, int outputDim, int seqLen)
+    {
+        fixed(float* o = output)
+        {
+            AddBias(bias, o, outputDim, seqLen);
         }
     }
 

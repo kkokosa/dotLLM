@@ -425,3 +425,13 @@ FodyWeavers.xsd
 
 # dotLLM test model cache
 tests/.models/
+
+.DS_Store
+
+*.metallib
+
+*.xcuserstate
+xcuserdata/
+native/metal/dotllm_metal.xcodeproj/xcuserdata/
+.idea/
+.claude/settings.local.json

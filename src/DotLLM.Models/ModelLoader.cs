@@ -18,12 +18,12 @@ public static class ModelLoader
     /// <param name="path">Path to the GGUF model file.</param>
     /// <param name="threading">Threading configuration. Null defaults to single-threaded.</param>
     /// <returns>The loaded model, GGUF file handle, and model configuration.</returns>
-    public static (IModel Model, GgufFile Gguf, ModelConfig Config) LoadFromGguf(
+    public static ModelRunContext LoadFromGguf(
         string path, ThreadingConfig? threading = null)
     {
         var gguf = GgufFile.Open(path);
         var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
         var model = TransformerModel.LoadFromGguf(gguf, config, threading ?? ThreadingConfig.SingleThreaded);
-        return (model, gguf, config);
+        return new ModelRunContext(model, gguf, config);
     }
 }

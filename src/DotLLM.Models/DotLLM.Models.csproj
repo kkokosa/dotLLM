@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="DotLLM.Cuda" />
+    <InternalsVisibleTo Include="DotLLM.Metal" />
     <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
   </ItemGroup>
 
