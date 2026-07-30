@@ -47,18 +47,22 @@ The scheduler can separate these into micro-batches within one iteration for opt
 
 ## Request Priority
 
-Each request carries a priority level (from API key or explicit parameter):
+Each request carries a `RequestPriority` enum (`Critical`, `High`, `Normal` (default), `Low`) on `InferenceRequest.Priority`. The scheduler's admission queue is a `PriorityQueue` keyed by `(-(int)Priority, submissionOrder)`, so higher priorities are dequeued before lower priorities and FIFO holds within a tier.
 
-| Level | Behavior |
-|-------|----------|
-| `critical` | Never preempted, admitted first |
-| `high` | Preempts `normal` and `low` |
-| `normal` | Default |
-| `low` | Preempted first, admitted last |
+| Level | Admission behavior | Preemption (Step 59, pending) |
+|-------|--------------------|-------------------------------|
+| `Critical` | Admitted first, ahead of all other tiers | Never preempted |
+| `High` | Admitted ahead of `Normal` and `Low` | Preempts `Normal` and `Low` |
+| `Normal` | Default tier | — |
+| `Low` | Admitted last | Preempted first |
 
-Priority affects:
-- **Queue ordering**: Higher priority → admitted sooner.
-- **Preemption**: When memory scarce, lower-priority sequences preempted first.
+**Admission ordering shipped (Phase 9 Step 59 first piece).** Verified by 4 unit tests in `ContinuousBatchSchedulerTests`:
+- `Priority_HighAfterLowQueue_AdmittedFirst` — High submitted after queued Lows admits first.
+- `Priority_SameTier_DrainsInSubmissionOrder` — FIFO within tier.
+- `Priority_InferenceRequest_DefaultsToNormal` — guards default.
+- `Priority_CriticalBeatsHighBeatsNormalBeatsLow` — strict tier ordering.
+
+**Preemption (the second half of Step 59) still pending** — see § Preemption below. The `_preemptionCount` field and `BatchSchedulerMetrics.PreemptionCount` are wired through but always read 0 today.
 
 ## Preemption
 
