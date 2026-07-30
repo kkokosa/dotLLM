@@ -113,6 +113,24 @@ public unsafe class OuterProductDisasmBenchmarks : IDisposable
     }
 
     /// <summary>
+    /// Outer-product 4×3 via AVX2-VNNI (VPDPBUSD): same output tile as
+    /// <see cref="OuterProduct4x3"/> but with the fused multiply-widen-accumulate.
+    /// Holds 6 live float accumulators (2 rows × 3 tokens) where the AVX2 kernel
+    /// holds 3 — the register headroom freed by dropping <c>ones</c>+<c>prod</c>.
+    /// </summary>
+    [Benchmark]
+    public void OuterProduct4x3_Vnni()
+    {
+        byte* groupBase = (byte*)_repackedWeights;
+        MatMul.OuterProductQ8_0Vnni_4x3(
+            groupBase,
+            (byte*)_inputQ8_0,
+            (byte*)_inputQ8_1,
+            (byte*)_inputQ8_2,
+            _output, BlockCount, M);
+    }
+
+    /// <summary>
     /// Full outer-product GEMM: all M rows × 3 tokens.
     /// </summary>
     [Benchmark]
