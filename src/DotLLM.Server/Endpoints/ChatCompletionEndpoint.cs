@@ -35,7 +35,7 @@ public static class ChatCompletionEndpoint
         }
 
         // Validate request structure
-        var validationError = RequestValidator.ValidateChatRequest(request);
+        var validationError = RequestValidator.ValidateChatRequest(request, state.Tokenizer!.VocabSize);
         if (validationError is not null)
         {
             httpContext.Response.StatusCode = 400;

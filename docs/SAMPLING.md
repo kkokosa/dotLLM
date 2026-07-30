@@ -14,6 +14,8 @@ ISamplerStep:
 ### 1. Logit Bias (`LogitBiasStep`)
 Per-token additive bias from request `logit_bias` map: `logits[token_id] += bias`.
 OpenAI API compatible: `{token_id: float_value}`.
+Inserted as the first sampler step only when `logit_bias` is present and non-empty.
+Request validation enforces token ID bounds (`0 <= token_id < vocab_size`) and bias range `[-100, 100]`.
 
 ### 2. Constraint Mask (`ConstraintMaskStep`)
 Apply `IDecodingConstraint.GetAllowedTokens()` mask if structured output active.

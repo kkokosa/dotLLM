@@ -35,6 +35,12 @@ public record InferenceOptions
     public IReadOnlyList<string> StopSequences { get; init; } = [];
 
     /// <summary>
+    /// OpenAI-compatible per-token additive logit bias map.
+    /// Key = token ID, value = bias in range [-100, 100].
+    /// </summary>
+    public IReadOnlyDictionary<int, float>? LogitBias { get; init; }
+
+    /// <summary>
     /// Explicit sampler steps composing the sampling pipeline.
     /// When set, these steps are used instead of building from the flat properties
     /// (Temperature, TopK, TopP, MinP). Steps are applied in order.

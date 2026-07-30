@@ -31,7 +31,7 @@ public static class CompletionEndpoint
         }
 
         // Validate request structure
-        var validationError = RequestValidator.ValidateCompletionRequest(request);
+        var validationError = RequestValidator.ValidateCompletionRequest(request, state.Tokenizer!.VocabSize);
         if (validationError is not null)
         {
             httpContext.Response.StatusCode = 400;

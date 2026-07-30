@@ -10,12 +10,14 @@ public static class RequestValidator
 {
     /// <summary>Maximum number of messages allowed in a chat completion request.</summary>
     public const int MaxMessages = 1024;
+    public const float MinLogitBias = -100f;
+    public const float MaxLogitBias = 100f;
 
     /// <summary>
     /// Validates a chat completion request before inference.
     /// Returns an error message if invalid, or null if valid.
     /// </summary>
-    public static string? ValidateChatRequest(ChatCompletionRequest request)
+    public static string? ValidateChatRequest(ChatCompletionRequest request, int vocabSize = int.MaxValue)
     {
         if (request.Messages is null || request.Messages.Length == 0)
             return "messages array must not be empty";
@@ -26,6 +28,10 @@ public static class RequestValidator
         if (request.MaxTokens.HasValue && request.MaxTokens.Value <= 0)
             return "max_tokens must be a positive integer";
 
+        var logitBiasError = ValidateLogitBias(request.LogitBias, vocabSize);
+        if (logitBiasError is not null)
+            return logitBiasError;
+
         return null;
     }
 
@@ -33,13 +39,17 @@ public static class RequestValidator
     /// Validates a raw completion request before inference.
     /// Returns an error message if invalid, or null if valid.
     /// </summary>
-    public static string? ValidateCompletionRequest(CompletionRequest request)
+    public static string? ValidateCompletionRequest(CompletionRequest request, int vocabSize = int.MaxValue)
     {
         if (string.IsNullOrEmpty(request.Prompt))
             return "prompt must not be empty";
 
         if (request.MaxTokens.HasValue && request.MaxTokens.Value <= 0)
             return "max_tokens must be a positive integer";
+
+        var logitBiasError = ValidateLogitBias(request.LogitBias, vocabSize);
+        if (logitBiasError is not null)
+            return logitBiasError;
 
         return null;
     }
@@ -65,6 +75,26 @@ public static class RequestValidator
 
         int remaining = maxSequenceLength - promptTokenCount;
         effectiveMaxTokens = Math.Min(requestedMaxTokens, remaining);
+        return null;
+    }
+
+    private static string? ValidateLogitBias(IReadOnlyDictionary<int, float>? logitBias, int vocabSize)
+    {
+        if (logitBias is not { Count: > 0 })
+            return null;
+
+        foreach (var (tokenId, bias) in logitBias)
+        {
+            if (tokenId < 0 || tokenId >= vocabSize)
+                return $"logit_bias token id {tokenId} is out of range [0, {vocabSize - 1}]";
+
+            if (float.IsNaN(bias) || float.IsInfinity(bias))
+                return $"logit_bias value for token {tokenId} must be finite";
+
+            if (bias < MinLogitBias || bias > MaxLogitBias)
+                return $"logit_bias value for token {tokenId} must be in range [{MinLogitBias}, {MaxLogitBias}]";
+        }
+
         return null;
     }
 }

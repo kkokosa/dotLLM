@@ -82,6 +82,7 @@ public static class RequestConverter
             ResponseFormat = ParseResponseFormat(request.ResponseFormat),
             Logprobs = request.Logprobs ?? false,
             TopLogprobs = Math.Clamp(request.TopLogprobs ?? 0, 0, 20),
+            LogitBias = request.LogitBias,
             Threading = threading,
         };
     }
@@ -108,6 +109,7 @@ public static class RequestConverter
             ResponseFormat = ParseResponseFormat(request.ResponseFormat),
             Logprobs = request.Logprobs ?? false,
             TopLogprobs = Math.Clamp(request.TopLogprobs ?? 0, 0, 20),
+            LogitBias = request.LogitBias,
             Threading = threading,
         };
     }

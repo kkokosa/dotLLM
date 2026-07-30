@@ -62,6 +62,9 @@ public sealed record ChatCompletionRequest
     [JsonPropertyName("top_logprobs")]
     public int? TopLogprobs { get; init; }
 
+    [JsonPropertyName("logit_bias")]
+    public Dictionary<int, float>? LogitBias { get; init; }
+
     [JsonPropertyName("n")]
     public int N { get; init; } = 1;
 }

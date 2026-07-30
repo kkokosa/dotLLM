@@ -77,6 +77,48 @@ public class RequestValidatorTests
         Assert.Null(RequestValidator.ValidateChatRequest(request));
     }
 
+    [Fact]
+    public void ValidateChatRequest_LogitBiasTokenOutOfRange_ReturnsError()
+    {
+        var request = new ChatCompletionRequest
+        {
+            Messages = [new ChatMessageDto { Role = "user", Content = "Hello" }],
+            LogitBias = new Dictionary<int, float> { [42] = 1.0f },
+        };
+
+        var error = RequestValidator.ValidateChatRequest(request, vocabSize: 32);
+
+        Assert.Equal("logit_bias token id 42 is out of range [0, 31]", error);
+    }
+
+    [Fact]
+    public void ValidateChatRequest_LogitBiasNegativeTokenId_ReturnsError()
+    {
+        var request = new ChatCompletionRequest
+        {
+            Messages = [new ChatMessageDto { Role = "user", Content = "Hello" }],
+            LogitBias = new Dictionary<int, float> { [-1] = 1.0f },
+        };
+
+        var error = RequestValidator.ValidateChatRequest(request, vocabSize: 32);
+
+        Assert.Equal("logit_bias token id -1 is out of range [0, 31]", error);
+    }
+
+    [Fact]
+    public void ValidateChatRequest_LogitBiasOutOfRange_ReturnsError()
+    {
+        var request = new ChatCompletionRequest
+        {
+            Messages = [new ChatMessageDto { Role = "user", Content = "Hello" }],
+            LogitBias = new Dictionary<int, float> { [1] = 101.0f },
+        };
+
+        var error = RequestValidator.ValidateChatRequest(request, vocabSize: 32000);
+
+        Assert.Equal("logit_bias value for token 1 must be in range [-100, 100]", error);
+    }
+
     // ── Completion request validation ──
 
     [Fact]
@@ -100,6 +142,32 @@ public class RequestValidatorTests
     {
         var request = new CompletionRequest { Prompt = "Hello world" };
         Assert.Null(RequestValidator.ValidateCompletionRequest(request));
+    }
+
+    [Fact]
+    public void ValidateCompletionRequest_LogitBiasTokenInRangeAndValueInRange_ReturnsNull()
+    {
+        var request = new CompletionRequest
+        {
+            Prompt = "Hello world",
+            LogitBias = new Dictionary<int, float> { [7] = -25.0f },
+        };
+
+        Assert.Null(RequestValidator.ValidateCompletionRequest(request, vocabSize: 32000));
+    }
+
+    [Fact]
+    public void ValidateCompletionRequest_LogitBiasTokenOutOfRange_ReturnsError()
+    {
+        var request = new CompletionRequest
+        {
+            Prompt = "Hello world",
+            LogitBias = new Dictionary<int, float> { [32000] = 1.0f },
+        };
+
+        var error = RequestValidator.ValidateCompletionRequest(request, vocabSize: 32000);
+
+        Assert.Equal("logit_bias token id 32000 is out of range [0, 31999]", error);
     }
 
     // ── Prompt length validation ──

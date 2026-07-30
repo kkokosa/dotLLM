@@ -1,5 +1,7 @@
 using System.Numerics.Tensors;
+using System.Reflection;
 using DotLLM.Core.Configuration;
+using DotLLM.Core.Sampling;
 using DotLLM.Engine.Samplers;
 using Xunit;
 
@@ -80,6 +82,101 @@ public class SamplerPipelineTests
     }
 
     [Fact]
+    public void Sample_GreedyWithLogitBias_AppliesBiasBeforeArgMax()
+    {
+        var options = new InferenceOptions
+        {
+            Temperature = 0f,
+            LogitBias = new Dictionary<int, float> { [1] = 2.0f },
+        };
+        var pipeline = new SamplerPipeline(options);
+
+        float[] logits = [2.0f, 1.0f];
+
+        int result = pipeline.Sample(logits, []);
+
+        Assert.Equal(1, result);
+    }
+
+    [Fact]
+    public void Sample_ComposableViaOptions_PrependsLogitBiasStep()
+    {
+        var options = new InferenceOptions
+        {
+            Temperature = 0f,
+            LogitBias = new Dictionary<int, float> { [2] = 3.0f },
+            SamplerSteps = [new TemperatureSampler(0.8f)],
+        };
+        var pipeline = new SamplerPipeline(options);
+
+        float[] logits = [1.0f, 2.0f, 0.0f];
+
+        int result = pipeline.Sample(logits, []);
+
+        Assert.Equal(2, result);
+    }
+
+    [Fact]
+    public void Sample_LargeNegativeLogitBias_EffectivelyPreventsSelection()
+    {
+        var options = new InferenceOptions
+        {
+            Temperature = 0f,
+            LogitBias = new Dictionary<int, float> { [1] = -100.0f },
+        };
+        var pipeline = new SamplerPipeline(options);
+
+        float[] logits = [0.0f, 50.0f];
+
+        int result = pipeline.Sample(logits, []);
+
+        Assert.Equal(0, result);
+    }
+
+    [Fact]
+    public void Constructor_InstantiatesLogitBiasStep_OnlyWhenBiasMapNonEmpty()
+    {
+        var absent = new SamplerPipeline(new InferenceOptions { Temperature = 0f });
+        var empty = new SamplerPipeline(new InferenceOptions
+        {
+            Temperature = 0f,
+            LogitBias = new Dictionary<int, float>(),
+        });
+        var nonEmpty = new SamplerPipeline(new InferenceOptions
+        {
+            Temperature = 0f,
+            LogitBias = new Dictionary<int, float> { [0] = 1.0f },
+        });
+
+        Assert.DoesNotContain(GetSamplerSteps(absent), s => s is LogitBiasStep);
+        Assert.DoesNotContain(GetSamplerSteps(empty), s => s is LogitBiasStep);
+        Assert.Contains(GetSamplerSteps(nonEmpty), s => s is LogitBiasStep);
+    }
+
+    [Fact]
+    public void Sample_NoLogitBiasVsEmptyMap_HasSameBehavior()
+    {
+        var noBias = new SamplerPipeline(new InferenceOptions
+        {
+            Temperature = 0f,
+        });
+        var emptyBias = new SamplerPipeline(new InferenceOptions
+        {
+            Temperature = 0f,
+            LogitBias = new Dictionary<int, float>(),
+        });
+
+        float[] logits1 = [1.0f, 2.0f, 1.5f];
+        float[] logits2 = [1.0f, 2.0f, 1.5f];
+
+        int result1 = noBias.Sample(logits1, []);
+        int result2 = emptyBias.Sample(logits2, []);
+
+        Assert.Equal(result1, result2);
+        Assert.Equal(logits1, logits2);
+    }
+
+    [Fact]
     public void Sample_ComposableConstructor_ProducesValidIndex()
     {
         var pipeline = new SamplerPipeline(
@@ -136,5 +233,14 @@ public class SamplerPipelineTests
         int result2 = pipeline2.Sample(logits2, []);
 
         Assert.Equal(result1, result2);
+    }
+
+    private static ISamplerStep[] GetSamplerSteps(SamplerPipeline pipeline)
+    {
+        var field = typeof(SamplerPipeline).GetField("_steps", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        var value = field!.GetValue(pipeline);
+        Assert.NotNull(value);
+        return (ISamplerStep[])value!;
     }
 }

@@ -60,7 +60,11 @@ public sealed class SamplerPipeline
         if (options.SamplerSteps is not null)
         {
             _greedy = false;
-            _steps = options.SamplerSteps.ToArray();
+            var explicitSteps = new List<ISamplerStep>();
+            if (options.LogitBias is { Count: > 0 })
+                explicitSteps.Add(new LogitBiasStep(options.LogitBias));
+            explicitSteps.AddRange(options.SamplerSteps);
+            _steps = explicitSteps.ToArray();
 
             // Build processors: use explicit list if provided, otherwise auto-build from flat properties
             if (options.LogitProcessors is not null)
@@ -106,6 +110,8 @@ public sealed class SamplerPipeline
 
         // Build sampler step chain (only add if enabled)
         var steps = new List<ISamplerStep>();
+        if (options.LogitBias is { Count: > 0 })
+            steps.Add(new LogitBiasStep(options.LogitBias));
         if (!_greedy)
         {
             if (options.Temperature != 1.0f)
@@ -144,13 +150,13 @@ public sealed class SamplerPipeline
         for (int i = 0; i < _processors.Length; i++)
             _processors[i].Process(logits, previousTokens, _processorContext);
 
-        // 2. Greedy: argmax, skip everything else
-        if (_greedy)
-            return TensorPrimitives.IndexOfMax(logits);
-
-        // 3. Run sampler steps (temperature → top-k → top-p → min-p)
+        // 2. Run sampler steps (logit bias → temperature → top-k → top-p → min-p)
         for (int i = 0; i < _steps.Length; i++)
             _steps[i].Apply(logits, _samplerContext);
+
+        // 3. Greedy: argmax after bias/processors are applied
+        if (_greedy)
+            return TensorPrimitives.IndexOfMax(logits);
 
         // 4. Categorical sample
         return CategoricalSampler.Sample(logits, _rng);

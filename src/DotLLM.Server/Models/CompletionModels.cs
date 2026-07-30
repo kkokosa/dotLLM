@@ -49,6 +49,9 @@ public sealed record CompletionRequest
 
     [JsonPropertyName("top_logprobs")]
     public int? TopLogprobs { get; init; }
+
+    [JsonPropertyName("logit_bias")]
+    public Dictionary<int, float>? LogitBias { get; init; }
 }
 
 /// <summary>
