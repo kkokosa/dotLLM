@@ -152,6 +152,58 @@ public sealed unsafe class SimpleKvCache : IKvCache
     }
 
     /// <inheritdoc/>
+    public bool TryReserveSlot(
+        int layerIndex,
+        ReadOnlySpan<int> positions,
+        out Span<float> kDst,
+        out Span<float> vDst)
+    {
+        kDst = default;
+        vDst = default;
+
+        int seqLen = positions.Length;
+        if (seqLen == 0) return false;
+
+        int start = positions[0];
+
+        // Contiguous run required: the GEMM writes [seqLen, kvStride] as a single
+        // contiguous block, which only maps to a contiguous cache region.
+        for (int i = 1; i < seqLen; i++)
+        {
+            if (positions[i] != start + i) return false;
+        }
+
+        // Bounds: the entire run must fit within the cache.
+        if ((uint)start >= (uint)_maxSeqLen) return false;
+        if (start + seqLen > _maxSeqLen) return false;
+
+        if ((uint)layerIndex >= (uint)_numLayers)
+            throw new ArgumentOutOfRangeException(nameof(layerIndex));
+
+        int totalFloats = seqLen * _kvStride;
+        kDst = new Span<float>((float*)_keys[layerIndex] + (long)start * _kvStride, totalFloats);
+        vDst = new Span<float>((float*)_values[layerIndex] + (long)start * _kvStride, totalFloats);
+        return true;
+    }
+
+    /// <inheritdoc/>
+    public void CommitSlot(int layerIndex, ReadOnlySpan<int> positions)
+    {
+        int seqLen = positions.Length;
+        if (seqLen == 0) return;
+
+        int maxPos = positions[0];
+        for (int i = 1; i < seqLen; i++)
+        {
+            if (positions[i] > maxPos) maxPos = positions[i];
+        }
+
+        int newLength = maxPos + 1;
+        if (newLength > _currentLength)
+            _currentLength = newLength;
+    }
+
+    /// <inheritdoc/>
     public void Dispose()
     {
         Dispose(disposing: true);

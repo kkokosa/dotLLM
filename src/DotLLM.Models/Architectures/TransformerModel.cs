@@ -196,6 +196,27 @@ public sealed unsafe class TransformerModel : IModel
             // b. RMSNorm + Pre-quantize + Q/K/V projections
             byte* inputQ8Scratch = (byte*)_state.InputQ8Scratch;
 
+            // Direct-to-cache K/V opt (#25 item 4): when the cache can expose an
+            // in-place slot for these positions, point the K and V projection
+            // outputs at the slot so the GEMM, bias, QK-norm, and RoPE all run
+            // directly on the cache buffer — skipping the scratch + `Update`
+            // memcpy. The slot is committed (length advance) after the in-place
+            // pipeline completes. Caches that can't expose a slot (quantized,
+            // CUDA, hybrid, or paged spanning a block boundary) return false from
+            // TryReserveSlot and the legacy scratch + Update path runs unchanged.
+            //
+            // Q always stays in scratch — it isn't cached.
+            float* kTarget = k;
+            float* vTarget = v;
+            bool kvSlotReserved = false;
+            if (kvCache is not null && kvCache.TryReserveSlot(layer, positions,
+                                          out Span<float> kSlot, out Span<float> vSlot))
+            {
+                kTarget = (float*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(kSlot));
+                vTarget = (float*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(vSlot));
+                kvSlotReserved = true;
+            }
+
             if (seqLen == 1 && _threadPool != null)
             {
                 // Decode path: try fused RmsNorm+Quantize (skips normOut intermediate)
@@ -217,7 +238,7 @@ public sealed unsafe class TransformerModel : IModel
                     preQuantNorm = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, 1, lw.QQuantType);
                 }
 
-                FusedQkvDecode(in lw, normOut, preQuantNorm, q, k, v);
+                FusedQkvDecode(in lw, normOut, preQuantNorm, q, kTarget, vTarget);
             }
             else
             {
@@ -237,27 +258,29 @@ public sealed unsafe class TransformerModel : IModel
                 var rwV = rl?.V ?? default;
                 GemmInterleaved(lw.QWeight, lw.QQuantType, normOut, q, lw.QOutputDim, lw.QInputDim, seqLen,
                     preQuantNorm, in rwQ);
-                GemmInterleaved(lw.KWeight, lw.KQuantType, normOut, k, lw.KOutputDim, lw.KInputDim, seqLen,
+                GemmInterleaved(lw.KWeight, lw.KQuantType, normOut, kTarget, lw.KOutputDim, lw.KInputDim, seqLen,
                     IsCompatiblePreQuant(lw.QQuantType, lw.KQuantType) ? preQuantNorm : null, in rwK);
-                GemmInterleaved(lw.VWeight, lw.VQuantType, normOut, v, lw.VOutputDim, lw.VInputDim, seqLen,
+                GemmInterleaved(lw.VWeight, lw.VQuantType, normOut, vTarget, lw.VOutputDim, lw.VInputDim, seqLen,
                     IsCompatiblePreQuant(lw.QQuantType, lw.VQuantType) ? preQuantNorm : null, in rwV);
             }
 
-            // Optional bias: y = Wx + b (no-op when null)
+            // Optional bias: y = Wx + b (no-op when null). All run in place on
+            // kTarget / vTarget, which is either scratch or the cache slot.
             AddBias(lw.QBias, q, lw.QOutputDim, seqLen);
-            AddBias(lw.KBias, k, lw.KOutputDim, seqLen);
-            AddBias(lw.VBias, v, lw.VOutputDim, seqLen);
+            AddBias(lw.KBias, kTarget, lw.KOutputDim, seqLen);
+            AddBias(lw.VBias, vTarget, lw.VOutputDim, seqLen);
 
             // Optional QK-norms (Qwen3-style): per-head RMSNorm on Q/K after projection, before RoPE
             if (lw.QNormWeight is not null)
                 ApplyPerHeadNorm(lw.QNormWeight, q, numHeads, headDim, seqLen, eps);
             if (lw.KNormWeight is not null)
-                ApplyPerHeadNorm(lw.KNormWeight, k, numKvHeads, headDim, seqLen, eps);
+                ApplyPerHeadNorm(lw.KNormWeight, kTarget, numKvHeads, headDim, seqLen, eps);
 
-            // d. RoPE (in-place on Q and K for all tokens)
+            // d. RoPE (in-place on Q and K for all tokens) — K rotates inside
+            // the cache slot when direct-to-cache is active.
             RoPE.Execute(
                 new Span<float>(q, seqLen * numHeads * headDim),
-                new Span<float>(k, seqLen * kvStride),
+                new Span<float>(kTarget, seqLen * kvStride),
                 positions,
                 numHeads, numKvHeads, headDim, _ropeDim,
                 _state.CosTable, _state.SinTable, _ropeType);
@@ -265,11 +288,18 @@ public sealed unsafe class TransformerModel : IModel
             // e. Attention — with or without KV-cache
             if (kvCache is not null)
             {
-                // Store new K/V in cache, then attend over full cached context (zero allocations)
-                var kRef = new TensorRef(seqLen, kvStride, DType.Float32, -1, (nint)k);
-                var vRef = new TensorRef(seqLen, kvStride, DType.Float32, -1, (nint)v);
-
-                kvCache.Update(kRef, vRef, positions, layer);
+                if (kvSlotReserved)
+                {
+                    // K/V are already in the cache slot — just advance length.
+                    kvCache.CommitSlot(layer, positions);
+                }
+                else
+                {
+                    // Legacy path: K/V live in scratch; copy into the cache.
+                    var kRef = new TensorRef(seqLen, kvStride, DType.Float32, -1, (nint)kTarget);
+                    var vRef = new TensorRef(seqLen, kvStride, DType.Float32, -1, (nint)vTarget);
+                    kvCache.Update(kRef, vRef, positions, layer);
+                }
 
                 int seqKv = kvCache.CurrentLength;
 
@@ -292,7 +322,9 @@ public sealed unsafe class TransformerModel : IModel
             }
             else
             {
-                Attention.Execute(q, k, v, attnOut,
+                // kvCache==null path: TryReserveSlot was never attempted; K/V are
+                // in scratch (kTarget == k, vTarget == v).
+                Attention.Execute(q, kTarget, vTarget, attnOut,
                     seqLen, seqLen, numHeads, numKvHeads, headDim, 0, _threadPool,
                     _slidingWindowSize);
             }

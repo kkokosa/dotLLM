@@ -174,6 +174,66 @@ public sealed unsafe class PagedKvCache : IKvCache
         _blockTable.SetCurrentLength(length);
     }
 
+    /// <inheritdoc/>
+    public bool TryReserveSlot(
+        int layerIndex,
+        ReadOnlySpan<int> positions,
+        out Span<float> kDst,
+        out Span<float> vDst)
+    {
+        kDst = default;
+        vDst = default;
+
+        int seqLen = positions.Length;
+        if (seqLen == 0) return false;
+
+        int start = positions[0];
+
+        // Contiguous run required (GEMM output is contiguous).
+        for (int i = 1; i < seqLen; i++)
+        {
+            if (positions[i] != start + i) return false;
+        }
+
+        // Bounds: entire run must fit within MaxLength.
+        if ((uint)start >= (uint)_maxSeqLen) return false;
+        if (start + seqLen > _maxSeqLen) return false;
+
+        // Single-block run only: the run must not cross a block boundary, otherwise the
+        // in-place slot wouldn't be physically contiguous. Decode (seqLen=1) always
+        // satisfies this; multi-token runs only when they fit inside one block.
+        int blockSize = _pool.BlockSize;
+        int offset = start % blockSize;
+        if (offset + seqLen > blockSize) return false;
+
+        // Ensure a block exists (with refcount-1 fast-path) for the start position.
+        _blockTable.EnsureCapacity(start + seqLen);
+        _blockTable.EnsureWritable(start);
+        var (blockId, offsetInBlock) = _blockTable.Resolve(start);
+
+        int totalFloats = seqLen * _kvStride;
+        kDst = new Span<float>(_pool.GetKeyPtr(blockId, layerIndex) + offsetInBlock * _kvStride, totalFloats);
+        vDst = new Span<float>(_pool.GetValuePtr(blockId, layerIndex) + offsetInBlock * _kvStride, totalFloats);
+        return true;
+    }
+
+    /// <inheritdoc/>
+    public void CommitSlot(int layerIndex, ReadOnlySpan<int> positions)
+    {
+        int seqLen = positions.Length;
+        if (seqLen == 0) return;
+
+        int maxPos = positions[0];
+        for (int i = 1; i < seqLen; i++)
+        {
+            if (positions[i] > maxPos) maxPos = positions[i];
+        }
+
+        int newLength = maxPos + 1;
+        if (newLength > _blockTable.CurrentLength)
+            _blockTable.Advance(newLength);
+    }
+
     /// <summary>
     /// Gathers block data into a contiguous staging buffer for attention kernel consumption.
     /// Copies block-by-block in logical order.
