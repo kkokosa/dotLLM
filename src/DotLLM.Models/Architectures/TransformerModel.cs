@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
+using DotLLM.Core.Diagnostics;
 using DotLLM.Core.Models;
 using DotLLM.Core.Tensors;
 using DotLLM.Cpu.Kernels;
@@ -47,6 +48,26 @@ public sealed unsafe class TransformerModel : IModel
 
     /// <summary>Debug: limit the number of transformer layers processed. 0 = all layers (default). -1 = skip all layers (embedding + LM head only).</summary>
     internal int DebugMaxLayers { get; set; }
+
+    /// <summary>
+    /// Optional inference hook registry. When non-null, hooks registered at one of the
+    /// 8 <see cref="HookPoint"/> locations are fired during <c>Forward</c>. When null,
+    /// the forward pass takes a single null check at each hook site and behaves
+    /// identically to the un-hooked path (no allocation, no virtual dispatch).
+    /// </summary>
+    public HookRegistry? Hooks { get; set; }
+
+    /// <summary>
+    /// Sequence identifier surfaced to hooks via <see cref="HookContext.SequenceId"/>.
+    /// Defaults to 0; set by callers performing per-request tracing.
+    /// </summary>
+    public int SequenceId { get; set; }
+
+    /// <summary>
+    /// Current decoding step surfaced to hooks via <see cref="HookContext.CurrentStep"/>.
+    /// Defaults to 0; set by callers performing per-step tracing.
+    /// </summary>
+    public int CurrentStep { get; set; }
 
     private TransformerModel(ModelConfig config, TransformerWeights weights, TransformerForwardState state,
                        GgufFile gguf, int ropeDim, RoPEType ropeType,
@@ -176,6 +197,11 @@ public sealed unsafe class TransformerModel : IModel
         // 1. EMBEDDING LOOKUP
         EmbeddingLookup(tokenIds, hidden, hiddenSize);
 
+        // Hook: PostEmbedding (per token)
+        var hooks = Hooks;
+        if (hooks is not null && hooks.HasHookAt(HookPoint.PostEmbedding))
+            FireHookPerToken(hooks, HookPoint.PostEmbedding, layerIndex: -1, hidden, hiddenSize, seqLen, positions);
+
         // 2. TRANSFORMER LAYERS
         var repackedLayers = _weights.RepackedLayers;
         int numLayers = DebugMaxLayers switch
@@ -196,11 +222,18 @@ public sealed unsafe class TransformerModel : IModel
             // b. RMSNorm + Pre-quantize + Q/K/V projections
             byte* inputQ8Scratch = (byte*)_state.InputQ8Scratch;
 
+            // Hook: PreAttention reads post-(attn-RMSNorm) activation in normOut.
+            // On the fused decode path normOut is intentionally skipped; materialize it
+            // ONLY when a PreAttention hook is registered so the hooks-off path stays
+            // byte-identical to today.
+            bool firePreAttention = hooks is not null && hooks.HasHookAt(HookPoint.PreAttention);
+
             if (seqLen == 1 && _threadPool != null)
             {
                 // Decode path: try fused RmsNorm+Quantize (skips normOut intermediate)
                 byte* preQuantNorm = null;
-                if (IsCompatiblePreQuant(lw.QQuantType, lw.KQuantType)
+                if (!firePreAttention
+                    && IsCompatiblePreQuant(lw.QQuantType, lw.KQuantType)
                     && IsCompatiblePreQuant(lw.QQuantType, lw.VQuantType))
                 {
                     preQuantNorm = FusedOps.RmsNormQuantize(hidden, lw.AttnNormWeight, eps,
@@ -209,11 +242,16 @@ public sealed unsafe class TransformerModel : IModel
 
                 if (preQuantNorm == null)
                 {
-                    // Fallback: unfused (F32/F16 weights or cross-family projections)
+                    // Fallback: unfused (F32/F16 weights or cross-family projections, or
+                    // PreAttention hook active and we need normOut materialized for capture/replace).
                     RmsNorm.Execute(
                         new ReadOnlySpan<float>(hidden, hiddenSize),
                         lw.AttnNormWeight, eps,
                         new Span<float>(normOut, hiddenSize));
+
+                    if (firePreAttention)
+                        FireHookPerToken(hooks!, HookPoint.PreAttention, layer, normOut, hiddenSize, 1, positions);
+
                     preQuantNorm = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, 1, lw.QQuantType);
                 }
 
@@ -229,6 +267,10 @@ public sealed unsafe class TransformerModel : IModel
                         lw.AttnNormWeight, eps,
                         new Span<float>(normOut + t * hiddenSize, hiddenSize));
                 }
+
+                // Hook: PreAttention (per token) — fires on the post-norm activation
+                if (firePreAttention)
+                    FireHookPerToken(hooks!, HookPoint.PreAttention, layer, normOut, hiddenSize, seqLen, positions);
 
                 byte* preQuantNorm = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, lw.QQuantType);
 
@@ -304,6 +346,10 @@ public sealed unsafe class TransformerModel : IModel
                 preQuantAttn, in rwO);
             AddBias(lw.OBias, normOut, lw.OOutputDim, seqLen);
 
+            // Hook: PostAttention (per token) — fires on post-O-projection, pre-residual activation in normOut.
+            if (hooks is not null && hooks.HasHookAt(HookPoint.PostAttention))
+                FireHookPerToken(hooks, HookPoint.PostAttention, layer, normOut, hiddenSize, seqLen, positions);
+
             // g. Residual add (per token)
             for (int t = 0; t < seqLen; t++)
             {
@@ -316,12 +362,16 @@ public sealed unsafe class TransformerModel : IModel
             // h. Copy hiddenState → residual
             new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
 
+            // Hook: PreFfn reads post-(ffn-RMSNorm) activation in normOut.
+            // Same fused-decode caveat as PreAttention: materialize normOut only when active.
+            bool firePreFfn = hooks is not null && hooks.HasHookAt(HookPoint.PreFfn);
+
             // i. FFN RMSNorm + Pre-quantize + Gate/Up projections
             if (seqLen == 1 && _threadPool != null)
             {
                 // Decode path: try fused RmsNorm+Quantize (skips normOut intermediate)
                 byte* preQuantFfn = null;
-                if (IsCompatiblePreQuant(lw.GateQuantType, lw.UpQuantType))
+                if (!firePreFfn && IsCompatiblePreQuant(lw.GateQuantType, lw.UpQuantType))
                 {
                     preQuantFfn = FusedOps.RmsNormQuantize(hidden, lw.FfnNormWeight, eps,
                         inputQ8Scratch, hiddenSize, lw.GateQuantType);
@@ -329,11 +379,16 @@ public sealed unsafe class TransformerModel : IModel
 
                 if (preQuantFfn == null)
                 {
-                    // Fallback: unfused (F32/F16 weights or cross-family projections)
+                    // Fallback: unfused (F32/F16 weights or cross-family projections, or
+                    // PreFfn hook active and we need normOut materialized for capture/replace).
                     RmsNorm.Execute(
                         new ReadOnlySpan<float>(hidden, hiddenSize),
                         lw.FfnNormWeight, eps,
                         new Span<float>(normOut, hiddenSize));
+
+                    if (firePreFfn)
+                        FireHookPerToken(hooks!, HookPoint.PreFfn, layer, normOut, hiddenSize, 1, positions);
+
                     preQuantFfn = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, 1, lw.GateQuantType);
                 }
 
@@ -349,6 +404,10 @@ public sealed unsafe class TransformerModel : IModel
                         lw.FfnNormWeight, eps,
                         new Span<float>(normOut + t * hiddenSize, hiddenSize));
                 }
+
+                // Hook: PreFfn (per token) — fires on the post-norm activation
+                if (firePreFfn)
+                    FireHookPerToken(hooks!, HookPoint.PreFfn, layer, normOut, hiddenSize, seqLen, positions);
 
                 byte* preQuantFfn = QuantizeInput(normOut, inputQ8Scratch, hiddenSize, seqLen, lw.GateQuantType);
 
@@ -384,6 +443,10 @@ public sealed unsafe class TransformerModel : IModel
                 preQuantSilu, in rwDown);
             AddBias(lw.DownBias, normOut, lw.DownOutputDim, seqLen);
 
+            // Hook: PostFfn (per token) — fires on post-Down-projection, pre-residual activation in normOut.
+            if (hooks is not null && hooks.HasHookAt(HookPoint.PostFfn))
+                FireHookPerToken(hooks, HookPoint.PostFfn, layer, normOut, hiddenSize, seqLen, positions);
+
             // k. Residual add (per token)
             for (int t = 0; t < seqLen; t++)
             {
@@ -392,6 +455,10 @@ public sealed unsafe class TransformerModel : IModel
                     new ReadOnlySpan<float>(normOut + t * hiddenSize, hiddenSize),
                     new Span<float>(hidden + t * hiddenSize, hiddenSize));
             }
+
+            // Hook: PostLayer (per token) — fires on the post-residual hidden state for this layer.
+            if (hooks is not null && hooks.HasHookAt(HookPoint.PostLayer))
+                FireHookPerToken(hooks, HookPoint.PostLayer, layer, hidden, hiddenSize, seqLen, positions);
         }
 
         // 3. FINAL NORM (in-place: hidden → hidden)
@@ -410,6 +477,10 @@ public sealed unsafe class TransformerModel : IModel
             new Span<float>(normOutT, hiddenSize).CopyTo(new Span<float>(hiddenT, hiddenSize));
         }
 
+        // Hook: PreLmHead (per token) — fires on final post-norm hidden state.
+        if (hooks is not null && hooks.HasHookAt(HookPoint.PreLmHead))
+            FireHookPerToken(hooks, HookPoint.PreLmHead, layerIndex: -1, hidden, hiddenSize, seqLen, positions);
+
         // 4. LM HEAD — all positions (enables batched speculative decoding verification)
         {
             var rwOutput = _weights.RepackedOutput ?? default;
@@ -418,6 +489,10 @@ public sealed unsafe class TransformerModel : IModel
                 null, in rwOutput);
         }
 
+        // Hook: PostLmHead (per token) — fires on raw logits (length = vocabSize).
+        if (hooks is not null && hooks.HasHookAt(HookPoint.PostLmHead))
+            FireHookPerToken(hooks, HookPoint.PostLmHead, layerIndex: -1, logits, vocabSize, seqLen, positions);
+
         // 5. RETURN [seqLen, vocabSize]
         var shape = new TensorShape(seqLen, vocabSize);
         var result = UnmanagedTensor.Allocate(shape, DType.Float32, deviceId);
@@ -425,6 +500,30 @@ public sealed unsafe class TransformerModel : IModel
             new Span<float>((void*)result.DataPointer, seqLen * vocabSize));
 
         return result;
+    }
+
+    /// <summary>
+    /// Fires the registered hooks at <paramref name="point"/> for each token slice in
+    /// <paramref name="buffer"/>. Replacements written by hooks are reflected in the
+    /// underlying buffer for downstream computation.
+    /// </summary>
+    /// <param name="hooks">Non-null registry (caller has already gated on null + HasHookAt).</param>
+    /// <param name="point">Hook point to fire.</param>
+    /// <param name="layerIndex">Layer index for <see cref="HookContext.LayerIndex"/>; -1 for non-layer points.</param>
+    /// <param name="buffer">Pointer to a [<paramref name="seqLen"/>, <paramref name="elementsPerToken"/>] tensor.</param>
+    /// <param name="elementsPerToken">Number of elements per token slice.</param>
+    /// <param name="seqLen">Number of token slices.</param>
+    /// <param name="positions">Token position indices for the current call (used for <see cref="HookContext.TokenPosition"/>).</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void FireHookPerToken(HookRegistry hooks, HookPoint point, int layerIndex,
+        float* buffer, int elementsPerToken, int seqLen, ReadOnlySpan<int> positions)
+    {
+        for (int t = 0; t < seqLen; t++)
+        {
+            int tokenPos = (uint)t < (uint)positions.Length ? positions[t] : t;
+            var ctx = new HookContext(layerIndex, tokenPos, SequenceId, CurrentStep);
+            hooks.Fire(point, new Span<float>(buffer + t * elementsPerToken, elementsPerToken), in ctx);
+        }
     }
 
     /// <summary>
