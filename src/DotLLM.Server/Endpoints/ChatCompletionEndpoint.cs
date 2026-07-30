@@ -210,9 +210,20 @@ public static class ChatCompletionEndpoint
         {
             await foreach (var token in generator.GenerateStreamingTokensAsync(prompt, options, ct))
             {
+                // Match the non-streaming path's completion_tokens (generatedIds.Count after stop
+                // handling). The streaming engine yields:
+                //   - mid-stream content tokens (Text non-empty, FinishReason null) — count
+                //   - UTF-8 continuation tokens (Text empty, FinishReason null) — count (issue #121)
+                //   - the final content+finish token (Text non-empty, FinishReason set) — count
+                //   - the empty terminal sentinel for a stop-string-removed token (Text empty,
+                //     FinishReason set) — DO NOT count: the underlying token was already
+                //     RemoveAt-ed from generatedIds, so the non-streaming path wouldn't count it.
+                bool isTerminalSentinel = token.Text.Length == 0 && token.FinishReason.HasValue;
+                if (!isTerminalSentinel)
+                    completionTokens++;
+
                 if (token.Text.Length > 0)
                 {
-                    completionTokens++;
                     sb.Append(token.Text);
                     var tokenLogprobs = token.Logprobs.HasValue
                         ? RequestConverter.ToLogprobsDto(token.Logprobs.Value)
