@@ -246,11 +246,17 @@ public sealed class TextGenerator
             detok.Append(firstTokenId);
 
             var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds,
-                detok.GetTailView(stopTailSize, stopScratch));
+                detok.GetTailView(stopTailSize, stopScratch), out int firstMatchedIdx);
             if (stopResult != StopResult.Continue)
             {
+                bool isStopStringMatch = IsStopStringMatch(stopConditions, firstMatchedIdx);
                 if (stopResult == StopResult.Stop)
-                    generatedIds.RemoveAt(generatedIds.Count - 1);
+                {
+                    if (!isStopStringMatch)
+                        generatedIds.RemoveAt(generatedIds.Count - 1);
+                    // Stop-string match: keep the last token in the id list; BuildResponse
+                    // will trim the matched stop-string suffix at the character boundary.
+                }
                 else
                     onTokenGenerated?.Invoke(firstTokenId);
 
@@ -258,7 +264,8 @@ public sealed class TextGenerator
                 StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                 return BuildResponse(promptLen, generatedIds, finishReason,
                     prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache), cachedTokenCount,
-                    logprobs: logprobsList?.ToArray());
+                    logprobs: logprobsList?.ToArray(),
+                    stopConditionsForSuffixTrim: stopConditions);
             }
 
             onTokenGenerated?.Invoke(firstTokenId);
@@ -309,11 +316,16 @@ public sealed class TextGenerator
                             detok.Append(tokenId);
 
                             stopResult = CheckStopConditions(stopConditions, tokenId, generatedIds,
-                                detok.GetTailView(stopTailSize, stopScratch));
+                                detok.GetTailView(stopTailSize, stopScratch), out int specMatchedIdx);
                             if (stopResult != StopResult.Continue)
                             {
+                                bool isStopStringMatch = IsStopStringMatch(stopConditions, specMatchedIdx);
                                 if (stopResult == StopResult.Stop)
-                                    generatedIds.RemoveAt(generatedIds.Count - 1);
+                                {
+                                    if (!isStopStringMatch)
+                                        generatedIds.RemoveAt(generatedIds.Count - 1);
+                                    // Stop-string match: keep the last token; trim suffix in BuildResponse.
+                                }
                                 else
                                 {
                                     specAccepted++;
@@ -375,11 +387,16 @@ public sealed class TextGenerator
                     detok.Append(nextTokenId);
 
                     stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds,
-                        detok.GetTailView(stopTailSize, stopScratch));
+                        detok.GetTailView(stopTailSize, stopScratch), out int decMatchedIdx);
                     if (stopResult != StopResult.Continue)
                     {
+                        bool isStopStringMatch = IsStopStringMatch(stopConditions, decMatchedIdx);
                         if (stopResult == StopResult.Stop)
-                            generatedIds.RemoveAt(generatedIds.Count - 1);
+                        {
+                            if (!isStopStringMatch)
+                                generatedIds.RemoveAt(generatedIds.Count - 1);
+                            // Stop-string match: keep the last token; trim suffix in BuildResponse.
+                        }
                         else
                             onTokenGenerated?.Invoke(nextTokenId);
 
@@ -394,7 +411,8 @@ public sealed class TextGenerator
             StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
             return BuildResponse(promptLen, generatedIds, finishReason,
                 prefillTicks, decodeTicks, samplerTicks, GetKvCacheBytes(kvCache), cachedTokenCount,
-                specDrafted, specAccepted, logprobsList?.ToArray());
+                specDrafted, specAccepted, logprobsList?.ToArray(),
+                stopConditionsForSuffixTrim: stopConditions);
         }
         finally
         {
@@ -493,6 +511,12 @@ public sealed class TextGenerator
             // instead of decoding the full generated sequence at every step.
             var detok = new IncrementalDetokenizer(_tokenizer, initialCapacity: Math.Max(64, maxTokens * 4));
 
+            // Streaming holdback buffer: keeps the last max-stop-string chars un-emitted so a
+            // stop-string match split across multiple tokens can be trimmed character-exactly
+            // before any part of it leaks to the SSE consumer (#121 item #8). No-op when no
+            // StopStringCondition is registered — preserves zero-latency EOS-only behaviour.
+            var streamBuffer = new StreamingStopBuffer(stopConditions);
+
             // Local helper: snapshot log-softmax before sampling (which modifies logits in-place),
             // sample a token, then build logprob info.
             (int tokenId, TokenLogprobInfo? logprob) SampleWithLogprobs(Span<float> logitSpan)
@@ -584,24 +608,38 @@ public sealed class TextGenerator
             detok.Append(firstTokenId);
 
             var stopResult = CheckStopConditions(stopConditions, firstTokenId, generatedIds,
-                detok.GetTailView(stopTailSize, stopScratch));
+                detok.GetTailView(stopTailSize, stopScratch), out int firstMatchedIdx);
             if (stopResult != StopResult.Continue)
             {
                 var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+                bool isStopStringMatch = IsStopStringMatch(stopConditions, firstMatchedIdx);
 
                 if (stopResult == StopResult.Stop)
                 {
-                    generatedIds.RemoveAt(generatedIds.Count - 1);
+                    // Push the just-decoded delta into the holdback buffer first — its
+                    // safe-emit return must NOT be discarded (any text past the holdback
+                    // window is already trim-immune). Then trim the matched suffix
+                    // (stop-string case) or flush as-is (EOS etc.).
+                    string newDelta = streamBuffer.Push(detok.TakeDelta());
+                    string emit = newDelta + (isStopStringMatch
+                        ? streamBuffer.TrimAndFlush(stopConditions)
+                        : streamBuffer.FlushAll());
+                    if (!isStopStringMatch)
+                        generatedIds.RemoveAt(generatedIds.Count - 1);
+                    // Stop-string match: keep token in id list so KV-cache length stays in sync
+                    // with the stored prompt+generated sequence (mirrors non-streaming path).
                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                    yield return new GenerationToken(firstTokenId, string.Empty, fr, timings, firstLogprobInfo);
+                    yield return new GenerationToken(firstTokenId, emit, fr, timings, firstLogprobInfo);
                 }
                 else
                 {
+                    // StopInclude (e.g. max-tokens consuming the just-yielded token) — flush all
+                    // buffered text including the just-decoded delta. No trim.
+                    string emit = streamBuffer.Push(detok.TakeDelta()) + streamBuffer.FlushAll();
                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                    string text = detok.TakeDelta();
-                    yield return new GenerationToken(firstTokenId, text, fr, timings, firstLogprobInfo);
+                    yield return new GenerationToken(firstTokenId, emit, fr, timings, firstLogprobInfo);
                 }
                 yield break;
             }
@@ -609,15 +647,17 @@ public sealed class TextGenerator
             // Yield first token — check if it's also the last (maxTokens == 1)
             {
                 bool firstIsLast = maxTokens <= 1;
-                string text = detok.TakeDelta();
+                string emit = streamBuffer.Push(detok.TakeDelta());
                 if (firstIsLast)
                 {
+                    // Decode loop won't run; drain holdback as the natural-end (Length) emit.
+                    emit += streamBuffer.FlushAll();
                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                    yield return new GenerationToken(firstTokenId, text, FinishReason.Length, timings, firstLogprobInfo);
+                    yield return new GenerationToken(firstTokenId, emit, FinishReason.Length, timings, firstLogprobInfo);
                     yield break;
                 }
-                yield return new GenerationToken(firstTokenId, text, null, Logprobs: firstLogprobInfo);
+                yield return new GenerationToken(firstTokenId, emit, null, Logprobs: firstLogprobInfo);
             }
 
             int specDrafted = 0, specAccepted = 0;
@@ -666,24 +706,33 @@ public sealed class TextGenerator
                             detok.Append(tokenId);
 
                             stopResult = CheckStopConditions(stopConditions, tokenId, generatedIds,
-                                detok.GetTailView(stopTailSize, stopScratch));
+                                detok.GetTailView(stopTailSize, stopScratch), out int specMatchedIdx);
                             if (stopResult != StopResult.Continue)
                             {
                                 var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+                                bool isStopStringMatch = IsStopStringMatch(stopConditions, specMatchedIdx);
+
                                 if (stopResult == StopResult.Stop)
                                 {
-                                    generatedIds.RemoveAt(generatedIds.Count - 1);
+                                    _ = streamBuffer.Push(detok.TakeDelta());
+                                    string emit = isStopStringMatch
+                                        ? streamBuffer.TrimAndFlush(stopConditions)
+                                        : streamBuffer.FlushAll();
+                                    if (!isStopStringMatch)
+                                        generatedIds.RemoveAt(generatedIds.Count - 1);
+                                    else
+                                        specAccepted++;
                                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
-                                    yield return new GenerationToken(tokenId, string.Empty, fr, timings);
+                                    yield return new GenerationToken(tokenId, emit, fr, timings);
                                 }
                                 else
                                 {
                                     specAccepted++;
+                                    string emit = streamBuffer.Push(detok.TakeDelta()) + streamBuffer.FlushAll();
                                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
-                                    string text = detok.TakeDelta();
-                                    yield return new GenerationToken(tokenId, text, fr, timings);
+                                    yield return new GenerationToken(tokenId, emit, fr, timings);
                                 }
                                 shouldBreak = true;
                                 yield break;
@@ -694,22 +743,35 @@ public sealed class TextGenerator
                             // Yield each accepted token
                             {
                                 bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
-                                string text = detok.TakeDelta();
+                                string emit = streamBuffer.Push(detok.TakeDelta());
                                 if (isLastStep && i == result.AcceptedCount - 1)
                                 {
+                                    // End of decode loop — drain holdback as the natural-end (Length) emit.
+                                    emit += streamBuffer.FlushAll();
                                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
-                                    yield return new GenerationToken(tokenId, text, FinishReason.Length, timings);
+                                    yield return new GenerationToken(tokenId, emit, FinishReason.Length, timings);
                                     shouldBreak = true;
                                     break;
                                 }
-                                yield return new GenerationToken(tokenId, text, null);
+                                yield return new GenerationToken(tokenId, emit, null);
                             }
 
                             step++;
                         }
 
                         if (shouldBreak) yield break;
+                    }
+
+                    // Spec loop exited without a stop-condition path (e.g. AcceptedCount==0,
+                    // cache full at top of while). Drain any held-back tail as the natural-end
+                    // (Length) emit so the holdback never silently truncates output.
+                    if (streamBuffer.PendingLength > 0)
+                    {
+                        StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                        var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
+                        int lastId = generatedIds.Count > 0 ? generatedIds[^1] : 0;
+                        yield return new GenerationToken(lastId, streamBuffer.FlushAll(), FinishReason.Length, timings);
                     }
                 }
                 finally
@@ -755,24 +817,31 @@ public sealed class TextGenerator
                     detok.Append(nextTokenId);
 
                     stopResult = CheckStopConditions(stopConditions, nextTokenId, generatedIds,
-                        detok.GetTailView(stopTailSize, stopScratch));
+                        detok.GetTailView(stopTailSize, stopScratch), out int decMatchedIdx);
                     if (stopResult != StopResult.Continue)
                     {
                         var fr = stopResult == StopResult.StopInclude ? FinishReason.Length : FinishReason.Stop;
+                        bool isStopStringMatch = IsStopStringMatch(stopConditions, decMatchedIdx);
 
                         if (stopResult == StopResult.Stop)
                         {
-                            generatedIds.RemoveAt(generatedIds.Count - 1);
+                            string newDelta = streamBuffer.Push(detok.TakeDelta());
+                            string emit = newDelta + (isStopStringMatch
+                                ? streamBuffer.TrimAndFlush(stopConditions)
+                                : streamBuffer.FlushAll());
+                            if (!isStopStringMatch)
+                                generatedIds.RemoveAt(generatedIds.Count - 1);
+                            // Stop-string match: keep token so KV-cache length matches stored ids.
                             StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                             var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                            yield return new GenerationToken(nextTokenId, string.Empty, fr, timings, tokenLogprob);
+                            yield return new GenerationToken(nextTokenId, emit, fr, timings, tokenLogprob);
                         }
                         else
                         {
+                            string emit = streamBuffer.Push(detok.TakeDelta()) + streamBuffer.FlushAll();
                             StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                             var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                            string text = detok.TakeDelta();
-                            yield return new GenerationToken(nextTokenId, text, fr, timings, tokenLogprob);
+                            yield return new GenerationToken(nextTokenId, emit, fr, timings, tokenLogprob);
                         }
                         yield break;
                     }
@@ -780,16 +849,29 @@ public sealed class TextGenerator
                     // Yield token — attach finish reason if this is the last iteration
                     {
                         bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
-                        string text = detok.TakeDelta();
+                        string emit = streamBuffer.Push(detok.TakeDelta());
                         if (isLastStep)
                         {
+                            // End of decode loop — drain holdback as the natural-end (Length) emit.
+                            emit += streamBuffer.FlushAll();
                             StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                             var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                            yield return new GenerationToken(nextTokenId, text, FinishReason.Length, timings, tokenLogprob);
+                            yield return new GenerationToken(nextTokenId, emit, FinishReason.Length, timings, tokenLogprob);
                             yield break;
                         }
-                        yield return new GenerationToken(nextTokenId, text, null, Logprobs: tokenLogprob);
+                        yield return new GenerationToken(nextTokenId, emit, null, Logprobs: tokenLogprob);
                     }
+                }
+
+                // Standard loop exited via pos>=cacheSize at the top without isLastStep firing.
+                // The isLastStep predicate at the prior yield already accounts for this normally,
+                // but guard against future refactors leaving the buffer with un-emitted tail.
+                if (streamBuffer.PendingLength > 0)
+                {
+                    StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
+                    var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
+                    int lastId = generatedIds.Count > 0 ? generatedIds[^1] : 0;
+                    yield return new GenerationToken(lastId, streamBuffer.FlushAll(), FinishReason.Length, timings);
                 }
             }
         }
@@ -905,14 +987,37 @@ public sealed class TextGenerator
         List<IStopCondition> conditions, int tokenId,
         IReadOnlyList<int> generatedTokens, ReadOnlySpan<char> decodedTail)
     {
+        return CheckStopConditions(conditions, tokenId, generatedTokens, decodedTail, out _);
+    }
+
+    private static StopResult CheckStopConditions(
+        List<IStopCondition> conditions, int tokenId,
+        IReadOnlyList<int> generatedTokens, ReadOnlySpan<char> decodedTail,
+        out int matchedIndex)
+    {
         for (int i = 0; i < conditions.Count; i++)
         {
             var result = conditions[i].ShouldStop(tokenId, generatedTokens, decodedTail);
             if (result != StopResult.Continue)
+            {
+                matchedIndex = i;
                 return result;
+            }
         }
+        matchedIndex = -1;
         return StopResult.Continue;
     }
+
+    /// <summary>
+    /// True when a <see cref="StopResult.Stop"/> result came from a
+    /// <see cref="StopStringCondition"/> match. Determines whether the last token
+    /// should be kept in <c>generatedIds</c> (true — its text contains a partial
+    /// suffix overlap with the stop string and must be character-trimmed later) or
+    /// removed (false — EOS / similar single-token termination where the token's
+    /// text is conceptually the terminator itself).
+    /// </summary>
+    private static bool IsStopStringMatch(List<IStopCondition> conditions, int matchedIndex)
+        => matchedIndex >= 0 && matchedIndex < conditions.Count && conditions[matchedIndex] is StopStringCondition;
 
     // Tail window passed to stop conditions. Must cover the longest stop string currently
     // registered; a safety cushion absorbs future stop strings added via custom conditions.
@@ -975,11 +1080,23 @@ public sealed class TextGenerator
         FinishReason finishReason, long prefillTicks, long decodeTicks, long samplerTicks,
         long kvCacheBytes = 0, int cachedTokenCount = 0,
         int specDrafted = 0, int specAccepted = 0,
-        TokenLogprobInfo[]? logprobs = null)
+        TokenLogprobInfo[]? logprobs = null,
+        List<IStopCondition>? stopConditionsForSuffixTrim = null)
     {
         string text = generatedIds.Count > 0
             ? _tokenizer.Decode(CollectionsMarshal.AsSpan(generatedIds), stripBosSpace: false)
             : string.Empty;
+
+        // Character-level stop-string suffix trim. When generation stopped because a
+        // StopStringCondition matched, the last token is kept in `generatedIds` so the
+        // user can see how many tokens were actually emitted, but its decoded text may
+        // contain a partial overlap with the stop string (e.g. last token decodes to
+        // "ld<|im_end|>", stop string "<|im_end|>"). Trim at the char boundary so the
+        // returned text preserves the "ld" prefix and excludes the matched suffix.
+        if (stopConditionsForSuffixTrim is not null && finishReason == FinishReason.Stop)
+        {
+            text = StopSuffixTrimmer.TrimMatchedSuffix(text, stopConditionsForSuffixTrim);
+        }
 
         return new InferenceResponse
         {
