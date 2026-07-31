@@ -162,7 +162,6 @@ public sealed unsafe class TransformerModel : IModel
         _threadPool?.SetDispatchMode(seqLen == 1 ? DispatchMode.SpinWait : DispatchMode.EventBased);
 
         float* hidden = (float*)_state.HiddenState;
-        float* residual = (float*)_state.Residual;
         float* normOut = (float*)_state.NormOutput;
         float* q = (float*)_state.Q;
         float* k = (float*)_state.K;
@@ -190,8 +189,9 @@ public sealed unsafe class TransformerModel : IModel
             ref readonly var lw = ref _weights.Layers[layer];
             var rl = repackedLayers?[layer];
 
-            // a. Copy hiddenState → residual
-            new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
+            // a. (residual is the unmodified `hidden` itself — no copy needed; RMSNorm reads
+            //    `hidden`, writes `normOut`, so `hidden` is preserved until the in-place add
+            //    at step g below).
 
             // b. RMSNorm + Pre-quantize + Q/K/V projections
             byte* inputQ8Scratch = (byte*)_state.InputQ8Scratch;
@@ -304,17 +304,23 @@ public sealed unsafe class TransformerModel : IModel
                 preQuantAttn, in rwO);
             AddBias(lw.OBias, normOut, lw.OOutputDim, seqLen);
 
-            // g. Residual add (per token)
-            for (int t = 0; t < seqLen; t++)
+            // g. Residual add: in-place `hidden[i] += normOut[i]`.
+            //    This replaces the prior `hidden = residualCopy + normOut` pattern; the
+            //    saved-residual copy is unnecessary because the only writer to `hidden`
+            //    inside this sub-block was the residual-copy itself. `Add.Execute` is
+            //    contractually exact-in-place-aliasing safe (destination may alias the
+            //    first input element-for-element); ResidualInPlaceAddTests enforces that
+            //    the aliased result is bit-identical to the out-of-place one.
+            //    Both buffers are contiguous [seqLen × hiddenSize], so this is a single
+            //    call over the whole range rather than seqLen per-token dispatches.
             {
-                Add.Execute(
-                    new ReadOnlySpan<float>(residual + t * hiddenSize, hiddenSize),
-                    new ReadOnlySpan<float>(normOut + t * hiddenSize, hiddenSize),
-                    new Span<float>(hidden + t * hiddenSize, hiddenSize));
+                var all = new Span<float>(hidden, seqLen * hiddenSize);
+                Add.Execute(all, new ReadOnlySpan<float>(normOut, seqLen * hiddenSize), all);
             }
 
-            // h. Copy hiddenState → residual
-            new Span<float>(hidden, seqLen * hiddenSize).CopyTo(new Span<float>(residual, seqLen * hiddenSize));
+            // h. (residual is the updated `hidden` itself — no copy needed; FFN RMSNorm
+            //    reads `hidden`, writes `normOut`, so `hidden` is preserved for the
+            //    in-place add at step k below).
 
             // i. FFN RMSNorm + Pre-quantize + Gate/Up projections
             if (seqLen == 1 && _threadPool != null)
@@ -384,13 +390,10 @@ public sealed unsafe class TransformerModel : IModel
                 preQuantSilu, in rwDown);
             AddBias(lw.DownBias, normOut, lw.DownOutputDim, seqLen);
 
-            // k. Residual add (per token)
-            for (int t = 0; t < seqLen; t++)
+            // k. Residual add: in-place `hidden[i] += normOut[i]` (see step g).
             {
-                Add.Execute(
-                    new ReadOnlySpan<float>(residual + t * hiddenSize, hiddenSize),
-                    new ReadOnlySpan<float>(normOut + t * hiddenSize, hiddenSize),
-                    new Span<float>(hidden + t * hiddenSize, hiddenSize));
+                var all = new Span<float>(hidden, seqLen * hiddenSize);
+                Add.Execute(all, new ReadOnlySpan<float>(normOut, seqLen * hiddenSize), all);
             }
         }
 

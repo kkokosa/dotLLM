@@ -48,6 +48,13 @@ internal sealed unsafe class TransformerForwardState : IDisposable
 
     // All pointers are 64-byte-aligned via NativeMemory.AlignedAlloc.
     public nint HiddenState;
+
+    /// <summary>
+    /// Per-token saved residual buffer. <see cref="TransformerModel"/> no longer reads this
+    /// (the in-place add at the end of each sub-block makes a separate residual copy
+    /// unnecessary), but other consumers — notably <c>HybridTransformerModel</c>'s CPU
+    /// fallback path — still rely on it, so the allocation remains.
+    /// </summary>
     public nint Residual;
     public nint NormOutput;
     public nint Q;
