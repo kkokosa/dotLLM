@@ -128,6 +128,83 @@ internal sealed class SentencePieceEncoding : IBpeEncoding
         return stripLeading ? sb.ToString(1, sb.Length - 1) : sb.ToString();
     }
 
+    /// <summary>
+    /// Zero-allocation decode into <paramref name="destination"/>. Writes tokens with a cursor
+    /// (▁ → space in-place) and flushes accumulated byte-fallback runs via
+    /// <see cref="BpeCore.TryFlushByteBuffer"/>. Returns <see langword="false"/> when the
+    /// destination is too small — the contents of <paramref name="destination"/> are
+    /// unspecified on failure (the cursor may have already written some characters).
+    /// </summary>
+    public bool TryDecode(ReadOnlySpan<int> tokenIds, bool stripBosSpace, Span<char> destination, out int charsWritten)
+    {
+        byte[]? byteBuffer = null;
+        int byteCount = 0;
+        int cursor = 0;
+
+        try
+        {
+            foreach (int id in tokenIds)
+            {
+                if ((uint)id >= (uint)_idToToken.Length) continue;
+                string token = _idToToken[id];
+                if (BpeCore.IsByteToken(token, out byte b))
+                {
+                    byteBuffer ??= ArrayPool<byte>.Shared.Rent(16);
+                    if (byteCount >= byteBuffer.Length)
+                    {
+                        byte[] larger = ArrayPool<byte>.Shared.Rent(byteBuffer.Length * 2);
+                        byteBuffer.AsSpan(0, byteCount).CopyTo(larger);
+                        ArrayPool<byte>.Shared.Return(byteBuffer);
+                        byteBuffer = larger;
+                    }
+                    byteBuffer[byteCount++] = b;
+                }
+                else
+                {
+                    if (!BpeCore.TryFlushByteBuffer(destination, ref cursor, byteBuffer, ref byteCount))
+                    {
+                        charsWritten = 0;
+                        return false;
+                    }
+
+                    if (cursor + token.Length > destination.Length)
+                    {
+                        charsWritten = 0;
+                        return false;
+                    }
+
+                    Span<char> slot = destination.Slice(cursor, token.Length);
+                    token.AsSpan().CopyTo(slot);
+                    // ▁ → space in place. MemoryExtensions.Replace is a vectorized scan.
+                    MemoryExtensions.Replace(slot, SpaceMarker, ' ');
+                    cursor += token.Length;
+                }
+            }
+
+            if (!BpeCore.TryFlushByteBuffer(destination, ref cursor, byteBuffer, ref byteCount))
+            {
+                charsWritten = 0;
+                return false;
+            }
+
+            // Strip the single leading space introduced by ▁ prepending. In-place left-shift
+            // — the only mutation required to honour stripBosSpace semantics on a span cursor.
+            if (stripBosSpace && _addBosSpace && cursor > 0 && destination[0] == ' ')
+            {
+                destination.Slice(1, cursor - 1).CopyTo(destination);
+                cursor--;
+            }
+
+            charsWritten = cursor;
+            return true;
+        }
+        finally
+        {
+            if (byteBuffer is not null)
+                ArrayPool<byte>.Shared.Return(byteBuffer);
+        }
+    }
+
     public string DecodeToken(int tokenId)
     {
         if ((uint)tokenId >= (uint)_idToToken.Length) return string.Empty;

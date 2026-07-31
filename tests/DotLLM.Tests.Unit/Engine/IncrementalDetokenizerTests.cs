@@ -183,4 +183,44 @@ public sealed class IncrementalDetokenizerTests
 
         Assert.Equal(bulk, detok.ToString());
     }
+
+    /// <summary>
+    /// Steady-state Append() must not allocate the per-token Decode() <see cref="string"/> that
+    /// the pre-PR implementation produced. The committed <see cref="System.Text.StringBuilder"/>
+    /// still grows in chunks and TakeDelta()/ToString() materialize strings on demand, so we
+    /// don't assert zero bytes — but a small, bounded ceiling proves the per-Append decode
+    /// allocations are gone. The pre-PR implementation allocated ~2 small strings per Append
+    /// (one for `_windowText`, one for the eviction-tail decode); at 200 calls × small-window-size
+    /// that comfortably exceeded 6 KB of Gen-0 traffic.
+    /// </summary>
+    [Fact]
+    public void Append_SteadyState_AllocationFloorIsBoundedAndFarBelowPreviousPath()
+    {
+        var tok = BuildSpaceMarkerVocab();
+        // Cycle through h/e/l/l/o tokens — purely scalar single-char tokens so the window
+        // resolves cleanly each step and no byte-fallback run is held back.
+        int[] cycle = [2, 3, 4, 4, 5];
+
+        // Pre-size the committed StringBuilder well beyond the ~232 chars this test produces,
+        // so incidental chunk growth cannot contribute to the measured delta and the assertion
+        // reflects only per-Append allocation behaviour.
+        using var detok = new IncrementalDetokenizer(tok, initialCapacity: 4096);
+        // Warm-up: pay any one-off ArrayPool rent / first-call costs outside the window.
+        for (int i = 0; i < 32; i++)
+            detok.Append(cycle[i % cycle.Length]);
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 200; i++)
+            detok.Append(cycle[i % cycle.Length]);
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        long delta = after - before;
+        // 200 Append calls under the previous path = ~400 small string allocs ~= O(few KB).
+        // With the buffer pre-sized above, the new path has no steady-state allocation source at
+        // all; the ceiling stays deliberately generous (10 bytes/call vs the previous ~20+) so the
+        // test cannot flake on runtime bookkeeping while still failing loudly if per-Append
+        // string decoding ever returns.
+        Assert.True(delta < 2_048,
+            $"Append() allocated {delta} bytes across 200 calls — expected far less than the pre-PR ~4 KB+ baseline");
+    }
 }
