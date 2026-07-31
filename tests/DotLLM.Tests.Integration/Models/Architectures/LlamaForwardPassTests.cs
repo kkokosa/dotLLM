@@ -354,4 +354,99 @@ public class LlamaForwardPassTests
 
     private static int ArgMax(ReadOnlySpan<float> span)
         => System.Numerics.Tensors.TensorPrimitives.IndexOfMax(span);
+
+    /// <summary>
+    /// Bit-exact parity between <c>Forward</c> (allocates a new <c>UnmanagedTensor</c>
+    /// per call and has the LM head write into it) and the new <c>ForwardInto</c>
+    /// (LM head writes into a caller-provided span, no allocation). Both paths invoke
+    /// the same internal <c>ForwardCore</c> with only the destination pointer differing,
+    /// so the produced floats must be identical.
+    /// </summary>
+    [Fact]
+    public void ForwardInto_BitExactWithLegacyForward()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        int[] tokenIds = tokenizer.Encode("The capital of France is");
+        int[] positions = new int[tokenIds.Length];
+        for (int i = 0; i < positions.Length; i++)
+            positions[i] = i;
+
+        // Legacy path
+        using ITensor legacyLogits = model.Forward(tokenIds, positions, deviceId: -1);
+
+        // New path: pre-allocate the destination span ourselves and let ForwardInto
+        // write into it directly.
+        int totalLogits = tokenIds.Length * model.Config.VocabSize;
+        var into = new float[totalLogits];
+        model.ForwardInto(tokenIds, positions, kvCache: null, into);
+
+        Assert.Equal(totalLogits, (int)legacyLogits.ElementCount);
+        unsafe
+        {
+            var legacy = new ReadOnlySpan<float>((void*)legacyLogits.DataPointer, totalLogits);
+            for (int i = 0; i < totalLogits; i++)
+                Assert.Equal(legacy[i], into[i]);
+        }
+    }
+
+    /// <summary>
+    /// Same parity guarantee but with a KV-cache in play — confirms that the buffer
+    /// routing change does not interact with the cached forward path.
+    /// </summary>
+    [Fact]
+    public void ForwardInto_WithKvCache_BitExactWithLegacyForward()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        int[] tokenIds = tokenizer.Encode("The capital of France is");
+        int[] positions = new int[tokenIds.Length];
+        for (int i = 0; i < positions.Length; i++)
+            positions[i] = i;
+
+        using var kvLegacy = new SimpleKvCache(
+            model.Config.NumLayers, model.Config.NumKvHeads, model.Config.HeadDim,
+            tokenIds.Length + 10);
+        using ITensor legacyLogits = model.Forward(tokenIds, positions, deviceId: -1, kvLegacy);
+
+        using var kvInto = new SimpleKvCache(
+            model.Config.NumLayers, model.Config.NumKvHeads, model.Config.HeadDim,
+            tokenIds.Length + 10);
+        int totalLogits = tokenIds.Length * model.Config.VocabSize;
+        var into = new float[totalLogits];
+        model.ForwardInto(tokenIds, positions, kvInto, into);
+
+        unsafe
+        {
+            var legacy = new ReadOnlySpan<float>((void*)legacyLogits.DataPointer, totalLogits);
+            for (int i = 0; i < totalLogits; i++)
+                Assert.Equal(legacy[i], into[i]);
+        }
+    }
+
+    /// <summary>
+    /// The destination-size guard rejects an undersized span rather than writing past
+    /// its end. Exercises the boundary at seqLen × vocabSize − 1.
+    /// </summary>
+    [Fact]
+    public void ForwardInto_TooSmallSpan_Throws()
+    {
+        var (model, gguf, tokenizer) = LoadModel();
+        using var _ = gguf;
+        using var __ = model;
+
+        int[] tokenIds = tokenizer.Encode("The capital of France is");
+        int[] positions = new int[tokenIds.Length];
+        for (int i = 0; i < positions.Length; i++)
+            positions[i] = i;
+
+        var tooSmall = new float[tokenIds.Length * model.Config.VocabSize - 1];
+        var ex = Assert.Throws<ArgumentException>(
+            () => model.ForwardInto(tokenIds, positions, kvCache: null, tooSmall));
+        Assert.Equal("logitsOut", ex.ParamName);
+    }
 }

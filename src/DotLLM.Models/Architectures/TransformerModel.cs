@@ -134,8 +134,64 @@ public sealed unsafe class TransformerModel : IModel
     /// <param name="deviceId">Target device for computation.</param>
     /// <param name="kvCache">Optional KV-cache. When null, behaves identically to the uncached forward pass.</param>
     /// <returns>Logits tensor of shape [seqLen, vocab_size] for all input positions.</returns>
+    /// <remarks>
+    /// The LM head writes its output straight into the returned tensor — there is no intermediate
+    /// copy — but the tensor itself is allocated fresh on every call. Callers that own a reusable
+    /// logits buffer should prefer
+    /// <see cref="ForwardInto(ReadOnlySpan{int}, ReadOnlySpan{int}, IKvCache?, Span{float})"/>,
+    /// which avoids that per-call allocation.
+    /// </remarks>
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
                            int deviceId, IKvCache? kvCache)
+    {
+        int seqLen = tokenIds.Length;
+        var shape = new TensorShape(seqLen, Config.VocabSize);
+        var result = UnmanagedTensor.Allocate(shape, DType.Float32, deviceId);
+        ForwardCore(tokenIds, positions, kvCache, (float*)result.DataPointer);
+        return result;
+    }
+
+    /// <summary>
+    /// Runs a forward pass and writes the resulting logits directly into <paramref name="logitsOut"/>.
+    /// Both this overload and <see cref="Forward(ReadOnlySpan{int}, ReadOnlySpan{int}, int, IKvCache?)"/>
+    /// have the LM head write straight into their destination buffer (neither copies through
+    /// <c>_state.Logits</c> any more); the difference is ownership — <c>Forward</c> allocates a fresh
+    /// <see cref="UnmanagedTensor"/> of [seqLen × vocabSize] floats per call, while this overload reuses
+    /// the caller's buffer and so allocates nothing. This is the recommended entry point for tight
+    /// decode loops that already own a reusable logits buffer (typical of <c>TextGenerator</c>'s
+    /// sampling path).
+    /// </summary>
+    /// <param name="tokenIds">Input token IDs for this step.</param>
+    /// <param name="positions">Position indices for each token.</param>
+    /// <param name="kvCache">Optional KV-cache.</param>
+    /// <param name="logitsOut">Destination span for logits. Must have length &gt;= seqLen × vocabSize.</param>
+    /// <exception cref="ArgumentException"><paramref name="logitsOut"/> is shorter than seqLen × vocabSize.</exception>
+    public void ForwardInto(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
+                            IKvCache? kvCache, Span<float> logitsOut)
+    {
+        int seqLen = tokenIds.Length;
+        // Widen before multiplying: seqLen × vocabSize exceeds int.MaxValue for large
+        // context × vocab combinations, and a silently-wrapped (possibly negative)
+        // product would turn this guard into a no-op.
+        long needed = (long)seqLen * Config.VocabSize;
+        if (logitsOut.Length < needed)
+            throw new ArgumentException(
+                $"logitsOut span is too small: need {needed} floats ({seqLen} × {Config.VocabSize}), got {logitsOut.Length}.",
+                nameof(logitsOut));
+
+        fixed (float* logitsDst = logitsOut)
+        {
+            ForwardCore(tokenIds, positions, kvCache, logitsDst);
+        }
+    }
+
+    /// <summary>
+    /// Shared forward-pass core. Performs embedding → transformer layers → final norm → LM head
+    /// and writes the resulting [seqLen, vocab_size] logits directly into <paramref name="logitsDst"/>.
+    /// Callers are responsible for sizing the destination buffer (seqLen × vocabSize floats).
+    /// </summary>
+    private void ForwardCore(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
+                             IKvCache? kvCache, float* logitsDst)
     {
         int maxSeq = Config.MaxSequenceLength;
         for (int i = 0; i < positions.Length; i++)
@@ -171,7 +227,6 @@ public sealed unsafe class TransformerModel : IModel
         float* ffnGate = (float*)_state.FfnGate;
         float* ffnUp = (float*)_state.FfnUp;
         float* siluOut = (float*)_state.SiluOutput;
-        float* logits = (float*)_state.Logits;
 
         // 1. EMBEDDING LOOKUP
         EmbeddingLookup(tokenIds, hidden, hiddenSize);
@@ -410,21 +465,18 @@ public sealed unsafe class TransformerModel : IModel
             new Span<float>(normOutT, hiddenSize).CopyTo(new Span<float>(hiddenT, hiddenSize));
         }
 
-        // 4. LM HEAD — all positions (enables batched speculative decoding verification)
+        // 4. LM HEAD — all positions (enables batched speculative decoding verification).
+        //    Writes directly into the caller-provided `logitsDst` buffer. This replaces the
+        //    old `_state.Logits → result` copy for BOTH entry points: `Forward(...)` passes
+        //    a freshly-allocated UnmanagedTensor's pointer (allocation, no copy), while
+        //    `ForwardInto(...)` passes the caller's pinned Span<float> (no allocation,
+        //    no copy) for hot-path decode loops.
         {
             var rwOutput = _weights.RepackedOutput ?? default;
             GemmInterleaved(_weights.OutputWeight, _weights.OutputQuantType,
-                hidden, logits, _weights.OutputOutputDim, _weights.OutputInputDim, seqLen,
+                hidden, logitsDst, _weights.OutputOutputDim, _weights.OutputInputDim, seqLen,
                 null, in rwOutput);
         }
-
-        // 5. RETURN [seqLen, vocabSize]
-        var shape = new TensorShape(seqLen, vocabSize);
-        var result = UnmanagedTensor.Allocate(shape, DType.Float32, deviceId);
-        new Span<float>(logits, seqLen * vocabSize).CopyTo(
-            new Span<float>((void*)result.DataPointer, seqLen * vocabSize));
-
-        return result;
     }
 
     /// <summary>
