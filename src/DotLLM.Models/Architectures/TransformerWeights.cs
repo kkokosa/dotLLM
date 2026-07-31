@@ -1,5 +1,7 @@
+using System.IO;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
+using DotLLM.Core.Tensors;
 using DotLLM.Cpu.Kernels;
 using DotLLM.Models.Gguf;
 
@@ -324,6 +326,13 @@ internal sealed class TransformerWeights : IDisposable
             int qDim = config.NumAttentionHeads * config.HeadDim;
             int kvDim = config.NumKvHeads * config.HeadDim;
 
+            // Validate the fused tensor's output dimension matches the config-derived
+            // expected (Q + K + V) row count. Without this, mismatched GGUF metadata
+            // (e.g. wrong NumKvHeads / HeadDim) would produce pointer offsets past the
+            // tensor's allocated bytes, causing later kernels to read unrelated memory
+            // and corrupt subsequent layers — a segfault or silent garbage output.
+            ValidateFusedQkvShape(qkvDesc.Shape, qDim, kvDim, $"{prefix}.attn_qkv.weight");
+
             qPtr = qkvPtr; qQt = qkvDesc.QuantizationType; qM = qDim; qK = inputDim;
             kPtr = qkvPtr + (nint)(qDim * rowBytes); kQt = qkvDesc.QuantizationType; kM = kvDim; kK = inputDim;
             vPtr = qkvPtr + (nint)((qDim + kvDim) * rowBytes); vQt = qkvDesc.QuantizationType; vM = kvDim; vK = inputDim;
@@ -346,6 +355,10 @@ internal sealed class TransformerWeights : IDisposable
             nint biasPtr = dataBase + (nint)qkvBiasDesc.DataOffset;
             int qDim = config.NumAttentionHeads * config.HeadDim;
             int kvDim = config.NumKvHeads * config.HeadDim;
+
+            // Same validation rationale as the fused weight: catch metadata mismatch
+            // before performing pointer arithmetic past the allocated bias bytes.
+            ValidateFusedQkvBiasShape(qkvBiasDesc.Shape, qDim, kvDim, $"{prefix}.attn_qkv.bias");
 
             qBias = new float[qDim];
             kBias = new float[kvDim];
@@ -472,5 +485,65 @@ internal sealed class TransformerWeights : IDisposable
         float[] result = new float[size];
         Dequantize.ToFloat32(dataBase + (nint)desc.DataOffset, size, desc.QuantizationType, result);
         return result;
+    }
+
+    /// <summary>
+    /// Validates that a fused QKV weight tensor's output dimension matches
+    /// <c>qDim + 2 * kvDim</c> derived from the model config, before computing
+    /// pointer offsets to split it. A mismatched shape — typically due to wrong
+    /// <c>NumKvHeads</c> or <c>HeadDim</c> in the GGUF metadata — would otherwise
+    /// produce pointers past the tensor's allocated bytes, corrupting later
+    /// layers and crashing inference.
+    /// </summary>
+    /// <param name="shape">Shape of the fused tensor. Must be rank-2; GGUF convention: <c>Shape[0]</c> = input dim, <c>Shape[1]</c> = output dim.</param>
+    /// <param name="qDim">Expected Q rows (<c>NumAttentionHeads * HeadDim</c>).</param>
+    /// <param name="kvDim">Expected K (and V) rows (<c>NumKvHeads * HeadDim</c>).</param>
+    /// <param name="tensorName">Tensor name for the error message.</param>
+    /// <exception cref="InvalidDataException">Thrown when the shape is not rank-2 or does not match the expected output rows.</exception>
+    internal static void ValidateFusedQkvShape(TensorShape shape, int qDim, int kvDim, string tensorName)
+    {
+        // Exactly rank-2: the caller splits the tensor by row offset using only
+        // Shape[0] (input dim) and Shape[1] (output rows). A higher-rank tensor would
+        // validate against the wrong axis and then be split with pointer arithmetic
+        // that ignores the remaining dimensions. GGUF stores matrices with n_dims
+        // trimmed of trailing 1s, so a fused QKV weight is always exactly 2-D.
+        if (shape.Rank != 2)
+        {
+            throw new InvalidDataException(
+                $"Fused QKV tensor '{tensorName}' has shape {shape} (rank {shape.Rank}); expected exactly 2 dimensions.");
+        }
+
+        int expectedRows = qDim + 2 * kvDim;
+        int actualRows = shape[1];
+        if (actualRows != expectedRows)
+        {
+            throw new InvalidDataException(
+                $"Fused QKV tensor '{tensorName}' has shape {shape} (output dim {actualRows}), " +
+                $"but ModelConfig requires {expectedRows} (= {qDim} Q + {kvDim} K + {kvDim} V). " +
+                $"GGUF metadata (NumAttentionHeads, NumKvHeads, HeadDim) may be incorrect.");
+        }
+    }
+
+    /// <summary>
+    /// Validates that a fused QKV bias tensor's element count matches <c>qDim + 2 * kvDim</c>.
+    /// Same rationale as <see cref="ValidateFusedQkvShape"/> — prevents pointer arithmetic
+    /// past the allocated bias bytes when GGUF metadata is wrong.
+    /// </summary>
+    /// <param name="shape">Bias tensor shape (typically rank-1).</param>
+    /// <param name="qDim">Expected Q element count.</param>
+    /// <param name="kvDim">Expected K (and V) element count.</param>
+    /// <param name="tensorName">Tensor name for the error message.</param>
+    /// <exception cref="InvalidDataException">Thrown when the element count does not match the expected total.</exception>
+    internal static void ValidateFusedQkvBiasShape(TensorShape shape, int qDim, int kvDim, string tensorName)
+    {
+        int expectedElements = qDim + 2 * kvDim;
+        long actualElements = shape.ElementCount;
+        if (actualElements != expectedElements)
+        {
+            throw new InvalidDataException(
+                $"Fused QKV bias tensor '{tensorName}' has shape {shape} ({actualElements} elements), " +
+                $"but ModelConfig requires {expectedElements} (= {qDim} Q + {kvDim} K + {kvDim} V). " +
+                $"GGUF metadata (NumAttentionHeads, NumKvHeads, HeadDim) may be incorrect.");
+        }
     }
 }
