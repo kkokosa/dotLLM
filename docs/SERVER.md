@@ -28,10 +28,17 @@ Primary chat endpoint. Accepts OpenAI-compatible request format.
   "logit_bias": {"1234": -100},
   "frequency_penalty": 0.5,
   "presence_penalty": 0.3,
-  "n": 1,
-  "lora_adapter": "customer-support"
+  "n": 1
 }
 ```
+
+> **Adapter selection**: there is no `lora_adapter` request field (it is not part of the OpenAI
+> surface either, and the server ignores unknown fields silently). LoRA serving is roadmap step 47
+> and is not implemented: the engine has the `IAdapterManager` abstraction and
+> `InferenceRequest.AdapterId`, but there is no implementation, no adapter admin endpoint, and no
+> way to select an adapter per request. Until then, serve an adapted model by merging the adapter
+> into the weights offline and loading the merged model — via `--model` at startup or
+> `POST /v1/models/load`. See [LORA.md](LORA.md) for the planned design.
 
 **Response** (non-streaming):
 ```json

@@ -1,5 +1,9 @@
 # LoRA Adapter Support — dotLLM
 
+> **Status**: design spec, not implemented. This is roadmap step 47. Only the `IAdapterManager`
+> abstraction and `InferenceRequest.AdapterId` exist today — there is no adapter loader, no server
+> endpoint, and no per-request adapter selection. Everything below describes the intended design.
+
 ## Overview
 
 LoRA (Low-Rank Adaptation) enables fine-tuned model behaviors without modifying base weights. Multiple adapters can coexist on the same base model, with per-request adapter selection.
