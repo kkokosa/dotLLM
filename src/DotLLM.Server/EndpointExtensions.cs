@@ -15,6 +15,7 @@ public static class EndpointExtensions
     public static WebApplication MapDotLLMEndpoints(this WebApplication app, bool serveUi = false)
     {
         ChatCompletionEndpoint.Map(app);
+        MessagesEndpoint.Map(app);
         CompletionEndpoint.Map(app);
         ModelEndpoint.Map(app);
         TokenizeEndpoint.Map(app);

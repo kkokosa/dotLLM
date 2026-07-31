@@ -79,6 +79,22 @@ Not in OpenAI spec but widely expected for prompt engineering and billing estima
 **Request**: `{"tokens": [9906, 1917], "model": "..."}`
 **Response**: `{"text": "Hello world"}`
 
+### `POST /v1/messages` (Anthropic-compatible)
+
+Anthropic Messages API endpoint, served alongside the OpenAI surface so that
+`anthropic` SDK clients can talk to dotLLM unchanged. Top-level `system`,
+string-or-block message `content`, `max_tokens` (required), `stop_sequences`,
+`tools`/`tool_choice`, and event-based streaming SSE (`message_start`,
+`content_block_*`, `message_delta`, `message_stop`). Reuses the same engine,
+chat-template, sampler and tool-calling pipeline; only the wire format differs.
+
+### `POST /v1/messages/count_tokens` (Anthropic-compatible)
+
+Returns `{"input_tokens": N}` for a would-be Messages request.
+
+See **[ANTHROPIC_API.md](ANTHROPIC_API.md)** for the full request/response shapes,
+streaming event sequence, and the engine mapping.
+
 ## response_format Processing
 
 The `response_format` field maps to constrained decoding:
