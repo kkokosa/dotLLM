@@ -8,6 +8,7 @@
     <File Path="docs/BENCHMARKS.md" />
     <File Path="docs/CONSTRAINED_DECODING.md" />
     <File Path="docs/DIAGNOSTICS.md" />
+    <File Path="docs/EXTENSIONS_AI.md" />
     <File Path="docs/GGUF_FORMAT.md" />
     <File Path="docs/KV_CACHE.md" />
     <File Path="docs/LORA.md" />
@@ -37,6 +38,7 @@
     <Project Path="src/DotLLM.Cuda/DotLLM.Cuda.csproj" />
     <Project Path="src/DotLLM.Diagnostics/DotLLM.Diagnostics.csproj" />
     <Project Path="src/DotLLM.Engine/DotLLM.Engine.csproj" />
+    <Project Path="src/DotLLM.Extensions.AI/DotLLM.Extensions.AI.csproj" />
     <Project Path="src/DotLLM.HuggingFace/DotLLM.HuggingFace.csproj" />
     <Project Path="src/DotLLM.Models/DotLLM.Models.csproj" />
     <Project Path="src/DotLLM.Server/DotLLM.Server.csproj" />

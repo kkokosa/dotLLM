@@ -5,6 +5,7 @@
   <ItemGroup>
     <!-- Runtime -->
     <PackageVersion Include="System.Numerics.Tensors" Version="9.0.3" />
+    <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="10.7.0" />
     <!-- Testing -->
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.0.2" />
