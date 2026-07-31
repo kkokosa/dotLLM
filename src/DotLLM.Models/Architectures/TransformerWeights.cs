@@ -468,9 +468,44 @@ internal sealed class TransformerWeights : IDisposable
         IReadOnlyDictionary<string, GgufTensorDescriptor> tensors, string name)
     {
         if (!tensors.TryGetValue(name, out var desc)) return null;
-        int size = (int)desc.Shape.ElementCount;
+        int size = ToInt32SizeChecked(desc.Shape.ElementCount, name);
         float[] result = new float[size];
         Dequantize.ToFloat32(dataBase + (nint)desc.DataOffset, size, desc.QuantizationType, result);
         return result;
+    }
+
+    /// <summary>
+    /// Narrows a tensor element count from <see cref="long"/> to <see cref="int"/>, validating
+    /// that the result is usable as a managed array length. Throws <see cref="OverflowException"/>
+    /// rather than silently wrapping — an unchecked narrowing previously turned counts like 2^32
+    /// (4,294,967,296) into a positive but completely wrong size such as 0, leading to corrupt
+    /// data with no error.
+    /// </summary>
+    /// <remarks>
+    /// Negative counts are rejected here too, not just values above <see cref="int.MaxValue"/>.
+    /// <see cref="Core.Tensors.TensorShape.ElementCount"/> multiplies the dimensions in
+    /// unchecked <see cref="long"/> arithmetic, so a crafted GGUF whose (individually valid)
+    /// dimensions have a product beyond <see cref="long.MaxValue"/> can yield a negative count.
+    /// Left to <c>new float[negative]</c> that surfaces as an <see cref="OverflowException"/>
+    /// from the allocation site, naming neither the tensor nor the count.
+    /// </remarks>
+    /// <param name="elementCount">Element count to narrow.</param>
+    /// <param name="tensorName">Tensor name for the error message.</param>
+    /// <returns>The element count narrowed to <see cref="int"/>.</returns>
+    /// <exception cref="OverflowException">
+    /// Thrown when <paramref name="elementCount"/> is negative or exceeds <see cref="int.MaxValue"/>.
+    /// </exception>
+    internal static int ToInt32SizeChecked(long elementCount, string tensorName)
+    {
+        // Invariant culture: NumberFormatInfo.NegativeSign is culture-dependent (sv-SE uses
+        // U+2212, ar-SA prefixes U+061C), so a negative count would otherwise render
+        // differently per host locale. Positive integers are already ASCII in every culture.
+        if (elementCount < 0 || elementCount > int.MaxValue)
+        {
+            throw new OverflowException(FormattableString.Invariant(
+                $"Tensor '{tensorName}' element count {elementCount} is outside the valid Int32 array-length range [0, {int.MaxValue}]; cannot be represented as a managed array length."));
+        }
+
+        return (int)elementCount;
     }
 }
