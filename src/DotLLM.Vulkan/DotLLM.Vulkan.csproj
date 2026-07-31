@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Description>Vulkan compute backend for dotLLM — cross-vendor GPU path (AMD, NVIDIA, Intel) via SPIR-V compute shaders loaded through raw vulkan-1 P/Invoke. Complements DotLLM.Cuda (NVIDIA-only) with a portable target per the Silk.NET/Vulkan analysis in docs/CUDA.md.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotLLM.Tests.Unit" />
+    <InternalsVisibleTo Include="DotLLM.Tests.Integration" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DotLLM.Core\DotLLM.Core.csproj" />
+  </ItemGroup>
+
+  <!-- Pre-compiled SPIR-V shaders ship alongside the managed assembly.
+       End users need the Vulkan SDK (glslc) only to rebuild shaders from source;
+       the .spv blobs checked into native/vulkan/spv/ are loaded verbatim at runtime. -->
+  <ItemGroup>
+    <Content Include="..\..\native\vulkan\spv\*.spv" Link="spv\%(Filename)%(Extension)" Condition="Exists('..\..\native\vulkan\spv\')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!-- GLSL to SPIR-V compilation: .comp to .spv via glslc (Vulkan SDK).
+       Runs automatically during build if glslc is in PATH.
+       Skipped when Vulkan SDK is not installed (end users get pre-compiled SPIR-V from the repo). -->
+  <PropertyGroup>
+    <VulkanShaderDir>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', '..', 'native', 'vulkan', 'shaders'))</VulkanShaderDir>
+    <SpvOutputDir>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', '..', 'native', 'vulkan', 'spv'))</SpvOutputDir>
+    <VulkanTargetEnv>vulkan1.2</VulkanTargetEnv>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <VulkanShader Include="$(VulkanShaderDir)\*.comp" />
+  </ItemGroup>
+
+  <!-- Compile stale .comp files to .spv. Incremental via Inputs/Outputs. -->
+  <Target Name="CompileVulkanShaders"
+          BeforeTargets="BeforeBuild"
+          Inputs="@(VulkanShader)"
+          Outputs="@(VulkanShader->'$(SpvOutputDir)\%(Filename).spv')">
+    <Exec Command="glslc --version" IgnoreExitCode="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="_GlslcExitCode" />
+    </Exec>
+    <Message Condition="'$(_GlslcExitCode)' != '0'" Importance="high"
+             Text="WARNING: .comp source is newer than .spv but glslc not found in PATH. Pre-compiled SPIR-V may be stale. Install the Vulkan SDK to auto-compile shaders." />
+
+    <MakeDir Condition="'$(_GlslcExitCode)' == '0'" Directories="$(SpvOutputDir)" />
+    <Message Condition="'$(_GlslcExitCode)' == '0'" Importance="high" Text="Compiling %(VulkanShader.Filename).comp to SPIR-V" />
+    <Exec Condition="'$(_GlslcExitCode)' == '0'"
+          Command="glslc --target-env=$(VulkanTargetEnv) -o &quot;$(SpvOutputDir)/%(VulkanShader.Filename).spv&quot; &quot;%(VulkanShader.FullPath)&quot;"
+          StandardOutputImportance="low" />
+  </Target>
+
+</Project>

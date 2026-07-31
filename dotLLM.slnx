@@ -22,6 +22,7 @@
     <File Path="docs/SPECULATIVE.md" />
     <File Path="docs/TELEMETRY.md" />
     <File Path="docs/TOKENIZERS.md" />
+    <File Path="docs/VULKAN.md" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/DotLLM.Sample.Console/DotLLM.Sample.Console.csproj" />
@@ -42,6 +43,7 @@
     <Project Path="src/DotLLM.Server/DotLLM.Server.csproj" />
     <Project Path="src/DotLLM.Telemetry/DotLLM.Telemetry.csproj" />
     <Project Path="src/DotLLM.Tokenizers/DotLLM.Tokenizers.csproj" />
+    <Project Path="src/DotLLM.Vulkan/DotLLM.Vulkan.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DotLLM.Tests.Integration/DotLLM.Tests.Integration.csproj" />
