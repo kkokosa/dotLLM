@@ -829,7 +829,7 @@ public sealed class TextGenerator
         {
             var (entry, matchedTokens) = _prefixCache.FindMatch(promptIds);
 
-            if (entry != null && matchedTokens > 0)
+            if (entry != null && matchedTokens > 0 && SupportsPrefixReuse(entry.KvCache))
             {
                 // Cache hit — reuse existing KV-cache, truncate to matched prefix
                 switch (entry.KvCache)
@@ -840,24 +840,24 @@ public sealed class TextGenerator
                     case KvCache.PagedKvCache pagedCache:
                         pagedCache.SetCurrentLength(matchedTokens);
                         break;
-                    default:
-                        // Unsupported cache type for prefix reuse — fall through to allocate fresh
-                        goto cacheMiss;
                 }
 
-                // Verify the cache is large enough for the new prompt + generation
+                // A cache that only fits the prompt would run out mid-decode and silently terminate
+                // generation; require room for the full (prompt + maxTokens) request.
                 int requiredSize = promptLen + maxTokens;
-                if (entry.KvCache.MaxLength >= requiredSize || entry.KvCache.MaxLength >= promptLen)
+                if (entry.KvCache.MaxLength >= requiredSize)
                     return (entry.KvCache, matchedTokens, false);
 
                 // Cache too small — fall through to allocate fresh
             }
-            cacheMiss:
 
-            // Cache miss or incompatible — allocate with full model context for future reuse
+            // Cache miss or incompatible — allocate with full model context for future reuse.
+            // ownsKvCache=true so that an exception/cancellation between allocation and the
+            // Store call below disposes the cache instead of leaking it. StoreInPrefixCache
+            // flips this to false only on successful store.
             int cacheSize = Math.Min(promptLen + maxTokens, _model.Config.MaxSequenceLength);
             var kvCache = AllocateKvCache(cacheSize);
-            return (kvCache, 0, false); // ownsKvCache=false: will be transferred to prefix cache
+            return (kvCache, 0, true);
         }
 
         // No prefix cache — allocate normally, caller owns
@@ -867,6 +867,11 @@ public sealed class TextGenerator
             return (kvCache, 0, true);
         }
     }
+
+    // Mirror of the switch in ResolveKvCache — gates StoreInPrefixCache too so we never
+    // store cache types we wouldn't be able to reuse (they'd pin RAM/VRAM forever).
+    internal static bool SupportsPrefixReuse(Core.Attention.IKvCache kvCache) =>
+        kvCache is SimpleKvCache or KvCache.PagedKvCache;
 
     /// <summary>
     /// Allocates a fresh KV-cache using the factory or default SimpleKvCache.
@@ -892,12 +897,17 @@ public sealed class TextGenerator
         if (_prefixCache == null)
             return;
 
+        // Only store cache types ResolveKvCache can later reuse — anything else just pins memory.
+        if (!SupportsPrefixReuse(kvCache))
+            return;
+
         // Build full token sequence: prompt + generated
         var fullSequence = new int[promptIds.Length + generatedIds.Count];
         Array.Copy(promptIds, fullSequence, promptIds.Length);
         CollectionsMarshal.AsSpan(generatedIds).CopyTo(fullSequence.AsSpan(promptIds.Length));
 
         _prefixCache.Store(fullSequence, kvCache);
+        // Ownership transferred to the prefix cache only after Store succeeds.
         ownsKvCache = false;
     }
 
