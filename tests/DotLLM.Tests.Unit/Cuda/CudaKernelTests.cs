@@ -158,6 +158,49 @@ public class CudaKernelTests : IDisposable
         }
     }
 
+    // The tiled online-softmax attention kernel sizes its shared memory from headDim
+    // (q_shared + score_tile[256] + out_accum + warp_scratch), NOT from seqKv, so the
+    // old "seqKv = 100_000 blows the shared-memory limit" cases no longer describe the
+    // kernel. These replacements exercise the same failure mode against the current API.
+    [SkippableFact]
+    public void LaunchAttention_ThrowsForExcessiveSharedMemory()
+    {
+        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+        Skip.If(_kernels == null, "PTX files not found");
+
+        nint s = _stream!.Handle;
+
+        // headDim = 8192 → (8192 + 256 + 8192 + 32) * 4 B ≈ 66 KB > the 48 KB per-block default.
+        // All pointer args can be zero since the kernel must never launch.
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _kernels!.LaunchAttention(
+                q: 0, k: 0, v: 0, output: 0,
+                seqQ: 1, seqKv: 8,
+                numHeads: 1, numKvHeads: 1, headDim: 8192,
+                positionOffset: 0, slidingWindow: 0, stream: s));
+
+        Assert.Contains("shared memory", ex.Message);
+        Assert.Contains("8192", ex.Message);
+    }
+
+    [SkippableFact]
+    public void LaunchAttentionF32_ThrowsForExcessiveSharedMemory()
+    {
+        Skip.IfNot(CudaDevice.IsAvailable(), "No CUDA GPU available");
+        Skip.If(_kernels == null, "PTX files not found");
+
+        nint s = _stream!.Handle;
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _kernels!.LaunchAttentionF32(
+                q: 0, k: 0, v: 0, output: 0,
+                seqQ: 1, seqKv: 8,
+                numHeads: 1, numKvHeads: 1, headDim: 8192,
+                positionOffset: 0, slidingWindow: 0, stream: s));
+
+        Assert.Contains("shared memory", ex.Message);
+    }
+
     public void Dispose()
     {
         _kernels?.Dispose();

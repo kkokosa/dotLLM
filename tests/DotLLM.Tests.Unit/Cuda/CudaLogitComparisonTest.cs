@@ -37,18 +37,18 @@ public class CudaLogitComparisonTest
         string? ggufPath = File.Exists(modelPath) ? modelPath : null;
         Skip.If(ggufPath == null, $"{ggufFile} not found (run: dotllm run QuantFactory/SmolLM-135M-GGUF)");
 
-        var gguf = GgufFile.Open(ggufPath);
+        using var gguf = GgufFile.Open(ggufPath);
         var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
         _out.WriteLine($"Model: {config.Architecture} {config.NumLayers}L/{config.HiddenSize}H");
 
         // Load CPU model
-        var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
-        var cpuKv = new SimpleKvCache(config.NumLayers, config.NumKvHeads, config.HeadDim, 64);
+        using var cpuModel = TransformerModel.LoadFromGguf(gguf, config);
+        using var cpuKv = new SimpleKvCache(config.NumLayers, config.NumKvHeads, config.HeadDim, 64);
 
         // Load GPU model
         string ptxDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "native", "ptx"));
-        var gpuModel = CudaTransformerModel.LoadFromGguf(gguf, config, 0, ptxDir);
-        var gpuKv = gpuModel.CreateKvCache(64);
+        using var gpuModel = CudaTransformerModel.LoadFromGguf(gguf, config, 0, ptxDir);
+        using var gpuKv = gpuModel.CreateKvCache(64);
 
         // Prompt tokens: "The capital of France is" for SmolLM
         int[] promptTokens = [510, 5765, 302, 6181, 349]; // approximate; use actual tokenizer

@@ -19,6 +19,25 @@ public sealed unsafe class CudaKernels : IDisposable
     /// </summary>
     private const int MaxDequantGridSize = 256;
 
+    /// <summary>
+    /// Lowest compute capability the shipped PTX targets (<c>compute_75</c>, Turing — see
+    /// <c>native/build.sh</c> / <c>native/build_ptx.bat</c>). CUDA 13's nvcc cannot emit PTX
+    /// for Pascal (SM 6.x) or Volta (SM 7.0) at all, so shipping an additional lower-arch
+    /// variant would require keeping a second toolkit around; instead we fail fast with a
+    /// clear message rather than letting <c>cuModuleLoad</c> report an opaque JIT error.
+    /// </summary>
+    private const int MinComputeCapabilityMajor = 7;
+
+    /// <inheritdoc cref="MinComputeCapabilityMajor"/>
+    private const int MinComputeCapabilityMinor = 5;
+
+    /// <summary>
+    /// Dynamic shared memory a kernel may request without an explicit
+    /// <c>cuFuncSetAttribute(CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES)</c> opt-in.
+    /// 48 KB is the per-block default on every supported architecture.
+    /// </summary>
+    private const uint MaxDynamicSharedMemoryBytes = 48 * 1024;
+
     private readonly CudaModule _rmsnormModule;
     private readonly CudaModule _ropeModule;
     private readonly CudaModule _swigluModule;
@@ -92,6 +111,8 @@ public sealed unsafe class CudaKernels : IDisposable
     /// <param name="ptxDir">Directory containing compiled .ptx files.</param>
     public CudaKernels(string ptxDir)
     {
+        EnsureSupportedComputeCapability();
+
         _rmsnormModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "rmsnorm.ptx"));
         _ropeModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "rope.ptx"));
         _swigluModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "swiglu.ptx"));
@@ -326,6 +347,7 @@ public sealed unsafe class CudaKernels : IDisposable
         // Tiled online softmax: q_shared[headDim] + score_tile[256] + out_accum[headDim] + warp_scratch[32]
         const int TileKv = 256;
         uint sharedBytes = (uint)((headDim + TileKv + headDim + 32) * sizeof(float));
+        ValidateSharedMemory(sharedBytes, headDim, nameof(LaunchAttentionF32));
 
         CudaDriverApi.cuLaunchKernel(_attentionF32Func,
                 (uint)numBlocks, 1, 1, BlockSize, 1, 1,
@@ -489,6 +511,7 @@ public sealed unsafe class CudaKernels : IDisposable
         // Tiled online softmax: q_shared[headDim] + score_tile[256] + out_accum[headDim] + warp_scratch[32]
         const int TileKv = 256;
         uint sharedBytes = (uint)((headDim + TileKv + headDim + 32) * sizeof(float));
+        ValidateSharedMemory(sharedBytes, headDim, nameof(LaunchAttention));
 
         CudaDriverApi.cuLaunchKernel(_attentionFunc,
                 (uint)numBlocks, 1, 1, BlockSize, 1, 1,
@@ -724,6 +747,45 @@ public sealed unsafe class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(func,
                 gridDim, 1, 1, BlockSize, 1, 1,
                 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>
+    /// Verifies the device backing the current context can run the shipped <c>compute_75</c> PTX.
+    /// No-op when there is no current context (the caller will fail on the first module load anyway).
+    /// </summary>
+    /// <exception cref="NotSupportedException">The GPU predates Turing (SM 7.5).</exception>
+    private static void EnsureSupportedComputeCapability()
+    {
+        if (CudaDriverApi.cuCtxGetDevice(out int device) != 0)
+            return;
+
+        CudaDriverApi.cuDeviceGetAttribute(out int ccMajor,
+            CudaDriverApi.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device).ThrowOnError();
+        CudaDriverApi.cuDeviceGetAttribute(out int ccMinor,
+            CudaDriverApi.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device).ThrowOnError();
+
+        if (ccMajor > MinComputeCapabilityMajor ||
+            (ccMajor == MinComputeCapabilityMajor && ccMinor >= MinComputeCapabilityMinor))
+            return;
+
+        throw new NotSupportedException(
+            $"GPU compute capability {ccMajor}.{ccMinor} is below the " +
+            $"sm_{MinComputeCapabilityMajor}{MinComputeCapabilityMinor} (Turing) minimum required by " +
+            "the shipped PTX. CUDA 13 dropped Pascal and Volta; rebuild the kernels with an older " +
+            "toolkit (native/build.sh compute_61) to target these GPUs, or use the CPU backend.");
+    }
+
+    /// <summary>
+    /// Validates a dynamic shared-memory request before <c>cuLaunchKernel</c>, so an oversized
+    /// launch reports the offending size instead of an opaque CUDA_ERROR_INVALID_VALUE.
+    /// </summary>
+    private static void ValidateSharedMemory(uint sharedBytes, int headDim, string kernel)
+    {
+        if (sharedBytes <= MaxDynamicSharedMemoryBytes) return;
+
+        throw new InvalidOperationException(
+            $"{kernel}: requested {sharedBytes} bytes of dynamic shared memory for headDim={headDim}, " +
+            $"which exceeds the {MaxDynamicSharedMemoryBytes}-byte per-block default limit.");
     }
 
     /// <inheritdoc/>
