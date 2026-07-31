@@ -38,7 +38,7 @@ dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around lla
 ### Serving
 - **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, tool calling, streaming via ASP.NET
 - **Paged KV-cache** — PagedAttention with block-level allocation, prefix caching, and copy-on-write
-- **Speculative decoding** — draft-verify-accept with KV-cache rollback (greedy mode today; non-greedy planned — see issue #121)
+- **Speculative decoding** — draft-verify-accept with KV-cache rollback; pipeline-aware acceptance covers both greedy and non-greedy sampling (modified rejection sampling using the post-transform distribution)
 - **Structured output** — FSM/PDA-based constrained decoding guaranteeing valid JSON, JSON Schema, regex, and grammar
 - **(Planned) Continuous batching** — iteration-level scheduling with preemption and priority queuing — Phase 9, see [Roadmap](#roadmap)
 

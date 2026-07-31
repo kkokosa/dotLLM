@@ -140,19 +140,52 @@ public sealed class SamplerPipeline
     /// <returns>The sampled token index.</returns>
     public int Sample(Span<float> logits, IReadOnlyList<int> previousTokens)
     {
-        // 1. Run logit processors (repetition penalty)
+        ApplyTransforms(logits, previousTokens);
+        return SampleFromTransformed(logits);
+    }
+
+    /// <summary>
+    /// True when this pipeline is effectively greedy (argmax selection, no stochastic sampling).
+    /// Speculative decoding's accept/reject scheme uses this to match the pipeline mode for
+    /// both the draft proposal distribution <c>q</c> and the target distribution <c>p</c>.
+    /// </summary>
+    public bool IsGreedy => _greedy;
+
+    /// <summary>
+    /// Applies the same chain of logit transforms (processors + sampler steps) that
+    /// <see cref="Sample"/> would, but does <b>not</b> draw a token. The resulting span is the
+    /// pre-softmax logit distribution the pipeline would sample from.
+    /// </summary>
+    /// <param name="logits">Logits, mutated in-place.</param>
+    /// <param name="previousTokens">Tokens generated so far — used by repetition penalty.
+    /// For correct results in speculative decoding, this must include any provisionally
+    /// accepted draft tokens preceding the current position.</param>
+    /// <remarks>
+    /// In greedy configurations <c>_steps</c> is empty, so this is equivalent to running the
+    /// processor chain only (repetition penalty if enabled). Callers that want the same token
+    /// the pipeline would sample should call <see cref="SampleFromTransformed"/> on the result.
+    /// </remarks>
+    public void ApplyTransforms(Span<float> logits, IReadOnlyList<int> previousTokens)
+    {
         for (int i = 0; i < _processors.Length; i++)
             _processors[i].Process(logits, previousTokens, _processorContext);
 
-        // 2. Greedy: argmax, skip everything else
         if (_greedy)
-            return TensorPrimitives.IndexOfMax(logits);
+            return;
 
-        // 3. Run sampler steps (temperature → top-k → top-p → min-p)
         for (int i = 0; i < _steps.Length; i++)
             _steps[i].Apply(logits, _samplerContext);
+    }
 
-        // 4. Categorical sample
-        return CategoricalSampler.Sample(logits, _rng);
+    /// <summary>
+    /// Samples a token from logits that have already been transformed by
+    /// <see cref="ApplyTransforms"/>. Greedy pipelines return <c>IndexOfMax</c>;
+    /// otherwise a categorical draw via the pipeline's RNG.
+    /// </summary>
+    public int SampleFromTransformed(ReadOnlySpan<float> transformedLogits)
+    {
+        if (_greedy)
+            return TensorPrimitives.IndexOfMax(transformedLogits);
+        return CategoricalSampler.Sample(transformedLogits, _rng);
     }
 }
