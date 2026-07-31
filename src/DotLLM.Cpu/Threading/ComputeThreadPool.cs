@@ -23,6 +23,41 @@ public sealed unsafe class ComputeThreadPool : IDisposable
     /// <summary>Number of spin iterations before falling back to event wait in spin-wait mode.</summary>
     private const int SpinIterations = 10_000;
 
+    /// <summary>
+    /// Splits <paramref name="totalItems"/> across <paramref name="threadCount"/> threads as evenly
+    /// as possible, giving thread <paramref name="threadIdx"/> the half-open range
+    /// <c>[start, end)</c>. Every thread receives either <c>floor(N/T)</c> or <c>ceil(N/T)</c> items,
+    /// and no thread is left empty while <c>N >= T</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>Replaces the ceiling-division split that every worker previously repeated. That form
+    /// gave each thread the rounded-up share, so the work ran out early and the tail threads got an
+    /// empty range: at <c>N = T + 1</c> everyone's share doubles and nearly half the pool idles.</para>
+    /// <para>Severity tracked how close <c>N</c> was to <c>T</c>, which made it invisible on the
+    /// matmul workers (hundreds of tiles across 32 threads) and acute in attention, where the items
+    /// are heads and the count is the same order as the core count.</para>
+    /// <para>Ranges remain contiguous and disjoint, and thread order is preserved, so results are
+    /// bit-identical — this redistributes work, it does not reassociate it.</para>
+    /// </remarks>
+    /// <param name="totalItems">Total number of items to divide.</param>
+    /// <param name="threadIdx">Zero-based index of the requesting thread.</param>
+    /// <param name="threadCount">Total number of participating threads.</param>
+    /// <param name="start">Inclusive start of this thread's range.</param>
+    /// <param name="end">Exclusive end of this thread's range. Equals <paramref name="start"/>
+    /// when there is no work for this thread.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void PartitionRange(
+        int totalItems, int threadIdx, int threadCount, out int start, out int end)
+    {
+        int baseCount = totalItems / threadCount;
+        int remainder = totalItems % threadCount;
+
+        // Threads below the remainder take one extra item; the Math.Min shifts later threads past
+        // the extras already handed out, which keeps the ranges contiguous.
+        start = (threadIdx * baseCount) + Math.Min(threadIdx, remainder);
+        end = start + baseCount + (threadIdx < remainder ? 1 : 0);
+    }
+
     private readonly Thread[] _workers;
     private readonly ManualResetEventSlim[] _workReady;
     private readonly CountdownEvent _completion;

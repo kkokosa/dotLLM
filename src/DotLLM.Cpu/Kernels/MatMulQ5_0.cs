@@ -938,9 +938,7 @@ public static unsafe partial class MatMul
     {
         ref var ctx = ref Unsafe.AsRef<GemmTiledQ5_0Ctx>((void*)ctxPtr);
         int totalTiles = (ctx.M + ctx.TileM - 1) / ctx.TileM;
-        int tilesPerThread = (totalTiles + threadCount - 1) / threadCount;
-        int startTile = threadIdx * tilesPerThread;
-        int endTile = Math.Min(startTile + tilesPerThread, totalTiles);
+        ComputeThreadPool.PartitionRange(totalTiles, threadIdx, threadCount, out int startTile, out int endTile);
 
         for (int tile = startTile; tile < endTile; tile++)
         {
@@ -1210,9 +1208,7 @@ public static unsafe partial class MatMul
         ref var ctx = ref Unsafe.AsRef<OuterProductGemmQ5Ctx>((void*)ctxPtr);
 
         int totalGroups = ctx.FullGroups + (ctx.TailRows > 0 ? 1 : 0);
-        int groupsPerThread = (totalGroups + threadCount - 1) / threadCount;
-        int startGroup = threadIdx * groupsPerThread;
-        int endGroup = Math.Min(startGroup + groupsPerThread, totalGroups);
+        ComputeThreadPool.PartitionRange(totalGroups, threadIdx, threadCount, out int startGroup, out int endGroup);
 
         if (startGroup >= totalGroups) return;
 

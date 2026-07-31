@@ -272,9 +272,7 @@ public static class Attention
         ref var ctx = ref Unsafe.AsRef<AttentionCtx>((void*)ctxPtr);
 
         // Partition heads across threads
-        int headsPerThread = (ctx.NumHeads + threadCount - 1) / threadCount;
-        int startHead = threadIdx * headsPerThread;
-        int endHead = Math.Min(startHead + headsPerThread, ctx.NumHeads);
+        ComputeThreadPool.PartitionRange(ctx.NumHeads, threadIdx, threadCount, out int startHead, out int endHead);
         if (startHead >= ctx.NumHeads) return;
 
         float* scores = (float*)ctx.ScratchPtrs[threadIdx];
@@ -334,9 +332,7 @@ public static class Attention
         ref var ctx = ref Unsafe.AsRef<TiledAttentionCtx>((void*)ctxPtr);
 
         // Partition heads across threads
-        int headsPerThread = (ctx.NumHeads + threadCount - 1) / threadCount;
-        int startHead = threadIdx * headsPerThread;
-        int endHead = Math.Min(startHead + headsPerThread, ctx.NumHeads);
+        ComputeThreadPool.PartitionRange(ctx.NumHeads, threadIdx, threadCount, out int startHead, out int endHead);
         if (startHead >= ctx.NumHeads) return;
 
         var qSpan = new ReadOnlySpan<float>(ctx.Q, ctx.SeqQ * ctx.QStride);
@@ -703,9 +699,7 @@ public static class Attention
     {
         ref var ctx = ref Unsafe.AsRef<QuantizedTiledCtx>((void*)ctxPtr);
 
-        int headsPerThread = (ctx.NumHeads + threadCount - 1) / threadCount;
-        int startHead = threadIdx * headsPerThread;
-        int endHead = Math.Min(startHead + headsPerThread, ctx.NumHeads);
+        ComputeThreadPool.PartitionRange(ctx.NumHeads, threadIdx, threadCount, out int startHead, out int endHead);
         if (startHead >= ctx.NumHeads) return;
 
         Span<float> tileScores = stackalloc float[MaxTileSize];

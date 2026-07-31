@@ -1919,9 +1919,7 @@ public static unsafe partial class MatMul
     {
         ref var ctx = ref Unsafe.AsRef<GemmTiledKQuantCtx>((void*)ctxPtr);
         int totalTiles = (ctx.M + ctx.TileM - 1) / ctx.TileM;
-        int tilesPerThread = (totalTiles + threadCount - 1) / threadCount;
-        int startTile = threadIdx * tilesPerThread;
-        int endTile = Math.Min(startTile + tilesPerThread, totalTiles);
+        ComputeThreadPool.PartitionRange(totalTiles, threadIdx, threadCount, out int startTile, out int endTile);
 
         for (int tile = startTile; tile < endTile; tile++)
         {
@@ -2013,9 +2011,7 @@ public static unsafe partial class MatMul
         ref var ctx = ref Unsafe.AsRef<OuterProductGemmKQuantCtx>((void*)ctxPtr);
 
         // Partition tokens across threads
-        int tokensPerThread = (ctx.N + threadCount - 1) / threadCount;
-        int startToken = threadIdx * tokensPerThread;
-        int endToken = Math.Min(startToken + tokensPerThread, ctx.N);
+        ComputeThreadPool.PartitionRange(ctx.N, threadIdx, threadCount, out int startToken, out int endToken);
 
         if (startToken >= ctx.N) return;
 
