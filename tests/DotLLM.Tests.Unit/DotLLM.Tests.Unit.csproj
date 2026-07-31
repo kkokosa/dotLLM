@@ -6,6 +6,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Required for testing the rate-limit middleware (DefaultHttpContext,
+         IApplicationBuilder, etc.). The Server project is built against
+         Microsoft.AspNetCore.App, this aligns the test harness. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\DotLLM.Core\DotLLM.Core.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Models\DotLLM.Models.csproj" />
     <ProjectReference Include="..\..\src\DotLLM.Tokenizers\DotLLM.Tokenizers.csproj" />

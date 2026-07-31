@@ -1,4 +1,5 @@
 using DotLLM.Engine;
+using DotLLM.Server.RateLimiting;
 
 namespace DotLLM.Server;
 
@@ -57,6 +58,14 @@ public sealed record ServerOptions
 
     /// <summary>Model display name (derived from file path).</summary>
     public string ModelId { get; init; } = "default";
+
+    /// <summary>
+    /// Per-API-key rate-limit configuration. When <see cref="RateLimitConfig.Enabled"/>
+    /// is <c>false</c> (or this property is <c>null</c>) the rate-limit middleware
+    /// is not wired and the server has no per-caller limits. See <see cref="RateLimitConfig"/>
+    /// for the JSON shape loaded from <c>appsettings.json</c>.
+    /// </summary>
+    public RateLimitConfig? RateLimit { get; init; }
 
     /// <summary>
     /// Parses command-line arguments into <see cref="ServerOptions"/>.
