@@ -65,4 +65,100 @@ public record ModelConfig
 
     /// <summary>Jinja2 chat template from model metadata. Null if not present.</summary>
     public string? ChatTemplate { get; init; }
+
+    /// <summary>
+    /// Validates internal consistency of the configuration. Throws
+    /// <see cref="InvalidModelConfigException"/> with a precise message for the
+    /// first violation found. Loaders should call this after constructing a
+    /// <see cref="ModelConfig"/> from GGUF / HF metadata so the failure is
+    /// reported at load time, not deep inside kernel code where the misconfigured
+    /// value would produce a segfault or silent garbage output.
+    /// </summary>
+    /// <exception cref="InvalidModelConfigException">Thrown on the first validation failure.</exception>
+    public void Validate()
+    {
+        // Positive scalar guards.
+        if (VocabSize <= 0) throw new InvalidModelConfigException(nameof(VocabSize), $"must be positive (got {VocabSize}).");
+        if (HiddenSize <= 0) throw new InvalidModelConfigException(nameof(HiddenSize), $"must be positive (got {HiddenSize}).");
+        if (IntermediateSize <= 0) throw new InvalidModelConfigException(nameof(IntermediateSize), $"must be positive (got {IntermediateSize}).");
+        if (NumLayers <= 0) throw new InvalidModelConfigException(nameof(NumLayers), $"must be positive (got {NumLayers}).");
+        if (NumAttentionHeads <= 0) throw new InvalidModelConfigException(nameof(NumAttentionHeads), $"must be positive (got {NumAttentionHeads}).");
+        if (NumKvHeads <= 0) throw new InvalidModelConfigException(nameof(NumKvHeads), $"must be positive (got {NumKvHeads}).");
+        if (HeadDim <= 0) throw new InvalidModelConfigException(nameof(HeadDim), $"must be positive (got {HeadDim}).");
+        if (MaxSequenceLength <= 0) throw new InvalidModelConfigException(nameof(MaxSequenceLength), $"must be positive (got {MaxSequenceLength}).");
+
+        // GQA invariant — NumAttentionHeads must be an integer multiple of NumKvHeads.
+        // Each KV head services NumAttentionHeads / NumKvHeads query heads; a non-integer
+        // ratio breaks the head-grouping math in the attention kernel.
+        if (NumAttentionHeads % NumKvHeads != 0)
+        {
+            throw new InvalidModelConfigException(
+                nameof(NumKvHeads),
+                $"must divide {nameof(NumAttentionHeads)}: " +
+                $"{NumKvHeads} does not divide {NumAttentionHeads}.");
+        }
+
+        // HeadDim is required in the GGUF metadata but is otherwise redundant with
+        // HiddenSize / NumAttentionHeads. If both are supplied they must agree; a
+        // mismatch produces silently wrong attention dims rather than a hard failure.
+        int derivedHeadDim = HiddenSize / NumAttentionHeads;
+        if (HiddenSize % NumAttentionHeads == 0 && derivedHeadDim != HeadDim)
+        {
+            throw new InvalidModelConfigException(
+                nameof(HeadDim),
+                $"({HeadDim}) does not match {nameof(HiddenSize)} / {nameof(NumAttentionHeads)} " +
+                $"({HiddenSize} / {NumAttentionHeads} = {derivedHeadDim}).");
+        }
+
+        // RoPE config presence must match the position encoding type. A RoPE config
+        // present on a non-RoPE model is at best ignored, at worst silently consumed
+        // by a code path that no longer applies — confusing to debug.
+        if (PositionEncodingType == PositionEncodingType.RoPE && RoPEConfig is null)
+        {
+            throw new InvalidModelConfigException(
+                nameof(RoPEConfig),
+                $"is required when {nameof(PositionEncodingType)} is RoPE.");
+        }
+        if (PositionEncodingType != PositionEncodingType.RoPE && RoPEConfig is not null)
+        {
+            throw new InvalidModelConfigException(
+                nameof(RoPEConfig),
+                $"must be null when {nameof(PositionEncodingType)} is {PositionEncodingType} (only RoPE accepts it).");
+        }
+    }
+}
+
+/// <summary>
+/// Thrown when a <see cref="ModelConfig"/> fails internal-consistency validation.
+/// </summary>
+public sealed class InvalidModelConfigException : Exception
+{
+    /// <summary>Name of the field whose value is invalid.</summary>
+    public string FieldName { get; }
+
+    /// <summary>
+    /// Creates a new exception describing the invalid field and the reason.
+    /// </summary>
+    /// <param name="fieldName">Name of the offending <see cref="ModelConfig"/> field.</param>
+    /// <param name="reason">Human-readable reason the field is invalid.</param>
+    public InvalidModelConfigException(string fieldName, string reason)
+        : base($"{nameof(ModelConfig)}.{fieldName} {reason}")
+    {
+        FieldName = fieldName;
+    }
+
+    /// <summary>
+    /// Creates a new exception describing the invalid field and the reason, wrapping the
+    /// lower-level failure that surfaced it. Use this when a loader detects the invalid
+    /// value while handling another exception (e.g. a metadata parse or conversion error),
+    /// so the original stack and context are not lost.
+    /// </summary>
+    /// <param name="fieldName">Name of the offending <see cref="ModelConfig"/> field.</param>
+    /// <param name="reason">Human-readable reason the field is invalid.</param>
+    /// <param name="innerException">The exception that caused this validation failure.</param>
+    public InvalidModelConfigException(string fieldName, string reason, Exception innerException)
+        : base($"{nameof(ModelConfig)}.{fieldName} {reason}", innerException)
+    {
+        FieldName = fieldName;
+    }
 }

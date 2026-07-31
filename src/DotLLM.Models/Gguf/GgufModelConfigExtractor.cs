@@ -48,7 +48,7 @@ public static class GgufModelConfigExtractor
 
         RoPEConfig? ropeConfig = ExtractRoPEConfig(metadata, arch, headDim, architecture);
 
-        return new ModelConfig
+        var config = new ModelConfig
         {
             Architecture = architecture,
             VocabSize = vocabSize,
@@ -65,6 +65,12 @@ public static class GgufModelConfigExtractor
             SlidingWindowSize = slidingWindowSize,
             ChatTemplate = chatTemplate,
         };
+
+        // Validate at load time so misconfigured GGUF metadata fails fast with a clear
+        // message, instead of producing a segfault or silent garbage output deep inside
+        // a kernel that trusts these dims.
+        config.Validate();
+        return config;
     }
 
     private static Architecture ParseArchitecture(string archString)
