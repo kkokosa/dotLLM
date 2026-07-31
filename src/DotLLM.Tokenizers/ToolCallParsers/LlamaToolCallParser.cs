@@ -34,4 +34,16 @@ public sealed class LlamaToolCallParser : IToolCallParser
     /// <inheritdoc/>
     public bool IsToolCallStart(string text)
         => text.Contains(Marker, StringComparison.Ordinal);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Llama 3.1+ tool calls open with <c>&lt;|python_tag|&gt;</c> and have no
+    /// dedicated close marker — the call ends at <c>&lt;|eot_id|&gt;</c> or
+    /// <c>&lt;|eom_id|&gt;</c>, both already in the server's stop-sequence list.
+    /// We therefore use the fallback (buffer-and-parse-at-flush) implementation
+    /// for now; this is sufficient to keep raw payloads out of <c>delta.content</c>.
+    /// True per-fragment streaming of the Llama JSON arguments is a follow-up.
+    /// </remarks>
+    public IIncrementalToolCallParser CreateIncremental()
+        => new FallbackIncrementalToolCallParser(this);
 }

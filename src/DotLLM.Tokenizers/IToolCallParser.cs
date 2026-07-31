@@ -1,3 +1,5 @@
+using DotLLM.Tokenizers.ToolCallParsers;
+
 namespace DotLLM.Tokenizers;
 
 /// <summary>
@@ -19,4 +21,15 @@ public interface IToolCallParser
     /// <param name="text">Text to check.</param>
     /// <returns>True if the text appears to start a tool call.</returns>
     bool IsToolCallStart(string text);
+
+    /// <summary>
+    /// Mints a fresh single-use <see cref="IIncrementalToolCallParser"/> for one
+    /// streaming inference request. Default implementation returns a generic
+    /// fallback that buffers the whole stream and emits a single tool-call
+    /// fragment at flush via <see cref="TryParse"/>; format-specific parsers
+    /// override to fragment text-as-arriving and route safe prose to
+    /// <c>delta.content</c> mid-stream.
+    /// </summary>
+    /// <returns>A new stateful incremental parser bound to this <see cref="IToolCallParser"/>'s format knowledge.</returns>
+    IIncrementalToolCallParser CreateIncremental() => new FallbackIncrementalToolCallParser(this);
 }

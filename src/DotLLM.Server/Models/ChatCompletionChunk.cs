@@ -106,5 +106,51 @@ public sealed record ChatDeltaDto
 
     [JsonPropertyName("tool_calls")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public ToolCallDto[]? ToolCalls { get; init; }
+    public ToolCallDeltaDto[]? ToolCalls { get; init; }
+}
+
+/// <summary>
+/// Streaming-specific <c>delta.tool_calls[]</c> element. All fields except
+/// <c>index</c> are optional so partial deltas (e.g. an arguments-only fragment)
+/// serialise to the OpenAI SSE shape:
+/// <c>{"index":0,"function":{"arguments":"..."}}</c>.
+/// </summary>
+public sealed record ToolCallDeltaDto
+{
+    /// <summary>Zero-based parallel-call index. Required; increments for each new call within a stream.</summary>
+    [JsonPropertyName("index")]
+    public required int Index { get; init; }
+
+    /// <summary>Server-generated call id. Present on the first fragment of a call only.</summary>
+    [JsonPropertyName("id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Id { get; init; }
+
+    /// <summary>Always <c>"function"</c> for first fragments; <c>null</c> on subsequent argument-only fragments.</summary>
+    [JsonPropertyName("type")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Type { get; init; }
+
+    /// <summary>Function delta. <c>null</c> only for opening fragments that carry no name/args yet.</summary>
+    [JsonPropertyName("function")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ToolCallFunctionDeltaDto? Function { get; init; }
+}
+
+/// <summary>
+/// Streaming-specific function-call delta. <c>Name</c> is present on the first
+/// fragment only; <c>Arguments</c> carries the next slice of the arguments JSON
+/// string (consumers concatenate slices to reconstruct the full arguments object).
+/// </summary>
+public sealed record ToolCallFunctionDeltaDto
+{
+    /// <summary>Function name. Present on the first fragment of a call only.</summary>
+    [JsonPropertyName("name")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Name { get; init; }
+
+    /// <summary>Incremental slice of the arguments JSON string. <c>null</c> if this fragment carries no argument text.</summary>
+    [JsonPropertyName("arguments")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Arguments { get; init; }
 }

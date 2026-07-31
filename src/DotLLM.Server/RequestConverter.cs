@@ -200,6 +200,43 @@ public static class RequestConverter
     }
 
     /// <summary>
+    /// Converts an incremental <see cref="ToolCallFragment"/> emitted by an
+    /// <see cref="IIncrementalToolCallParser"/> to the streaming
+    /// <see cref="ToolCallDeltaDto"/> shape used on the wire. The fragment that opens
+    /// a call — the one carrying <c>Id</c> — includes <c>type:"function"</c> to match
+    /// the OpenAI SSE contract; subsequent argument-only fragments omit <c>id</c>,
+    /// <c>type</c>, and <c>function.name</c>.
+    /// </summary>
+    public static ToolCallDeltaDto ToToolCallDeltaDto(ToolCallFragment fragment)
+    {
+        // `function` is emitted only when it would actually carry a field. Deriving it from
+        // "is this an opening fragment" instead means an id-only fragment produces a
+        // ToolCallFunctionDeltaDto whose every property is null, which serialises to
+        // "function":{} once WhenWritingNull has dropped them — a shape no client expects and
+        // one this DTO documents as null.
+        ToolCallFunctionDeltaDto? function =
+            fragment.Name is not null || fragment.ArgumentsDelta is not null
+                ? new ToolCallFunctionDeltaDto
+                {
+                    Name = fragment.Name,
+                    Arguments = fragment.ArgumentsDelta,
+                }
+                : null;
+
+        // `type` marks the chunk that opens a call, and on the wire that is precisely the chunk
+        // carrying `id` — clients key the call they are assembling off that id. Keying `type` off
+        // `Name` as well would emit type:"function" with no id for a name-only fragment, leaving
+        // the client with an opened call it cannot address.
+        return new ToolCallDeltaDto
+        {
+            Index = fragment.Index,
+            Id = fragment.Id,
+            Type = fragment.Id is not null ? "function" : null,
+            Function = function,
+        };
+    }
+
+    /// <summary>
     /// Generates a unique request ID in the OpenAI format.
     /// </summary>
     public static string GenerateRequestId() => $"chatcmpl-{Guid.NewGuid():N}";

@@ -56,4 +56,18 @@ public sealed class HermesToolCallParser : IToolCallParser
     /// <inheritdoc/>
     public bool IsToolCallStart(string text)
         => text.Contains(OpenTag, StringComparison.Ordinal);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Uses sentinel-based suppression: text outside <c>&lt;tool_call&gt;...&lt;/tool_call&gt;</c>
+    /// streams as <c>delta.content</c> (with the open-sentinel prefix held back
+    /// across chunk boundaries so partial markup never leaks); text inside is
+    /// buffered until close and emitted as a single closing fragment per call,
+    /// carrying a parseable <c>function.arguments</c> JSON string. Per-character
+    /// argument streaming is intentionally deferred — see the class remarks on
+    /// <see cref="SentinelIncrementalToolCallParser"/> for the rationale and the
+    /// follow-up plan.
+    /// </remarks>
+    public IIncrementalToolCallParser CreateIncremental()
+        => new SentinelIncrementalToolCallParser(this, OpenTag, CloseTag);
 }

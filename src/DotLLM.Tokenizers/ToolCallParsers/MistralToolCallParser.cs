@@ -45,6 +45,19 @@ public sealed class MistralToolCallParser : IToolCallParser
     public bool IsToolCallStart(string text)
         => text.Contains(Marker, StringComparison.Ordinal);
 
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Mistral's payload shape is <c>funcname[ARGS]{json}</c> (or a top-level
+    /// array) — there is no closing marker that always terminates a single call,
+    /// so the suppress-mode wrapper here treats the entire generation past the
+    /// marker as the call body and emits one closing fragment at end-of-stream.
+    /// This still gives the correctness benefit of item #4 (no raw markup in
+    /// <c>delta.content</c>) but defers true fragment-by-fragment streaming for
+    /// Mistral to a follow-up.
+    /// </remarks>
+    public IIncrementalToolCallParser CreateIncremental()
+        => new FallbackIncrementalToolCallParser(this);
+
     private static string? ExtractFirstBalancedBraces(string text)
     {
         int depth = 0;

@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using DotLLM.Engine;
 using DotLLM.Server.Models;
@@ -201,10 +200,21 @@ public static class ChatCompletionEndpoint
         };
         await WriteSseChunk(httpContext, roleChunk, ct);
 
-        var sb = new StringBuilder();
         FinishReason finishReason = FinishReason.Length;
         InferenceTimings? timings = null;
         int completionTokens = 0;
+
+        // Per-request incremental tool-call parser. When tools are not in scope
+        // (no parser registered or no tools attached to the request), this stays
+        // null and the streaming path mirrors the legacy behaviour: every token's
+        // text flows straight to delta.content. When tools are in scope, each
+        // token's text is fed through the parser; the parser routes regular text
+        // to delta.content and tool-call fragments to delta.tool_calls — per the
+        // OpenAI SSE contract.
+        IIncrementalToolCallParser? incrementalParser =
+            state.ToolCallParser is not null && tools is { Length: > 0 }
+                ? state.ToolCallParser.CreateIncremental()
+                : null;
 
         await state.ExecuteAsync(async () =>
         {
@@ -213,21 +223,44 @@ public static class ChatCompletionEndpoint
                 if (token.Text.Length > 0)
                 {
                     completionTokens++;
-                    sb.Append(token.Text);
                     var tokenLogprobs = token.Logprobs.HasValue
                         ? RequestConverter.ToLogprobsDto(token.Logprobs.Value)
                         : null;
-                    var contentChunk = new ChatCompletionChunk
+
+                    if (incrementalParser is null)
                     {
-                        Id = requestId,
-                        Model = modelId,
-                        Choices = [new ChatChunkChoiceDto
+                        // Legacy path: no tools attached — token.Text goes straight to delta.content.
+                        var contentChunk = new ChatCompletionChunk
                         {
-                            Delta = new ChatDeltaDto { Content = token.Text },
-                            Logprobs = tokenLogprobs,
-                        }],
-                    };
-                    await WriteSseChunk(httpContext, contentChunk, ct);
+                            Id = requestId,
+                            Model = modelId,
+                            Choices = [new ChatChunkChoiceDto
+                            {
+                                Delta = new ChatDeltaDto { Content = token.Text },
+                                Logprobs = tokenLogprobs,
+                            }],
+                        };
+                        await WriteSseChunk(httpContext, contentChunk, ct);
+                    }
+                    else
+                    {
+                        // Tools attached — split this token into safe text and any tool-call fragments.
+                        var parseResult = incrementalParser.AppendChunk(token.Text);
+
+                        // tokenLogprobs describe the whole of token.Text. The parser may split it
+                        // (prose + sentinel), hold part of it back as a possible sentinel prefix, or
+                        // release text held back from an earlier token — in all of those the content
+                        // chunk is no longer this token, and attaching its logprobs would report
+                        // per-token probabilities against text they don't cover. Emit them only when
+                        // the safe text is exactly the token and nothing was routed to a tool call.
+                        bool logprobsCoverEmission =
+                            parseResult.Fragments.Count == 0 &&
+                            string.Equals(parseResult.SafeText, token.Text, StringComparison.Ordinal);
+
+                        await EmitSplitChunksAsync(
+                            httpContext, requestId, modelId, parseResult,
+                            logprobsCoverEmission ? tokenLogprobs : null, ct);
+                    }
                 }
 
                 if (token.FinishReason.HasValue)
@@ -238,20 +271,21 @@ public static class ChatCompletionEndpoint
             }
         }, ct);
 
-        // Detect tool calls in accumulated text
-        string text = sb.ToString();
-        ToolCall[]? toolCalls = null;
-        if (state.ToolCallParser is not null && tools is { Length: > 0 })
+        // Drain the parser at end-of-stream: surface any held-back safe-text tail
+        // and close any in-flight tool call.
+        if (incrementalParser is not null)
         {
-            toolCalls = state.ToolCallParser.TryParse(text);
-            if (toolCalls is { Length: > 0 })
+            var flushResult = incrementalParser.Flush();
+            await EmitSplitChunksAsync(
+                httpContext, requestId, modelId, flushResult, logprobs: null, ct);
+
+            if (incrementalParser.HasEmittedAnyFragment)
                 finishReason = FinishReason.ToolCalls;
         }
 
-        // Final chunk with finish_reason
-        var finalDelta = toolCalls is { Length: > 0 }
-            ? new ChatDeltaDto { ToolCalls = RequestConverter.ToToolCallDtos(toolCalls) }
-            : new ChatDeltaDto();
+        // Final chunk with finish_reason. No re-parsing of accumulated content —
+        // the incremental parser already emitted the full tool_calls stream.
+        var finalDelta = new ChatDeltaDto();
 
         int promptTokens = timings?.PrefillTokenCount ?? 0;
 
@@ -298,5 +332,55 @@ public static class ChatCompletionEndpoint
         await JsonSerializer.SerializeAsync(ctx.Response.Body, chunk, ServerJsonContext.Default.ChatCompletionChunk, ct);
         await ctx.Response.WriteAsync("\n\n", ct);
         await ctx.Response.Body.FlushAsync(ct);
+    }
+
+    /// <summary>
+    /// Emits the safe-text and tool-call fragments produced by an
+    /// <see cref="IIncrementalToolCallParser"/> step as separate SSE chunks.
+    /// Logprobs (if any) attach to the safe-text chunk only — tool-call
+    /// fragments do not carry logprobs.
+    /// </summary>
+    private static async Task EmitSplitChunksAsync(
+        HttpContext httpContext,
+        string requestId,
+        string modelId,
+        ToolCallParseResult result,
+        LogprobsDto? logprobs,
+        CancellationToken ct)
+    {
+        if (result.SafeText.Length > 0)
+        {
+            var contentChunk = new ChatCompletionChunk
+            {
+                Id = requestId,
+                Model = modelId,
+                Choices = [new ChatChunkChoiceDto
+                {
+                    Delta = new ChatDeltaDto { Content = result.SafeText },
+                    Logprobs = logprobs,
+                }],
+            };
+            await WriteSseChunk(httpContext, contentChunk, ct);
+        }
+
+        if (result.Fragments.Count > 0)
+        {
+            // Each fragment emits as its own SSE chunk so consumers see
+            // delta.tool_calls[] arrive incrementally rather than as a batch.
+            for (int i = 0; i < result.Fragments.Count; i++)
+            {
+                var dto = RequestConverter.ToToolCallDeltaDto(result.Fragments[i]);
+                var toolChunk = new ChatCompletionChunk
+                {
+                    Id = requestId,
+                    Model = modelId,
+                    Choices = [new ChatChunkChoiceDto
+                    {
+                        Delta = new ChatDeltaDto { ToolCalls = [dto] },
+                    }],
+                };
+                await WriteSseChunk(httpContext, toolChunk, ct);
+            }
+        }
     }
 }

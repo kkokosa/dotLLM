@@ -22,4 +22,15 @@ public sealed class GenericToolCallParser : IToolCallParser
         int nameIndex = text.IndexOf("\"name\"", braceIndex, StringComparison.Ordinal);
         return nameIndex > braceIndex;
     }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// The generic parser has no fixed sentinels, so it can't reliably hold
+    /// back partial markup from <c>delta.content</c> mid-stream. We use the
+    /// buffer-at-flush fallback — equivalent to the pre-#121 streaming behaviour
+    /// but routing detected calls to <c>delta.tool_calls</c> rather than
+    /// leaking them as content.
+    /// </remarks>
+    public IIncrementalToolCallParser CreateIncremental()
+        => new FallbackIncrementalToolCallParser(this);
 }
