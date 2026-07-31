@@ -48,6 +48,10 @@ app.Configure(config =>
         .WithDescription("Interactive multi-turn chat with a GGUF model.")
         .WithExample("chat", "QuantFactory/SmolLM-135M-GGUF", "--system", "You are a helpful assistant.");
 
+    config.AddCommand<PerplexityCommand>("perplexity")
+        .WithDescription("Compute perplexity over a text corpus.")
+        .WithExample("perplexity", "QuantFactory/SmolLM-135M-GGUF", "--corpus", "wiki.test.raw", "--context", "512", "--stride", "256");
+
     config.AddCommand<ServeCommand>("serve")
         .WithDescription("Launch API server with built-in web chat UI.")
         .WithExample("serve", "Qwen/Qwen3-0.6B-GGUF", "--port", "8080");
