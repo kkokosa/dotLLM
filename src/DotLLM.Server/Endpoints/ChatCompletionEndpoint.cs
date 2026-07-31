@@ -47,6 +47,32 @@ public static class ChatCompletionEndpoint
             return;
         }
 
+        // Reject tool_choice values the server can't enforce yet — `none`, `required`, and a
+        // specific function all require constrained decoding that isn't wired up. Silently
+        // treating them as `auto` would let clients believe the constraint took effect.
+        if (!RequestConverter.IsToolChoiceSupported(request.ToolChoice, out var rejectedToolChoice))
+        {
+            httpContext.Response.StatusCode = 400;
+            await httpContext.Response.WriteAsJsonAsync(
+                new OpenAiErrorResponse
+                {
+                    Error = new OpenAiErrorBody
+                    {
+                        Message = $"Unsupported tool_choice value '{rejectedToolChoice}'. " +
+                                  "Only 'auto' (or unset) is supported in this release; " +
+                                  "'none', 'required', and specific function selection require " +
+                                  "constraint-driven enforcement (tracked in issue #121).",
+                        Type = "invalid_request_error",
+                        Param = "tool_choice",
+                        Code = "unsupported_value",
+                    },
+                },
+                ServerJsonContext.Default.OpenAiErrorResponse,
+                contentType: null,
+                httpContext.RequestAborted);
+            return;
+        }
+
         var ct = httpContext.RequestAborted;
         var requestId = RequestConverter.GenerateRequestId();
         var modelId = state.Options.ModelId;
