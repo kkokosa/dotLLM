@@ -480,4 +480,158 @@ public sealed unsafe class OuterProductGemmTests
                 ((sbyte*)(block + 2))[i] = (sbyte)rng.Next(-127, 128);
         }
     }
+
+    // ──────────────────── F32 outer-product GEMM ────────────────────
+    //
+    // These exercise the new `OuterProductGemm.OuterProductGemmF32` kernel
+    // (companion to the Q8_0 outer-product kernels above). Parity is checked
+    // against:
+    //   1. `MatMul.GemmF32Scalar` — the canonical reference, no FMA.
+    //   2. `MatMul.GemmF32` — the production tiled path, FMA-enabled.
+    //   3. `OuterProductGemm.OuterProductGemmF32Scalar` — internal cross-check.
+    //
+    // The scalar path accumulates in the same order as the reference and is
+    // compared bit-exactly. The vector path uses FMA plus a horizontal
+    // reduction, which reorders the rounding, so it is compared with an
+    // *absolute* tolerance that scales with √K — for unit-magnitude operands
+    // the error of an unbiased K-term float32 sum grows as √K, not linearly.
+
+    [Theory]
+    [InlineData(4, 3, 8)]        // smallest fully-vectorisable tile
+    [InlineData(4, 3, 64)]       // single AVX2 group × 8
+    [InlineData(8, 6, 64)]       // 2 row-tiles × 2 token-tiles
+    [InlineData(12, 9, 128)]     // 3 row-tiles × 3 token-tiles, K=128
+    [InlineData(16, 12, 256)]    // 4 row-tiles × 4 token-tiles
+    [InlineData(32, 16, 512)]    // prefill-shaped
+    public void OuterProductGemmF32_Scalar_MatchesReference(int m, int n, int k)
+    {
+        RunF32ParityCase(m, n, k, useVector: false);
+    }
+
+    // AVX2/FMA is the only hardware requirement of the vector path. Where it is
+    // absent the kernel falls back to scalar, so a vector-only case has nothing
+    // to assert — report it as *skipped* rather than passed, so a run on a
+    // non-AVX2 agent is visibly distinguishable from a real validation.
+    private static bool Avx2FmaSupported => Avx2.IsSupported && Fma.IsSupported;
+
+    private const string NoAvx2 = "AVX2/FMA not supported on this machine";
+
+    [SkippableTheory]
+    [InlineData(4, 3, 8)]
+    [InlineData(4, 3, 64)]
+    [InlineData(8, 6, 64)]
+    [InlineData(12, 9, 128)]
+    [InlineData(16, 12, 256)]
+    [InlineData(32, 16, 512)]
+    [InlineData(128, 32, 1024)]  // bigger prefill
+    public void OuterProductGemmF32_Avx2_MatchesReference(int m, int n, int k)
+    {
+        Skip.IfNot(Avx2FmaSupported, NoAvx2);
+        RunF32ParityCase(m, n, k, useVector: true);
+    }
+
+    // Tail-handling cases: shapes where M, N, or K are not multiples of the
+    // microkernel tile (4 rows × 3 tokens × 8-wide vector).
+
+    [Theory]
+    [InlineData(5, 3, 64)]       // row tail (m % 4 != 0)
+    [InlineData(7, 3, 64)]
+    [InlineData(4, 4, 64)]       // token tail (n % 3 != 0)
+    [InlineData(4, 5, 64)]
+    [InlineData(7, 5, 64)]       // both tails
+    [InlineData(13, 11, 33)]     // K tail (k % 8 != 0) + row + token tails
+    [InlineData(17, 9, 65)]      // K tail with FMA group
+    public void OuterProductGemmF32_HandlesAllTails(int m, int n, int k)
+    {
+        // Scalar half always asserts, so this stays a plain Theory.
+        if (Avx2FmaSupported)
+            RunF32ParityCase(m, n, k, useVector: true);
+        RunF32ParityCase(m, n, k, useVector: false);
+    }
+
+    // Edge cases.
+
+    [Theory]
+    [InlineData(1, 1, 1)]        // degenerate scalar
+    [InlineData(1, 3, 64)]       // single row — all-row-tail
+    [InlineData(4, 1, 64)]       // single token — all-token-tail
+    [InlineData(1, 1, 4096)]     // pure inner product
+    [InlineData(4, 3, 1)]        // K=1 — every tile collapses to single FMA
+    public void OuterProductGemmF32_EdgeCases(int m, int n, int k)
+    {
+        // Scalar half always asserts, so this stays a plain Theory.
+        if (Avx2FmaSupported)
+            RunF32ParityCase(m, n, k, useVector: true);
+        RunF32ParityCase(m, n, k, useVector: false);
+    }
+
+    private static void RunF32ParityCase(int m, int n, int k, bool useVector)
+    {
+        var rng = new Random(0xC0FFEE ^ (m * 31 + n) * 31 + k);
+        long aLen = (long)m * k;
+        long bLen = (long)n * k;
+        long cLen = (long)n * m;
+
+        float* a = (float*)NativeMemory.AlignedAlloc((nuint)(aLen * sizeof(float)), 64);
+        float* b = (float*)NativeMemory.AlignedAlloc((nuint)(bLen * sizeof(float)), 64);
+        float* cOuter = (float*)NativeMemory.AlignedAlloc((nuint)(cLen * sizeof(float)), 64);
+        float* cRefScalar = (float*)NativeMemory.AlignedAlloc((nuint)(cLen * sizeof(float)), 64);
+        float* cRefGemm = (float*)NativeMemory.AlignedAlloc((nuint)(cLen * sizeof(float)), 64);
+
+        try
+        {
+            // Use range [-1, 1] — typical of post-normalisation activations and
+            // weight distributions. Larger magnitudes pile up error sooner.
+            for (long i = 0; i < aLen; i++) a[i] = rng.NextSingle() * 2f - 1f;
+            for (long i = 0; i < bLen; i++) b[i] = rng.NextSingle() * 2f - 1f;
+
+            // Reference: `MatMul.GemmF32Scalar` — canonical scalar inner product.
+            MatMul.GemmF32Scalar(a, b, cRefScalar, m, k, n);
+
+            // Reference: `MatMul.GemmF32` — production path (FMA inside TensorPrimitives).
+            MatMul.GemmF32(a, b, cRefGemm, m, k, n);
+
+            if (useVector)
+                OuterProductGemm.OuterProductGemmF32(a, b, cOuter, m, k, n);
+            else
+                OuterProductGemm.OuterProductGemmF32Scalar(a, b, cOuter, m, k, n);
+
+            if (!useVector)
+            {
+                // Scalar path: accumulates the same terms in the same ascending
+                // index order as `MatMul.GemmF32Scalar`, and .NET does not
+                // auto-contract `mul + add` to FMA — so bit-exact equality is
+                // achievable and required.
+                for (long i = 0; i < cLen; i++)
+                {
+                    Assert.Equal(cRefScalar[i], cOuter[i]);
+                }
+            }
+            else
+            {
+                // Vector path: AVX2 FMA + horizontal reduction reorders the
+                // summation vs the scalar inner product. Use an absolute
+                // tolerance that scales with √K — for unit-magnitude operands
+                // and float32 (ULP ≈ 1.2e-7) the standard error of an unbiased
+                // K-term sum grows as √K.
+                float absTol = 4e-6f * MathF.Sqrt(k);
+
+                for (long i = 0; i < cLen; i++)
+                {
+                    float diff = MathF.Abs(cOuter[i] - cRefGemm[i]);
+                    Assert.True(
+                        diff <= absTol,
+                        $"shape m={m} n={n} k={k} idx={i}: outer={cOuter[i]:R} ref={cRefGemm[i]:R} diff={diff:R} tol={absTol:R}");
+                }
+            }
+        }
+        finally
+        {
+            NativeMemory.AlignedFree(a);
+            NativeMemory.AlignedFree(b);
+            NativeMemory.AlignedFree(cOuter);
+            NativeMemory.AlignedFree(cRefScalar);
+            NativeMemory.AlignedFree(cRefGemm);
+        }
+    }
 }
