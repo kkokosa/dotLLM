@@ -89,9 +89,9 @@ public sealed class BpeTokenizer : ITokenizer
         int bosId, int eosId, string? preTokenizerType = null)
     {
         var specialTokens = BuildSpecialTokenTable(tokens, tokenTypes);
-        var preRegex = TiktokenPreTokenizer.GetRegex(preTokenizerType);
+        var preRegexes = TiktokenPreTokenizer.GetRegexes(preTokenizerType);
         return new BpeTokenizer(
-            new Gpt2TiktokenEncoding(tokens, merges, tokenTypes, preRegex),
+            new Gpt2TiktokenEncoding(tokens, merges, tokenTypes, preRegexes),
             specialTokens, bosId, eosId, tokens.Length);
     }
 

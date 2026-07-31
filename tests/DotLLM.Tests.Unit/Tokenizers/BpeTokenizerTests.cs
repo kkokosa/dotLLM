@@ -412,29 +412,50 @@ public class BpeTokenizerTests
     // -------------------------------------------------------------------------
 
     [Fact]
-    public void TiktokenPreTokenizer_ReturnsRegexForKnownTypes()
+    public void TiktokenPreTokenizer_ReturnsPipelineForKnownTypes()
     {
-        Assert.NotNull(TiktokenPreTokenizer.GetRegex("gpt2"));
-        Assert.NotNull(TiktokenPreTokenizer.GetRegex("default"));
-        Assert.NotNull(TiktokenPreTokenizer.GetRegex("llama3"));
-        Assert.NotNull(TiktokenPreTokenizer.GetRegex("llama-bpe"));
-        Assert.NotNull(TiktokenPreTokenizer.GetRegex("deepseek-llm"));
-        Assert.NotNull(TiktokenPreTokenizer.GetRegex("deepseek-coder"));
-        Assert.NotNull(TiktokenPreTokenizer.GetRegex("command-r"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegexes("gpt2"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegexes("default"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegexes("llama3"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegexes("llama-bpe"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegexes("deepseek-llm"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegexes("deepseek-coder"));
+        Assert.NotNull(TiktokenPreTokenizer.GetRegexes("command-r"));
+    }
+
+    [Theory]
+    [InlineData("starcoder")]
+    [InlineData("refact")]
+    [InlineData("command-r")]
+    [InlineData("smollm")]
+    [InlineData("codeshell")]
+    [InlineData("exaone")]
+    [InlineData("minerva")]
+    [InlineData("mellum2")]
+    public void StarCoderFamily_IsATwoStagePipeline(string preType)
+    {
+        // llama.cpp falls these eight pre-types through one case block whose regex_exprs has two
+        // entries: \p{N} to isolate every digit, then the main pattern. A single-expression
+        // mapping cannot represent it, and `smollm` being absent entirely is what made SmolLM
+        // silently run with no pre-tokenization at all (issue #237).
+        var pipeline = TiktokenPreTokenizer.GetRegexes(preType);
+        Assert.NotNull(pipeline);
+        Assert.Equal(2, pipeline!.Length);
+        Assert.Equal(@"\p{N}", pipeline[0].ToString());
     }
 
     [Fact]
     public void TiktokenPreTokenizer_ReturnsNullForUnknownType()
     {
-        Assert.Null(TiktokenPreTokenizer.GetRegex(null));
-        Assert.Null(TiktokenPreTokenizer.GetRegex(""));
-        Assert.Null(TiktokenPreTokenizer.GetRegex("unknown-model"));
+        Assert.Null(TiktokenPreTokenizer.GetRegexes(null));
+        Assert.Null(TiktokenPreTokenizer.GetRegexes(""));
+        Assert.Null(TiktokenPreTokenizer.GetRegexes("unknown-model"));
     }
 
     [Fact]
     public void Gpt2Regex_SplitsWordsAndSpaces()
     {
-        var regex = TiktokenPreTokenizer.GetRegex("gpt2")!;
+        var regex = TiktokenPreTokenizer.GetRegexes("gpt2")![0];
         var matches = regex.Matches("hello world");
         // "hello" and " world"
         Assert.Equal(2, matches.Count);
@@ -445,7 +466,7 @@ public class BpeTokenizerTests
     [Fact]
     public void Llama3Regex_SplitsContractions()
     {
-        var regex = TiktokenPreTokenizer.GetRegex("llama3")!;
+        var regex = TiktokenPreTokenizer.GetRegexes("llama3")![0];
         var matches = regex.Matches("I'm happy");
         // "I", "'m", " happy"
         Assert.True(matches.Count >= 3);
@@ -454,9 +475,24 @@ public class BpeTokenizerTests
     }
 
     [Fact]
+    public void PreTokenizationRegexes_MatchWhitespaceOnRawText()
+    {
+        // Guards the ordering bug behind #237: pre-tokenization must run on RAW text, before the
+        // GPT-2 byte-level mapping. That mapping sends 0x20 to U+0120, so a regex applied after it
+        // can never match \s, a leading ' ?', or \s+(?!\S) -- every whitespace-dependent
+        // alternative dies silently, and the tokenizer degrades into near-correct output.
+        // If this fails, the space is no longer reaching the pattern as a space.
+        var gpt2 = TiktokenPreTokenizer.GetRegexes("gpt2")![0];
+        Assert.Equal(" world", gpt2.Matches("hello world")[1].Value);
+
+        var starcoder = TiktokenPreTokenizer.GetRegexes("smollm")![1];
+        Assert.Equal(" world", starcoder.Matches("hello world")[1].Value);
+    }
+
+    [Fact]
     public void Llama3Regex_GroupsDigitsInThrees()
     {
-        var regex = TiktokenPreTokenizer.GetRegex("llama3")!;
+        var regex = TiktokenPreTokenizer.GetRegexes("llama3")![0];
         var matches = regex.Matches("12345");
         // "123", "45"
         Assert.Equal(2, matches.Count);

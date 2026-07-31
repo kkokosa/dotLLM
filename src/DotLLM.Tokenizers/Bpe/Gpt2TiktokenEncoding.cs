@@ -81,12 +81,22 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
     private readonly int _unkId;
 
     /// <summary>
-    /// Compiled pre-tokenization regex that splits input at word/punctuation boundaries
-    /// before BPE merges. Null means no pre-tokenization (whole text = one segment).
+    /// Ordered pre-tokenization pipeline, applied to RAW text before byte-encoding: each expression
+    /// further splits the spans the previous one produced, so merges cannot cross a boundary the
+    /// model was trained to respect.
     /// </summary>
-    private readonly Regex? _preRegex;
+    /// <remarks>
+    /// <para><see langword="null"/> or empty means <b>no pre-tokenization at all</b> — the whole
+    /// input becomes one segment and merges run across it. That is rarely what an unrecognized
+    /// pre-type should mean: the resulting stream mostly matches the reference and diverges at a
+    /// handful of sites, which is the failure mode that motivated this change (see #237).</para>
+    /// <para>An array rather than a single expression because a pre-type maps to a <i>pipeline</i>:
+    /// the StarCoder/SmolLM family isolates every digit before applying its main pattern, and
+    /// collapsing that to one expression silently mis-tokenizes.</para>
+    /// </remarks>
+    private readonly Regex[]? _preRegexes;
 
-    internal Gpt2TiktokenEncoding(string[] tokens, string[] merges, int[]? tokenTypes, Regex? preRegex = null)
+    internal Gpt2TiktokenEncoding(string[] tokens, string[] merges, int[]? tokenTypes, Regex[]? preRegexes = null)
     {
         _idToToken = tokens;
         _byteToTokenId = BpeCore.BuildByteToTokenId(tokens);
@@ -117,49 +127,124 @@ internal sealed class Gpt2TiktokenEncoding : IBpeEncoding
                 mergeRanks[(idA, idB)] = rank;
         }
         _mergeRanks = mergeRanks;
-        _preRegex = preRegex;
+        _preRegexes = preRegexes;
     }
 
+    /// <summary>
+    /// Pre-tokenizes the <b>raw</b> text, then byte-encodes and BPEs each segment independently
+    /// so merges cannot cross segment boundaries.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Order matters: split first, byte-encode second.</b> The GPT-2 byte-level mapping
+    /// sends byte 0x20 to U+0120, not to a literal space, so a pre-tokenization regex applied to
+    /// already-encoded text can never match <c>\s</c>, a leading <c>' ?'</c>, or
+    /// <c>\s+(?!\S)</c> — every whitespace-dependent alternative in every pattern silently dies.
+    /// llama.cpp splits the raw text and byte-encodes each segment afterwards; this mirrors that.
+    /// </para>
+    /// </remarks>
     public int[] Encode(string text)
     {
-        // Convert text to GPT-2 byte-level Unicode encoding:
-        // each UTF-8 byte of the input maps to a specific Unicode char (byte_encoder in GPT-2).
-        // Uses ArrayPool for both byte[] and char[] to avoid heap allocations.
-        int utf8Len = Encoding.UTF8.GetByteCount(text);
+        if (_preRegexes is null || _preRegexes.Length == 0)
+            return EncodeRawSegment(text.AsSpan());
+
+        var spans = PreTokenize(text.AsSpan(), _preRegexes);
+        var result = new List<int>(text.Length);
+        foreach ((int start, int length) in spans)
+            EncodeRawSegmentInto(text.AsSpan(start, length), result);
+        return result.ToArray();
+    }
+
+    /// <summary>
+    /// Maps a raw text segment through the GPT-2 byte-level encoding (each UTF-8 byte becomes a
+    /// specific Unicode char) and BPEs it. Uses <see cref="ArrayPool{T}"/> for both buffers.
+    /// </summary>
+    private int[] EncodeRawSegment(ReadOnlySpan<char> raw)
+    {
+        if (raw.IsEmpty) return [];
+
+        int utf8Len = Encoding.UTF8.GetByteCount(raw);
         byte[] rentedUtf8 = ArrayPool<byte>.Shared.Rent(utf8Len);
         try
         {
-            Encoding.UTF8.GetBytes(text, rentedUtf8);
+            Encoding.UTF8.GetBytes(raw, rentedUtf8);
             char[] rentedGpt2 = ArrayPool<char>.Shared.Rent(utf8Len);
             try
             {
                 for (int i = 0; i < utf8Len; i++)
                     rentedGpt2[i] = Gpt2ByteToUnicode[rentedUtf8[i]];
-                ReadOnlySpan<char> gpt2Text = rentedGpt2.AsSpan(0, utf8Len);
-
-                if (_preRegex is null)
-                    return EncodeSegment(gpt2Text);
-
-                // Pre-tokenize: split at word/punctuation boundaries using the model's regex,
-                // then BPE each segment independently so merges cannot cross boundaries.
-                // Tokens are collected directly into the list — no intermediate int[] per segment.
-                var result = new List<int>(gpt2Text.Length);
-                foreach (var match in _preRegex.EnumerateMatches(gpt2Text))
-                {
-                    var segment = gpt2Text.Slice(match.Index, match.Length);
-                    EncodeSegmentInto(segment, result);
-                }
-                return result.ToArray();
+                return EncodeSegment(rentedGpt2.AsSpan(0, utf8Len));
             }
-            finally
-            {
-                ArrayPool<char>.Shared.Return(rentedGpt2);
-            }
+            finally { ArrayPool<char>.Shared.Return(rentedGpt2); }
         }
-        finally
+        finally { ArrayPool<byte>.Shared.Return(rentedUtf8); }
+    }
+
+    /// <summary>
+    /// <see cref="EncodeRawSegment"/>, appending directly to <paramref name="dest"/> to avoid an
+    /// intermediate <c>int[]</c> per segment.
+    /// </summary>
+    private void EncodeRawSegmentInto(ReadOnlySpan<char> raw, List<int> dest)
+    {
+        if (raw.IsEmpty) return;
+
+        int utf8Len = Encoding.UTF8.GetByteCount(raw);
+        byte[] rentedUtf8 = ArrayPool<byte>.Shared.Rent(utf8Len);
+        try
         {
-            ArrayPool<byte>.Shared.Return(rentedUtf8);
+            Encoding.UTF8.GetBytes(raw, rentedUtf8);
+            char[] rentedGpt2 = ArrayPool<char>.Shared.Rent(utf8Len);
+            try
+            {
+                for (int i = 0; i < utf8Len; i++)
+                    rentedGpt2[i] = Gpt2ByteToUnicode[rentedUtf8[i]];
+                EncodeSegmentInto(rentedGpt2.AsSpan(0, utf8Len), dest);
+            }
+            finally { ArrayPool<char>.Shared.Return(rentedGpt2); }
         }
+        finally { ArrayPool<byte>.Shared.Return(rentedUtf8); }
+    }
+
+    /// <summary>
+    /// Splits <paramref name="text"/> into pre-token spans by applying each regex in
+    /// <paramref name="pipeline"/> in order, every stage further splitting the previous stage's
+    /// spans.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Unmatched text is preserved as its own span.</b> Matching only, and encoding just
+    /// the matches, silently drops any input a pattern does not cover. That is safe for the GPT-2
+    /// expression, which ends in <c>|\s+</c> and therefore matches everything — but not for the
+    /// StarCoder/SmolLM pattern, which deliberately omits that alternative. Dropping characters
+    /// there would corrupt the token stream rather than merely re-split it.</para>
+    /// <para>Mirrors llama.cpp's <c>unicode_regex_split</c> over its <c>regex_exprs</c> list.</para>
+    /// </remarks>
+    private static List<(int Start, int Length)> PreTokenize(ReadOnlySpan<char> text, Regex[] pipeline)
+    {
+        var spans = new List<(int Start, int Length)>(text.Length) { (0, text.Length) };
+
+        foreach (Regex regex in pipeline)
+        {
+            var next = new List<(int Start, int Length)>(spans.Count * 2);
+            foreach ((int start, int length) in spans)
+            {
+                if (length == 0) continue;
+
+                int cursor = 0;
+                foreach (ValueMatch match in regex.EnumerateMatches(text.Slice(start, length)))
+                {
+                    if (match.Length == 0) continue;
+                    if (match.Index > cursor)
+                        next.Add((start + cursor, match.Index - cursor));   // unmatched gap
+                    next.Add((start + match.Index, match.Length));
+                    cursor = match.Index + match.Length;
+                }
+
+                if (cursor < length)
+                    next.Add((start + cursor, length - cursor));            // unmatched tail
+            }
+            spans = next;
+        }
+
+        return spans;
     }
 
     /// <summary>
