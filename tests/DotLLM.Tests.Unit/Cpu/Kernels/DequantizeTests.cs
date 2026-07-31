@@ -217,6 +217,8 @@ public sealed unsafe class DequantizeTests
 
             Dequantize.DequantizeQ8_0Scalar(ptr, totalElements, scalarDest);
 
+            // Deliberately NOT a [SkippableFact]: the scalar and dispatch assertions below run
+            // on every machine, so gating only the AVX2 half keeps that coverage where AVX2 is absent.
             if (Avx2.IsSupported)
             {
                 Dequantize.DequantizeQ8_0Avx2(ptr, totalElements, simdDest);
@@ -304,6 +306,8 @@ public sealed unsafe class DequantizeTests
 
             Dequantize.DequantizeQ5_0Scalar(ptr, totalElements, scalarDest);
 
+            // Deliberately NOT a [SkippableFact]: the scalar and dispatch assertions below run
+            // on every machine, so gating only the AVX2 half keeps that coverage where AVX2 is absent.
             if (Avx2.IsSupported)
             {
                 Dequantize.DequantizeQ5_0Avx2(ptr, totalElements, simdDest);

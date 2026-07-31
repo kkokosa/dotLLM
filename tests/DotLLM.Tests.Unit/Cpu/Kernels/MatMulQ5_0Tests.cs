@@ -52,13 +52,13 @@ public sealed unsafe class MatMulQ5_0Tests
 
     // ──────────────────── Q5_0 × Q8_0 scalar matches AVX2 ────────────────────
 
-    [Theory]
+    [SkippableTheory]
     [InlineData(1)]
     [InlineData(4)]
     [InlineData(18)]
     public void VecDotQ5_0Q8_0_ScalarMatchesAvx2(int blockCount)
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         var rng = new Random(42);
         nint q5Ptr = AllocRandomQ5_0Blocks(blockCount, rng);

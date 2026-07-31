@@ -106,11 +106,10 @@ public sealed unsafe class MatMulTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void VecDotQ8_0_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported)
-            return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         var rng = new Random(42);
         const int blockCount = 16;
@@ -137,7 +136,7 @@ public sealed unsafe class MatMulTests
 
     // ──────────────────── VecDot optimized AVX2 accuracy ────────────────────
 
-    [Theory]
+    [SkippableTheory]
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(7)]
@@ -146,8 +145,7 @@ public sealed unsafe class MatMulTests
     [InlineData(344)]
     public void VecDotQ8_0_OptimizedAvx2_MatchesScalar(int blockCount)
     {
-        if (!Avx2.IsSupported)
-            return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         var rng = new Random(42);
         nuint totalBytes = (nuint)(blockCount * Q8_0BlockBytes);
@@ -179,7 +177,7 @@ public sealed unsafe class MatMulTests
     /// range (|x|,|w| &lt;= 127 bounds each lane at 32258 &lt; 32767), so results must match the
     /// non-VNNI kernel exactly — not merely within tolerance.
     /// </summary>
-    [Theory]
+    [SkippableTheory]
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(3)]
@@ -189,8 +187,7 @@ public sealed unsafe class MatMulTests
     [InlineData(344)]
     public void VecDotQ8_0_Vnni4Rows_BitIdenticalToAvx512(int blockCount)
     {
-        if (!Avx512BW.IsSupported || !AvxVnni.IsSupported)
-            return;
+        Skip.IfNot(Avx512BW.IsSupported && AvxVnni.IsSupported, "Requires AVX-512BW + AVX-VNNI.");
 
         var rng = new Random(1234);
         nuint rowBytes = (nuint)(blockCount * Q8_0BlockBytes);
@@ -227,7 +224,7 @@ public sealed unsafe class MatMulTests
         }
     }
 
-    [Theory]
+    [SkippableTheory]
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(3)]
@@ -237,8 +234,7 @@ public sealed unsafe class MatMulTests
     [InlineData(344)]
     public void VecDotQ8_0_Avx512_MatchesScalar(int blockCount)
     {
-        if (!Avx512BW.IsSupported)
-            return;
+        Skip.IfNot(Avx512BW.IsSupported, "Requires AVX-512BW.");
 
         var rng = new Random(42);
         nuint totalBytes = (nuint)(blockCount * Q8_0BlockBytes);
@@ -264,14 +260,13 @@ public sealed unsafe class MatMulTests
 
     // ──────────────────── Multi-row (4-row) accuracy ────────────────────
 
-    [Theory]
+    [SkippableTheory]
     [InlineData(16)]
     [InlineData(128)]
     [InlineData(344)]
     public void VecDotQ8_0_4Row_MatchesSingleRow(int blockCount)
     {
-        if (!Avx2.IsSupported)
-            return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         var rng = new Random(42);
         nuint rowBytes = (nuint)(blockCount * Q8_0BlockBytes);
@@ -317,11 +312,10 @@ public sealed unsafe class MatMulTests
 
     // ──────────────────── VecDot edge cases ────────────────────
 
-    [Fact]
+    [SkippableFact]
     public void VecDotQ8_0_AllZeroScales()
     {
-        if (!Avx2.IsSupported)
-            return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int blockCount = 4;
         nuint totalBytes = (nuint)(blockCount * Q8_0BlockBytes);
@@ -357,11 +351,10 @@ public sealed unsafe class MatMulTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void VecDotQ8_0_MaxValues()
     {
-        if (!Avx2.IsSupported)
-            return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int blockCount = 4;
         nuint totalBytes = (nuint)(blockCount * Q8_0BlockBytes);
@@ -396,15 +389,14 @@ public sealed unsafe class MatMulTests
         }
     }
 
-    [Theory]
+    [SkippableTheory]
     [InlineData(1)]
     [InlineData(3)]
     [InlineData(5)]
     [InlineData(7)]
     public void VecDotQ8_0_OddBlockCount(int blockCount)
     {
-        if (!Avx2.IsSupported)
-            return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         var rng = new Random(42);
         nuint totalBytes = (nuint)(blockCount * Q8_0BlockBytes);
@@ -421,6 +413,8 @@ public sealed unsafe class MatMulTests
 
             Assert.Equal(scalar, avx2, 1e-2f);
 
+            // Extra assertion, not a gate: the AVX2 comparison above already ran, so this only
+            // adds AVX-512 coverage where the ISA exists rather than replacing anything.
             if (Avx512BW.IsSupported)
             {
                 float avx512 = MatMul.VecDotQ8_0Avx512((byte*)aPtr, (byte*)bPtr, blockCount);
@@ -497,11 +491,10 @@ public sealed unsafe class MatMulTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void QuantizeF32ToQ8_0_Avx2_MatchesScalar()
     {
-        if (!Avx2.IsSupported)
-            return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         var rng = new Random(42);
         const int k = 1024; // 32 blocks

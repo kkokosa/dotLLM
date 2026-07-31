@@ -127,11 +127,10 @@ public sealed class RoPETests
         Assert.Equal(3f * MathF.Sin(0.01f) + 4f * MathF.Cos(0.01f), vec[3], 1e-5f);
     }
 
-    [Fact]
+    [SkippableFact]
     public void ApplyRotation_ScalarMatchesSIMD()
     {
-        if (!Avx2.IsSupported)
-            return; // SIMD path not available
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int headDim = 128;
         int halfDim = headDim / 2;
@@ -230,11 +229,10 @@ public sealed class RoPETests
         Assert.NotEqual(q[4], q[8], 1e-3f);
     }
 
-    [Fact]
+    [SkippableFact]
     public void Execute_ScalarMatchesSIMD_LargeInput()
     {
-        if (!Avx2.IsSupported)
-            return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int headDim = 128;
         const int numHeads = 32;

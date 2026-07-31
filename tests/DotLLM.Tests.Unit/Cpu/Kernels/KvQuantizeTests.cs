@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 using DotLLM.Cpu.Kernels;
 using Xunit;
 
@@ -37,11 +38,10 @@ public sealed unsafe class KvQuantizeTests
             $"Max round-trip error {maxErr} exceeds expected {expectedMaxErr}");
     }
 
-    [Fact]
+    [SkippableFact]
     public void Q4_0_Avx2_MatchesScalar()
     {
-        if (!System.Runtime.Intrinsics.X86.Avx2.IsSupported)
-            return; // Skip on non-AVX2 hardware
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         float[] input = GenerateTestData(BlockSize * 8);
         byte[] quantScalar = new byte[KvQuantize.Q4_0BlockBytes * 8];
@@ -77,11 +77,10 @@ public sealed unsafe class KvQuantizeTests
             Assert.Equal(0f, output[i]);
     }
 
-    [Fact]
+    [SkippableFact]
     public void Q4_0_Dequant_Avx2_MatchesScalar()
     {
-        if (!System.Runtime.Intrinsics.X86.Avx2.IsSupported)
-            return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         float[] input = GenerateTestData(BlockSize * 4);
         byte[] quantized = new byte[KvQuantize.Q4_0BlockBytes * 4];
@@ -135,11 +134,10 @@ public sealed unsafe class KvQuantizeTests
             $"Max round-trip error {maxErr} exceeds expected {expectedMaxErr}");
     }
 
-    [Fact]
+    [SkippableFact]
     public void Q8_0_Dequant_Avx2_MatchesScalar()
     {
-        if (!System.Runtime.Intrinsics.X86.Avx2.IsSupported)
-            return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         float[] input = GenerateTestData(BlockSize * 4);
         byte[] quantized = new byte[KvQuantize.Q8_0BlockBytes * 4];

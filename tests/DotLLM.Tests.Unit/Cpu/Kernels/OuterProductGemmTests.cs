@@ -91,7 +91,7 @@ public sealed unsafe class OuterProductGemmTests
 
     // ──────────────────── AVX2 microkernel ────────────────────
 
-    [Theory]
+    [SkippableTheory]
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(16)]
@@ -100,8 +100,7 @@ public sealed unsafe class OuterProductGemmTests
     [InlineData(128)]  // 4096/32
     public void OuterProductAvx2_4x3_MatchesScalar(int blockCount)
     {
-        if (!Avx2.IsSupported)
-            return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         var rng = new Random(42);
         int m = 4;

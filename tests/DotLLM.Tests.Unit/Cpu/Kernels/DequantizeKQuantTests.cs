@@ -138,10 +138,10 @@ public sealed unsafe class DequantizeKQuantTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void Q6_K_ScalarMatchesAvx2_RandomBlocks()
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int blockCount = 8;
         const int totalElements = blockCount * KQuantGroupSize;
@@ -237,10 +237,10 @@ public sealed unsafe class DequantizeKQuantTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void Q4_K_ScalarMatchesAvx2_RandomBlocks()
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int blockCount = 8;
         const int totalElements = blockCount * KQuantGroupSize;
@@ -312,10 +312,10 @@ public sealed unsafe class DequantizeKQuantTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void Q5_K_ScalarMatchesAvx2_RandomBlocks()
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int blockCount = 8;
         const int totalElements = blockCount * KQuantGroupSize;

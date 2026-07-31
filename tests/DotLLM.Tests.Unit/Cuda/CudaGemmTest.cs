@@ -20,6 +20,9 @@ public class CudaGemmTest : IDisposable
     public CudaGemmTest(ITestOutputHelper output)
     {
         _out = output;
+        // Intentional: this is the fixture constructor, not a test. Leaving the handles null lets
+        // construction succeed on a machine without a GPU; each test then reports as skipped via
+        // its own Skip.IfNot(CudaDevice.IsAvailable(), ...).
         if (!CudaDevice.IsAvailable()) return;
         _ctx = CudaContext.Create(0);
         _stream = CudaStream.Create();

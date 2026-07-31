@@ -67,13 +67,13 @@ public sealed unsafe class MatMulQ8_1Tests
 
     // ──────────────────── Q8_1 quantization: scalar matches AVX2 ────────────────────
 
-    [Theory]
+    [SkippableTheory]
     [InlineData(32)]
     [InlineData(576)]
     [InlineData(1536)]
     public void QuantizeF32ToQ8_1_ScalarMatchesAvx2(int elementCount)
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         var rng = new Random(42);
         float* src = (float*)NativeMemory.AlignedAlloc((nuint)(elementCount * sizeof(float)), 64);
@@ -168,13 +168,13 @@ public sealed unsafe class MatMulQ8_1Tests
 
     // ──────────────────── Q5_0 × Q8_1: scalar matches AVX2 ────────────────────
 
-    [Theory]
+    [SkippableTheory]
     [InlineData(1)]
     [InlineData(4)]
     [InlineData(18)]
     public void VecDotQ5_0Q8_1_ScalarMatchesAvx2(int blockCount)
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         var rng = new Random(42);
         nint q5Ptr = AllocRandomQ5_0Blocks(blockCount, rng);
@@ -195,10 +195,10 @@ public sealed unsafe class MatMulQ8_1Tests
 
     // ──────────────────── Q5_0 × Q8_1: 4-row matches single row ────────────────────
 
-    [Fact]
+    [SkippableFact]
     public void VecDotQ5_0Q8_1_4Row_MatchesSingleRow()
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int blockCount = 18;
         var rng = new Random(42);
@@ -237,14 +237,14 @@ public sealed unsafe class MatMulQ8_1Tests
 
     // ──────────────────── Q5_0 × Q8_1 AVX2: 2-block unroll odd/even block counts ────────────────────
 
-    [Theory]
+    [SkippableTheory]
     [InlineData(1)]   // odd, single-block tail only
     [InlineData(3)]   // odd, 1 unrolled pair + 1 tail
     [InlineData(18)]  // even, 9 unrolled pairs, no tail
     [InlineData(19)]  // odd, 9 unrolled pairs + 1 tail
     public void VecDotQ5_0Q8_1_2BlockUnroll_OddAndEvenCounts(int blockCount)
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         var rng = new Random(42);
         nint q5Ptr = AllocRandomQ5_0Blocks(blockCount, rng);

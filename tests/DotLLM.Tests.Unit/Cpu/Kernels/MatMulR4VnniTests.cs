@@ -29,11 +29,11 @@ public sealed unsafe class MatMulR4VnniTests
 
     public static TheoryData<int> DiscriminatingBlockCounts() => [1, 2, 3, 8, 17, 18, 48, 128];
 
-    [Theory]
+    [SkippableTheory]
     [MemberData(nameof(DiscriminatingBlockCounts))]
     public void VecDotQ8_0Vnni_4RowsR4_MatchesScalarR4(int blockCount)
     {
-        if (!VnniAvailable) return;   // dispatch wiring is pinned by DispatchPrefersAvx2Tier
+        Skip.IfNot(VnniAvailable, "Requires AVX-512BW + AVX-VNNI.");   // dispatch wiring is pinned by DispatchPrefersAvx2Tier
 
         RunSingleGroup(blockCount, seed: 42, out float[] vnni, out float[] scalar, out _);
 
@@ -41,11 +41,11 @@ public sealed unsafe class MatMulR4VnniTests
             AssertClose(scalar[r], vnni[r], blockCount, $"row {r}");
     }
 
-    [Theory]
+    [SkippableTheory]
     [MemberData(nameof(DiscriminatingBlockCounts))]
     public void VecDotQ8_0Vnni_4RowsR4_MatchesAvx2R4(int blockCount)
     {
-        if (!VnniAvailable) return;   // dispatch wiring is pinned by DispatchPrefersAvx2Tier
+        Skip.IfNot(VnniAvailable, "Requires AVX-512BW + AVX-VNNI.");   // dispatch wiring is pinned by DispatchPrefersAvx2Tier
 
         RunSingleGroup(blockCount, seed: 7, out float[] vnni, out _, out float[] avx2);
 
@@ -59,11 +59,11 @@ public sealed unsafe class MatMulR4VnniTests
     /// untouched — which also proves the kernel reads each row from its own interleaved offset
     /// rather than accidentally aliasing one row four times.
     /// </summary>
-    [Theory]
+    [SkippableTheory]
     [MemberData(nameof(DiscriminatingBlockCounts))]
     public void VecDotQ8_0Vnni_4RowsR4_DetectsPerturbedWeight(int blockCount)
     {
-        if (!VnniAvailable) return;   // dispatch wiring is pinned by DispatchPrefersAvx2Tier
+        Skip.IfNot(VnniAvailable, "Requires AVX-512BW + AVX-VNNI.");   // dispatch wiring is pinned by DispatchPrefersAvx2Tier
 
         const int perturbedRow = 2;
         int k = blockCount * Q8_0GroupSize;
@@ -153,11 +153,11 @@ public sealed unsafe class MatMulR4VnniTests
     /// dispatch changed, which given the measurements would be a performance regression rather
     /// than a correctness one, and would otherwise go unnoticed.
     /// </summary>
-    [Theory]
+    [SkippableTheory]
     [MemberData(nameof(DiscriminatingBlockCounts))]
     public void ComputeRowsQ8_0Interleaved_DispatchPrefersAvx2Tier(int blockCount)
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         int k = blockCount * Q8_0GroupSize;
 

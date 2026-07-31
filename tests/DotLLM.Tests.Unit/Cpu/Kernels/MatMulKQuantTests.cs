@@ -56,10 +56,10 @@ public sealed unsafe class MatMulKQuantTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void QuantizeF32ToQ8_K_Avx2MatchesScalar()
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int k = 512; // 2 blocks
         var rng = new Random(42);
@@ -153,10 +153,10 @@ public sealed unsafe class MatMulKQuantTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void VecDotQ4_K_Q8_K_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int superBlockCount = 4;
         var rng = new Random(42);
@@ -216,10 +216,10 @@ public sealed unsafe class MatMulKQuantTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void VecDotQ6_K_Q8_K_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int superBlockCount = 4;
         var rng = new Random(42);
@@ -280,10 +280,10 @@ public sealed unsafe class MatMulKQuantTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void VecDotQ5_K_Q8_K_ScalarMatchesAvx2()
     {
-        if (!Avx2.IsSupported) return;
+        Skip.IfNot(Avx2.IsSupported, "Requires AVX2.");
 
         const int superBlockCount = 4;
         var rng = new Random(42);
