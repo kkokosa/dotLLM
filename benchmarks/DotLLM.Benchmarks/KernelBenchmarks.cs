@@ -243,6 +243,7 @@ public unsafe class GemmBenchmarks
 
     private nint _weightsQ8;
     private nint _weightsF32;
+    private nint _weightsF16;
     private float[] _input = null!;
     private float[] _result = null!;
     private nint _inputQ8Scratch;
@@ -278,6 +279,12 @@ public unsafe class GemmBenchmarks
         for (long i = 0; i < (long)M * K; i++)
             fp[i] = rng.NextSingle() * 2f - 1f;
 
+        // F16 weights: M × K
+        _weightsF16 = (nint)NativeMemory.AlignedAlloc((nuint)((long)M * K * sizeof(Half)), 64);
+        Half* hp = (Half*)_weightsF16;
+        for (long i = 0; i < (long)M * K; i++)
+            hp[i] = (Half)(rng.NextSingle() * 2f - 1f);
+
         // Input: N × K
         _input = new float[N * K];
         for (int i = 0; i < _input.Length; i++)
@@ -300,6 +307,7 @@ public unsafe class GemmBenchmarks
     {
         NativeMemory.AlignedFree((void*)_weightsQ8);
         NativeMemory.AlignedFree((void*)_weightsF32);
+        NativeMemory.AlignedFree((void*)_weightsF16);
         NativeMemory.AlignedFree((void*)_inputQ8Scratch);
     }
 
@@ -342,5 +350,22 @@ public unsafe class GemmBenchmarks
     {
         fixed (float* inp = _input, res = _result)
             MatMul.GemmF32((float*)_weightsF32, inp, res, M, K, N);
+    }
+
+    [Benchmark]
+    public void SequentialGemvF16()
+    {
+        fixed (float* inp = _input, res = _result)
+        {
+            for (int t = 0; t < N; t++)
+                MatMul.GemvF16(_weightsF16, inp + t * K, res + t * M, M, K);
+        }
+    }
+
+    [Benchmark]
+    public void GemmF16()
+    {
+        fixed (float* inp = _input, res = _result)
+            MatMul.GemmF16(_weightsF16, inp, res, M, K, N);
     }
 }
