@@ -1595,6 +1595,12 @@ public static unsafe partial class MatMul
     /// Uses cache-tiled traversal: weight-tile-first so tiles stay in L2 across tokens.
     /// Rents one scratch buffer for dequantization, avoiding per-call ArrayPool churn.
     /// </summary>
+    /// <remarks>
+    /// Row-outer / token-inner is load-bearing: the F16→F32 conversion of a weight row depends
+    /// only on the row, so converting once and dotting against all N tokens keeps the conversion
+    /// cost at O(M·K) instead of O(N·M·K). Hoisting the token loop back out would silently
+    /// reintroduce an N-fold redundant <see cref="TensorPrimitives.ConvertToSingle"/>.
+    /// </remarks>
     [SkipLocalsInit]
     public static void GemmF16(nint weights, float* b, float* c, int m, int k, int n)
     {
@@ -1605,27 +1611,23 @@ public static unsafe partial class MatMul
         float[] rented = ArrayPool<float>.Shared.Rent(k);
         try
         {
-            fixed (float* rowBuf = rented)
+            // Managed span over the pooled scratch — no pin needed (cf. GemvF16).
+            var destRow = rented.AsSpan(0, k);
+
+            for (int mStart = 0; mStart < m; mStart += tileM)
             {
-                for (int mStart = 0; mStart < m; mStart += tileM)
+                int tileRows = Math.Min(tileM, m - mStart);
+                Half* tileWeightsHalf = weightsHalf + (long)mStart * k;
+
+                for (int row = 0; row < tileRows; row++)
                 {
-                    int tileRows = Math.Min(tileM, m - mStart);
-                    Half* tileWeightsHalf = weightsHalf + (long)mStart * k;
+                    var srcRow = new ReadOnlySpan<Half>(tileWeightsHalf + row * k, k);
+                    TensorPrimitives.ConvertToSingle(srcRow, destRow);
 
+                    float* outCol = c + mStart + row;
                     for (int t = 0; t < n; t++)
-                    {
-                        float* xPtr = b + t * k;
-                        float* outPtr = c + t * m + mStart;
-                        var xSpan = new ReadOnlySpan<float>(xPtr, k);
-                        var destRow = new Span<float>(rowBuf, k);
-
-                        for (int row = 0; row < tileRows; row++)
-                        {
-                            var srcRow = new ReadOnlySpan<Half>(tileWeightsHalf + row * k, k);
-                            TensorPrimitives.ConvertToSingle(srcRow, destRow);
-                            outPtr[row] = TensorPrimitives.Dot(destRow, xSpan);
-                        }
-                    }
+                        outCol[(long)t * m] = TensorPrimitives.Dot(
+                            destRow, new ReadOnlySpan<float>(b + (long)t * k, k));
                 }
             }
         }
@@ -2505,17 +2507,18 @@ public static unsafe partial class MatMul
             int mStart = tile * ctx.TileM;
             int tileRows = Math.Min(ctx.TileM, ctx.M - mStart);
             Half* tileWeightsHalf = weightsHalf + (long)mStart * ctx.K;
-            for (int t = 0; t < ctx.N; t++)
+
+            // Row-outer / token-inner: convert each weight row once, dot against all N tokens.
+            // See the remarks on GemmF16 — token-outer makes ConvertToSingle N-fold redundant.
+            for (int row = 0; row < tileRows; row++)
             {
-                float* xPtr = ctx.B + t * ctx.K;
-                float* outPtr = ctx.C + t * ctx.M + mStart;
-                var xSpan = new ReadOnlySpan<float>(xPtr, ctx.K);
-                for (int row = 0; row < tileRows; row++)
-                {
-                    var srcRow = new ReadOnlySpan<Half>(tileWeightsHalf + row * ctx.K, ctx.K);
-                    TensorPrimitives.ConvertToSingle(srcRow, destRow);
-                    outPtr[row] = TensorPrimitives.Dot(destRow, xSpan);
-                }
+                var srcRow = new ReadOnlySpan<Half>(tileWeightsHalf + row * ctx.K, ctx.K);
+                TensorPrimitives.ConvertToSingle(srcRow, destRow);
+
+                float* outCol = ctx.C + mStart + row;
+                for (int t = 0; t < ctx.N; t++)
+                    outCol[(long)t * ctx.M] = TensorPrimitives.Dot(
+                        destRow, new ReadOnlySpan<float>(ctx.B + (long)t * ctx.K, ctx.K));
             }
         }
     }
