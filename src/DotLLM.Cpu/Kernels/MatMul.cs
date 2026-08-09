@@ -58,7 +58,7 @@ public static unsafe partial class MatMul
 
         for (int row = 0; row < m; row++)
         {
-            var rowSpan = new ReadOnlySpan<float>(a + row * k, k);
+            var rowSpan = new ReadOnlySpan<float>(a + (long)row * k, k);
             result[row] = TensorPrimitives.Dot(rowSpan, xSpan);
         }
     }
@@ -72,7 +72,7 @@ public static unsafe partial class MatMul
         for (int row = 0; row < m; row++)
         {
             float sum = 0;
-            float* rowPtr = a + row * k;
+            float* rowPtr = a + (long)row * k;
             for (int j = 0; j < k; j++)
                 sum += rowPtr[j] * x[j];
             result[row] = sum;
@@ -138,15 +138,15 @@ public static unsafe partial class MatMul
             for (; row + 3 < m; row += 4)
             {
                 VecDotQ8_0Vnni_4Rows(
-                    weightsQ8 + row * rowBytes,
-                    weightsQ8 + (row + 1) * rowBytes,
-                    weightsQ8 + (row + 2) * rowBytes,
-                    weightsQ8 + (row + 3) * rowBytes,
+                    weightsQ8 + (long)row * rowBytes,
+                    weightsQ8 + (long)(row + 1) * rowBytes,
+                    weightsQ8 + (long)(row + 2) * rowBytes,
+                    weightsQ8 + (long)(row + 3) * rowBytes,
                     xQ8, blockCount, result + row);
             }
             for (; row < m; row++)
             {
-                result[row] = VecDotQ8_0Avx512(weightsQ8 + row * rowBytes, xQ8, blockCount);
+                result[row] = VecDotQ8_0Avx512(weightsQ8 + (long)row * rowBytes, xQ8, blockCount);
             }
         }
         else if (Avx512BW.IsSupported)
@@ -156,15 +156,15 @@ public static unsafe partial class MatMul
             for (; row + 3 < m; row += 4)
             {
                 VecDotQ8_0Avx512_4Rows(
-                    weightsQ8 + row * rowBytes,
-                    weightsQ8 + (row + 1) * rowBytes,
-                    weightsQ8 + (row + 2) * rowBytes,
-                    weightsQ8 + (row + 3) * rowBytes,
+                    weightsQ8 + (long)row * rowBytes,
+                    weightsQ8 + (long)(row + 1) * rowBytes,
+                    weightsQ8 + (long)(row + 2) * rowBytes,
+                    weightsQ8 + (long)(row + 3) * rowBytes,
                     xQ8, blockCount, result + row);
             }
             for (; row < m; row++)
             {
-                result[row] = VecDotQ8_0Avx512(weightsQ8 + row * rowBytes, xQ8, blockCount);
+                result[row] = VecDotQ8_0Avx512(weightsQ8 + (long)row * rowBytes, xQ8, blockCount);
             }
         }
         else if (Avx2.IsSupported)
@@ -174,22 +174,22 @@ public static unsafe partial class MatMul
             for (; row + 3 < m; row += 4)
             {
                 VecDotQ8_0Avx2_4Rows(
-                    weightsQ8 + row * rowBytes,
-                    weightsQ8 + (row + 1) * rowBytes,
-                    weightsQ8 + (row + 2) * rowBytes,
-                    weightsQ8 + (row + 3) * rowBytes,
+                    weightsQ8 + (long)row * rowBytes,
+                    weightsQ8 + (long)(row + 1) * rowBytes,
+                    weightsQ8 + (long)(row + 2) * rowBytes,
+                    weightsQ8 + (long)(row + 3) * rowBytes,
                     xQ8, blockCount, result + row);
             }
             for (; row < m; row++)
             {
-                result[row] = VecDotQ8_0Avx2(weightsQ8 + row * rowBytes, xQ8, blockCount);
+                result[row] = VecDotQ8_0Avx2(weightsQ8 + (long)row * rowBytes, xQ8, blockCount);
             }
         }
         else
         {
             for (int row = 0; row < m; row++)
             {
-                result[row] = VecDotQ8_0Scalar(weightsQ8 + row * rowBytes, xQ8, blockCount);
+                result[row] = VecDotQ8_0Scalar(weightsQ8 + (long)row * rowBytes, xQ8, blockCount);
             }
         }
     }
@@ -1564,7 +1564,7 @@ public static unsafe partial class MatMul
             float* rowBuf = stackalloc float[k];
             for (int row = 0; row < m; row++)
             {
-                var srcRow = new ReadOnlySpan<Half>(weightsHalf + row * k, k);
+                var srcRow = new ReadOnlySpan<Half>(weightsHalf + (long)row * k, k);
                 var destRow = new Span<float>(rowBuf, k);
                 TensorPrimitives.ConvertToSingle(srcRow, destRow);
                 y[row] = TensorPrimitives.Dot(destRow, new ReadOnlySpan<float>(x, k));
@@ -1577,7 +1577,7 @@ public static unsafe partial class MatMul
             {
                 for (int row = 0; row < m; row++)
                 {
-                    var srcRow = new ReadOnlySpan<Half>(weightsHalf + row * k, k);
+                    var srcRow = new ReadOnlySpan<Half>(weightsHalf + (long)row * k, k);
                     var destRow = rented.AsSpan(0, k);
                     TensorPrimitives.ConvertToSingle(srcRow, destRow);
                     y[row] = TensorPrimitives.Dot(destRow, new ReadOnlySpan<float>(x, k));
@@ -1619,6 +1619,10 @@ public static unsafe partial class MatMul
                         var xSpan = new ReadOnlySpan<float>(xPtr, k);
                         var destRow = new Span<float>(rowBuf, k);
 
+                        // `row * k` stays in int on purpose (#429 audit): the whole-tensor offset
+                        // is already carried in 64-bit by `tileWeightsHalf`, and
+                        // row < tileRows <= tileM <= 256 (ComputeTileM clamps), so the residual
+                        // product tops out at 255 * k — 4.2M for a 16384-wide 405B tensor.
                         for (int row = 0; row < tileRows; row++)
                         {
                             var srcRow = new ReadOnlySpan<Half>(tileWeightsHalf + row * k, k);
@@ -2512,6 +2516,8 @@ public static unsafe partial class MatMul
                 var xSpan = new ReadOnlySpan<float>(xPtr, ctx.K);
                 for (int row = 0; row < tileRows; row++)
                 {
+                    // See GemmF16: `row * ctx.K` is deliberately int — the tensor-scale offset
+                    // lives in `tileWeightsHalf` (64-bit) and row < tileRows <= ctx.TileM <= 256.
                     var srcRow = new ReadOnlySpan<Half>(tileWeightsHalf + row * ctx.K, ctx.K);
                     TensorPrimitives.ConvertToSingle(srcRow, destRow);
                     outPtr[row] = TensorPrimitives.Dot(destRow, xSpan);
