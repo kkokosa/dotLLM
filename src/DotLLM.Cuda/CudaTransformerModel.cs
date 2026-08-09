@@ -287,7 +287,7 @@ public sealed unsafe class CudaTransformerModel : IModel
         }
 
         // 5. Final RmsNorm (last token only)
-        nint lastHidden = _state.HiddenState + (nint)((seqLen - 1) * hiddenSize * h);
+        nint lastHidden = _state.HiddenState + (nint)((long)(seqLen - 1) * hiddenSize * h);
         _kernels.LaunchRmsNorm(lastHidden, _weights.OutputNormWeight, _state.NormOutput,
             hiddenSize, eps, 1, s);
 

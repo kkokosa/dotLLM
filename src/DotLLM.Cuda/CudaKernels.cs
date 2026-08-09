@@ -604,7 +604,7 @@ public sealed unsafe class CudaKernels : IDisposable
         {
             case QuantizationType.F16:
                 // Already FP16, just copy
-                CudaDriverApi.cuMemcpyDtoD_v2(dst, src, (nuint)(totalElements * 2)).ThrowOnError();
+                CudaDriverApi.cuMemcpyDtoD_v2(dst, src, (nuint)((long)totalElements * 2)).ThrowOnError();
                 return;
 
             case QuantizationType.F32:

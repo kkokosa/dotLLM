@@ -242,7 +242,11 @@ internal sealed class CudaWeights : IDisposable
                                            int outputDim, int inputDim,
                                            List<nint> allocs, CudaKernels kernels, nint stream)
     {
-        int totalElements = outputDim * inputDim;
+        // `checked` rather than widened: every byte size below already casts to long, so this
+        // element count is the only narrow product — but it is also passed as `int` to
+        // LaunchConvertF32ToF16 / LaunchDequantToF16, so a long count could not be honoured
+        // without changing those signatures. Fail loudly instead of wrapping negative (#429).
+        int totalElements = checked(outputDim * inputDim);
 
         if (qt == QuantizationType.F16)
         {
