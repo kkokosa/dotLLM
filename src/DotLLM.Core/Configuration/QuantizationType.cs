@@ -26,6 +26,12 @@ public enum QuantizationType
     /// <summary>8-bit quantization, group size 32.</summary>
     Q8_0 = 8,
 
+    /// <summary>2-bit K-quant, super-block of 256.</summary>
+    Q2_K = 10,
+
+    /// <summary>3-bit K-quant, super-block of 256.</summary>
+    Q3_K = 11,
+
     /// <summary>4-bit K-quant, super-block of 256.</summary>
     Q4_K = 12,
 

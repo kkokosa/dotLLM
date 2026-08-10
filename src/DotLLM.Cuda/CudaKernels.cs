@@ -77,7 +77,10 @@ public sealed unsafe class CudaKernels : IDisposable
     private readonly nint _quantizedGemvQ6_KFunc;
     private readonly nint _dequantQ8_0Func;
     private readonly nint _dequantQ4_0Func;
+    private readonly nint _dequantQ4_1Func;
     private readonly nint _dequantQ5_0Func;
+    private readonly nint _dequantQ5_1Func;
+    private readonly nint _dequantQ3_KFunc;
     private readonly nint _dequantQ4_KFunc;
     private readonly nint _dequantQ5_KFunc;
     private readonly nint _dequantQ6_KFunc;
@@ -150,7 +153,11 @@ public sealed unsafe class CudaKernels : IDisposable
         _quantizedGemvQ6_KFunc = _quantizedGemvModule.GetFunction("quantized_gemv_q6_k");
         _dequantQ8_0Func = _dequantModule.GetFunction("dequant_q8_0_f16");
         _dequantQ4_0Func = _dequantModule.GetFunction("dequant_q4_0_f16");
+        _dequantQ4_1Func = _dequantModule.TryGetFunction("dequant_q4_1_f16");
         _dequantQ5_0Func = _dequantModule.GetFunction("dequant_q5_0_f16");
+        _dequantQ5_1Func = _dequantModule.TryGetFunction("dequant_q5_1_f16");
+        // Q3_K is optional — older PTX builds (pre-Round 12) may not have it.
+        _dequantQ3_KFunc = _dequantModule.TryGetFunction("dequant_q3_k_f16");
         _dequantQ4_KFunc = _dequantModule.GetFunction("dequant_q4_k_f16");
         _dequantQ5_KFunc = _dequantModule.GetFunction("dequant_q5_k_f16");
         _dequantQ6_KFunc = _dequantModule.GetFunction("dequant_q6_k_f16");
@@ -645,6 +652,52 @@ public sealed unsafe class CudaKernels : IDisposable
                 void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
                 uint gridDim = (uint)Math.Min((totalBlocks + 7) / 8, MaxDequantGridSize);
                 CudaDriverApi.cuLaunchKernel(_dequantQ5_0Func,
+                        gridDim, 1, 1, BlockSize, 1, 1,
+                        0, stream, (nint)args, 0).ThrowOnError();
+                return;
+            }
+
+            case QuantizationType.Q4_1:
+            {
+                if (_dequantQ4_1Func == 0)
+                    throw new InvalidOperationException(
+                        "Q4_1 dequant kernel not in dequant.ptx — rebuild PTX from native/kernels/dequant.cu.");
+                int totalBlocks = totalElements / 32;
+                int tbArg = totalBlocks;
+                void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
+                uint gridDim = (uint)Math.Min((totalBlocks + 7) / 8, MaxDequantGridSize);
+                CudaDriverApi.cuLaunchKernel(_dequantQ4_1Func,
+                        gridDim, 1, 1, BlockSize, 1, 1,
+                        0, stream, (nint)args, 0).ThrowOnError();
+                return;
+            }
+
+            case QuantizationType.Q5_1:
+            {
+                if (_dequantQ5_1Func == 0)
+                    throw new InvalidOperationException(
+                        "Q5_1 dequant kernel not in dequant.ptx — rebuild PTX from native/kernels/dequant.cu.");
+                int totalBlocks = totalElements / 32;
+                int tbArg = totalBlocks;
+                void** args = stackalloc void*[] {&srcArg, &dstArg, &tbArg};
+                uint gridDim = (uint)Math.Min((totalBlocks + 7) / 8, MaxDequantGridSize);
+                CudaDriverApi.cuLaunchKernel(_dequantQ5_1Func,
+                        gridDim, 1, 1, BlockSize, 1, 1,
+                        0, stream, (nint)args, 0).ThrowOnError();
+                return;
+            }
+
+            case QuantizationType.Q3_K:
+            {
+                if (_dequantQ3_KFunc == 0)
+                    throw new InvalidOperationException(
+                        "Q3_K dequant kernel not present in dequant.ptx — rebuild PTX from " +
+                        "native/kernels/dequant.cu (Round 12+ adds Q3_K support).");
+                int totalSuperblocks = totalElements / 256;
+                int tsbArg = totalSuperblocks;
+                void** args = stackalloc void*[] {&srcArg, &dstArg, &tsbArg};
+                uint gridDim = (uint)Math.Min(totalSuperblocks, MaxDequantGridSize);
+                CudaDriverApi.cuLaunchKernel(_dequantQ3_KFunc,
                         gridDim, 1, 1, BlockSize, 1, 1,
                         0, stream, (nint)args, 0).ThrowOnError();
                 return;

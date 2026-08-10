@@ -12,6 +12,10 @@ public sealed class CudaModule : IDisposable
     private nint _module;
     private readonly Dictionary<string, nint> _functions = new();
 
+    // Misses are tracked separately from _functions: caching a miss as 0 in _functions
+    // would make GetFunction return 0 for that name instead of throwing.
+    private readonly HashSet<string> _missingFunctions = new();
+
     /// <summary>
     /// Loads a PTX module from a file path.
     /// </summary>
@@ -64,6 +68,35 @@ public sealed class CudaModule : IDisposable
         return func;
     }
 
+    /// <summary>
+    /// Tries to get a kernel function handle by name. Returns <c>0</c> if the symbol is not
+    /// present in the module (e.g. compiled against an older PTX that predates the kernel).
+    /// Caches both hits and misses for subsequent calls.
+    /// </summary>
+    /// <param name="name">The <c>extern "C"</c> kernel function name.</param>
+    /// <returns>The function handle, or <c>0</c> if the symbol was not found.</returns>
+    public nint TryGetFunction(string name)
+    {
+        if (_functions.TryGetValue(name, out nint func))
+            return func;
+        if (_missingFunctions.Contains(name))
+            return 0;
+
+        int result = CudaDriverApi.cuModuleGetFunction(out func, _module, name);
+
+        // Symbol absent from PTX (older build) — record it in the miss set, never in
+        // _functions, so a later GetFunction(name) still performs a real lookup and throws.
+        if (result == CudaResult.NotFound)
+        {
+            _missingFunctions.Add(name);
+            return 0;
+        }
+
+        result.ThrowOnError();
+        _functions[name] = func;
+        return func;
+    }
+
 
     /// <inheritdoc/>
     public void Dispose()
@@ -73,6 +106,7 @@ public sealed class CudaModule : IDisposable
         {
             CudaDriverApi.cuModuleUnload(module);
             _functions.Clear();
+            _missingFunctions.Clear();
         }
     }
 }

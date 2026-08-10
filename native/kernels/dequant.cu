@@ -107,6 +107,130 @@ extern "C" __global__ void __launch_bounds__(256) dequant_q5_0_f16(
     }
 }
 
+// ── Q4_1: 20 bytes per 32 values ────────────────────────────────────
+// struct block_q4_1 { half d; half m; uint8_t qs[16]; };
+// value = d * nibble + m  (unsigned + min, vs Q4_0's signed-after-bias-of-8)
+#define Q4_1_BLOCK_SIZE 32
+#define Q4_1_BLOCK_BYTES 20
+
+extern "C" __global__ void __launch_bounds__(256) dequant_q4_1_f16(
+    const uint8_t* __restrict__ src,
+    half* __restrict__ dst,
+    const int total_blocks)
+{
+    int lane = threadIdx.x % Q4_1_BLOCK_SIZE;
+    int warp_in_block = threadIdx.x / Q4_1_BLOCK_SIZE;
+    int warps_per_grid = (gridDim.x * blockDim.x) / Q4_1_BLOCK_SIZE;
+    int start_block = blockIdx.x * (blockDim.x / Q4_1_BLOCK_SIZE) + warp_in_block;
+
+    for (int block_idx = start_block; block_idx < total_blocks; block_idx += warps_per_grid)
+    {
+        const uint8_t* block = src + (size_t)block_idx * Q4_1_BLOCK_BYTES;
+        float d = __half2float(*reinterpret_cast<const half*>(block));
+        float m = __half2float(*reinterpret_cast<const half*>(block + 2));
+        const uint8_t* qs = block + 4;
+
+        int byte_idx = lane / 2;
+        uint8_t packed = qs[byte_idx];
+        int val = (lane & 1) ? (int)(packed >> 4) : (int)(packed & 0x0F);
+
+        dst[(size_t)block_idx * Q4_1_BLOCK_SIZE + lane] = __float2half(d * (float)val + m);
+    }
+}
+
+// ── Q5_1: 24 bytes per 32 values ────────────────────────────────────
+// struct block_q5_1 { half d; half m; uint32_t qh; uint8_t qs[16]; };
+// value = d * ((qh_bit << 4) | nibble) + m  (5-bit unsigned + min)
+#define Q5_1_BLOCK_SIZE 32
+#define Q5_1_BLOCK_BYTES 24
+
+extern "C" __global__ void __launch_bounds__(256) dequant_q5_1_f16(
+    const uint8_t* __restrict__ src,
+    half* __restrict__ dst,
+    const int total_blocks)
+{
+    int lane = threadIdx.x % Q5_1_BLOCK_SIZE;
+    int warp_in_block = threadIdx.x / Q5_1_BLOCK_SIZE;
+    int warps_per_grid = (gridDim.x * blockDim.x) / Q5_1_BLOCK_SIZE;
+    int start_block = blockIdx.x * (blockDim.x / Q5_1_BLOCK_SIZE) + warp_in_block;
+
+    for (int block_idx = start_block; block_idx < total_blocks; block_idx += warps_per_grid)
+    {
+        const uint8_t* block = src + (size_t)block_idx * Q5_1_BLOCK_BYTES;
+        float d = __half2float(*reinterpret_cast<const half*>(block));
+        float m = __half2float(*reinterpret_cast<const half*>(block + 2));
+        // Read qh (4 bytes, may be unaligned).
+        unsigned int qh = (unsigned int)block[4] | ((unsigned int)block[5] << 8) |
+                          ((unsigned int)block[6] << 16) | ((unsigned int)block[7] << 24);
+        const uint8_t* qs = block + 8;
+
+        int j = lane < 16 ? lane : lane - 16;
+        uint8_t packed = qs[j];
+        int nibble = (lane < 16) ? (packed & 0x0F) : (packed >> 4);
+        int high_bit = (qh >> lane) & 1;
+        int val = nibble | (high_bit << 4);
+
+        dst[(size_t)block_idx * Q5_1_BLOCK_SIZE + lane] = __float2half(d * (float)val + m);
+    }
+}
+
+// ── Q3_K: 110 bytes per 256 values (super-block with 16 sub-blocks of 16) ──
+// struct block_q3_K { uint8_t hmask[32]; uint8_t qs[64]; uint8_t scales[12]; half d; };
+//   hmask: 1 high bit per element (32 × 8 = 256 bits)
+//   qs:    2 low bits per element (64 × 4 = 256)
+//   scales: 16 × 6-bit signed-after-bias-of-32 packed into 12 bytes
+//   d: FP16 super-block delta
+// Per-element value: d × (signed_scale[sub]) × (((hmask_bit << 2) | qs_bits) - 4)
+#define Q3_K_SUPER_BLOCK_SIZE 256
+#define Q3_K_BLOCK_BYTES 110
+
+extern "C" __global__ void __launch_bounds__(256) dequant_q3_k_f16(
+    const uint8_t* __restrict__ src,
+    half* __restrict__ dst,
+    const int total_superblocks)
+{
+    int t = threadIdx.x; // 0..255
+
+    for (int sb_idx = blockIdx.x; sb_idx < total_superblocks; sb_idx += gridDim.x)
+    {
+        const uint8_t* block = src + (size_t)sb_idx * Q3_K_BLOCK_BYTES;
+        const uint8_t* hmask = block;                // 32 bytes
+        const uint8_t* qs = block + 32;              // 64 bytes
+        const uint8_t* scales12 = block + 32 + 64;   // 12 bytes
+        float d = __half2float(*reinterpret_cast<const half*>(block + 32 + 64 + 12));
+
+        // Sub-block index (0..15) for this thread; 16 threads share a sub-block
+        // (= 16 elements per sub-block).
+        int sub = t / 16;
+
+        // Unpack 6-bit scale for this sub-block from the 12 packed bytes.
+        // Per llama.cpp ggml-quants.c dequantize_row_q3_K:
+        //   sub 0..7  low nibble = scales12[sub] low nibble
+        //   sub 8..15 low nibble = scales12[sub-8] high nibble (NOT sub-4 — that
+        //   collides with the high-2-bits packing in scales12[8..11]).
+        //   high 2 bits = scales12[8 + (sub % 4)] >> ((sub / 4) * 2)
+        // The byte/shift pair is TRANSPOSED relative to the obvious-looking
+        // 8 + sub/4 @ (sub%4)*2 — the wrong way round scrambles 12 of 16 scales.
+        int lowSrcByte = sub < 8 ? sub : sub - 8;
+        int lowNibble = sub < 8
+            ? (scales12[lowSrcByte] & 0x0F)
+            : ((scales12[lowSrcByte] >> 4) & 0x0F);
+        int hiBits = (scales12[8 + (sub & 3)] >> ((sub >> 2) * 2)) & 0x03;
+        int signedScale = (lowNibble | (hiBits << 4)) - 32;  // [-32, 31]
+
+        // Per-element 3-bit unpacking. The 2-bit quants are NOT stored four
+        // consecutive elements per byte: element t reads bit-pair (t/32)%4 of
+        // qs byte (t%32) + 32*(t/128), and hmask bit t/32 of byte t%32
+        // (llama.cpp's shift/m loop over 128-element halves).
+        int qBits = (qs[(t & 31) + 32 * (t >> 7)] >> (((t >> 5) & 3) * 2)) & 0x03;
+        int hBit = (hmask[t & 31] >> (t >> 5)) & 0x01;
+        int signed3 = ((hBit << 2) | qBits) - 4;  // [-4, 3]
+
+        dst[(size_t)sb_idx * Q3_K_SUPER_BLOCK_SIZE + t] =
+            __float2half(d * (float)signedScale * (float)signed3);
+    }
+}
+
 // ── Q4_K: 144 bytes per 256 values (super-block with 8 sub-blocks) ──
 // struct block_q4_K { half d; half dmin; uint8_t scales[12]; uint8_t qs[128]; };
 #define Q4_K_SUPER_BLOCK_SIZE 256

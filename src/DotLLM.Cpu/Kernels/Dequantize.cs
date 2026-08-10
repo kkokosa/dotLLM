@@ -29,6 +29,12 @@ public static unsafe partial class Dequantize
     /// <summary>Number of elements per Q5_0 block.</summary>
     private const int Q5_0GroupSize = 32;
 
+    /// <summary>Q4_1 block size in bytes: 2 (Half d) + 2 (Half m) + 16 (qs) = 20.</summary>
+    private const int Q4_1BlockBytes = 20;
+
+    /// <summary>Q5_1 block size in bytes: 2 (Half d) + 2 (Half m) + 4 (qh) + 16 (qs) = 24.</summary>
+    private const int Q5_1BlockBytes = 24;
+
     /// <summary>
     /// Returns the byte size of one row of <paramref name="elementCount"/> elements in the given quantization format.
     /// Useful for computing row strides when iterating weight matrices.
@@ -38,8 +44,12 @@ public static unsafe partial class Dequantize
         QuantizationType.F32 => elementCount * 4,
         QuantizationType.F16 => elementCount * 2,
         QuantizationType.Q4_0 => elementCount / Q8_0GroupSize * Q4_0BlockBytes,
+        QuantizationType.Q4_1 => elementCount / Q8_0GroupSize * Q4_1BlockBytes,
         QuantizationType.Q8_0 => elementCount / Q8_0GroupSize * Q8_0BlockBytes,
         QuantizationType.Q5_0 => elementCount / Q5_0GroupSize * Q5_0BlockBytes,
+        QuantizationType.Q5_1 => elementCount / Q5_0GroupSize * Q5_1BlockBytes,
+        QuantizationType.Q2_K => elementCount / KQuantGroupSize * Q2_K_BlockBytes,
+        QuantizationType.Q3_K => elementCount / KQuantGroupSize * Q3_K_BlockBytes,
         QuantizationType.Q4_K => elementCount / KQuantGroupSize * Q4_K_BlockBytes,
         QuantizationType.Q5_K => elementCount / KQuantGroupSize * Q5_K_BlockBytes,
         QuantizationType.Q6_K => elementCount / KQuantGroupSize * Q6_K_BlockBytes,
@@ -75,6 +85,18 @@ public static unsafe partial class Dequantize
                 break;
             case QuantizationType.Q5_0:
                 DequantizeQ5_0(src, elementCount, dest);
+                break;
+            case QuantizationType.Q4_1:
+                DequantizeQ4_1Scalar(src, elementCount, dest);
+                break;
+            case QuantizationType.Q5_1:
+                DequantizeQ5_1Scalar(src, elementCount, dest);
+                break;
+            case QuantizationType.Q2_K:
+                DequantizeQ2_K(src, elementCount, dest);
+                break;
+            case QuantizationType.Q3_K:
+                DequantizeQ3_K(src, elementCount, dest);
                 break;
             case QuantizationType.Q4_K:
                 DequantizeQ4_K(src, elementCount, dest);
@@ -146,6 +168,74 @@ public static unsafe partial class Dequantize
             }
 
             blockBase += Q8_0BlockBytes;
+        }
+    }
+
+    // ──────────────────── Q4_1 ────────────────────
+    /// <summary>
+    /// Q4_1 scalar dequant. Block layout (20 bytes, 32 elements):
+    /// <c>d(Half@0), m(Half@2), qs[16]@4</c>. Formula: <c>value = d * nibble + m</c>.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void DequantizeQ4_1Scalar(nint src, long elementCount, Span<float> dest)
+    {
+        if (elementCount % Q8_0GroupSize != 0)
+            throw new ArgumentException(
+                $"Q4_1 element count must be a multiple of {Q8_0GroupSize}, got {elementCount}",
+                nameof(elementCount));
+        long blockCount = elementCount / Q8_0GroupSize;
+        byte* blockBase = (byte*)src;
+        int outIdx = 0;
+        for (long b = 0; b < blockCount; b++)
+        {
+            float d = (float)Unsafe.ReadUnaligned<Half>(blockBase);
+            float m = (float)Unsafe.ReadUnaligned<Half>(blockBase + 2);
+            byte* qs = blockBase + 4;
+            for (int j = 0; j < 16; j++)
+            {
+                int lo = qs[j] & 0xF;
+                int hi = (qs[j] >> 4) & 0xF;
+                dest[outIdx + j]      = d * lo + m;
+                dest[outIdx + j + 16] = d * hi + m;
+            }
+            outIdx += Q8_0GroupSize;
+            blockBase += Q4_1BlockBytes;
+        }
+    }
+
+    // ──────────────────── Q5_1 ────────────────────
+    /// <summary>
+    /// Q5_1 scalar dequant. Block layout (24 bytes, 32 elements):
+    /// <c>d(Half@0), m(Half@2), qh[4]@4, qs[16]@8</c>.
+    /// Formula: <c>value = d * ((qh_bit &lt;&lt; 4) | nibble) + m</c> (5-bit unsigned + min).
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void DequantizeQ5_1Scalar(nint src, long elementCount, Span<float> dest)
+    {
+        if (elementCount % Q5_0GroupSize != 0)
+            throw new ArgumentException(
+                $"Q5_1 element count must be a multiple of {Q5_0GroupSize}, got {elementCount}",
+                nameof(elementCount));
+        long blockCount = elementCount / Q5_0GroupSize;
+        byte* blockBase = (byte*)src;
+        int outIdx = 0;
+        for (long b = 0; b < blockCount; b++)
+        {
+            float d = (float)Unsafe.ReadUnaligned<Half>(blockBase);
+            float m = (float)Unsafe.ReadUnaligned<Half>(blockBase + 2);
+            uint qh = Unsafe.ReadUnaligned<uint>(blockBase + 4);
+            byte* qs = blockBase + 8;
+            for (int j = 0; j < 16; j++)
+            {
+                int lo = qs[j] & 0xF;
+                int hi = (qs[j] >> 4) & 0xF;
+                int bit5Lo = (int)((qh >> j) & 1);
+                int bit5Hi = (int)((qh >> (j + 16)) & 1);
+                dest[outIdx + j]      = d * (lo | (bit5Lo << 4)) + m;
+                dest[outIdx + j + 16] = d * (hi | (bit5Hi << 4)) + m;
+            }
+            outIdx += Q5_0GroupSize;
+            blockBase += Q5_1BlockBytes;
         }
     }
 

@@ -3,6 +3,22 @@ using System.Runtime.InteropServices;
 namespace DotLLM.Cuda.Interop;
 
 /// <summary>
+/// Named CUDA driver API result codes (<c>CUresult</c>) that call sites branch on,
+/// rather than comparing against bare magic numbers.
+/// </summary>
+internal static class CudaResult
+{
+    /// <summary><c>CUDA_SUCCESS</c>.</summary>
+    internal const int Success = 0;
+
+    /// <summary>
+    /// <c>CUDA_ERROR_NOT_FOUND</c> — a named symbol (kernel, global, texture) does not
+    /// exist in the loaded module.
+    /// </summary>
+    internal const int NotFound = 500;
+}
+
+/// <summary>
 /// Extension methods for checking CUDA and cuBLAS return codes.
 /// </summary>
 internal static class CudaErrorHelper

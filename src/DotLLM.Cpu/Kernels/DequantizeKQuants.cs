@@ -11,6 +11,12 @@ namespace DotLLM.Cpu.Kernels;
 /// </summary>
 public static unsafe partial class Dequantize
 {
+    /// <summary>Q2_K block size in bytes: 16(scales) + 64(qs) + 2(d) + 2(dmin) = 84.</summary>
+    internal const int Q2_K_BlockBytes = 84;
+
+    /// <summary>Q3_K block size in bytes: 32(hmask) + 64(qs) + 12(scales) + 2(d) = 110.</summary>
+    internal const int Q3_K_BlockBytes = 110;
+
     /// <summary>Q4_K block size in bytes: 2(d) + 2(dmin) + 12(scales) + 128(qs) = 144.</summary>
     internal const int Q4_K_BlockBytes = 144;
 
@@ -205,6 +211,155 @@ public static unsafe partial class Dequantize
 
                 blockBase += Q6_K_BlockBytes;
             }
+        }
+    }
+
+    // ──────────────────── Q2_K ────────────────────
+
+    /// <summary>
+    /// Dequantizes Q2_K-quantized data to float32. Block layout:
+    /// scales[16] (4-bit scale + 4-bit dmin coef per sub-block, packed) +
+    /// qs[64] (2-bit elements, 4 per byte) + d (half) + dmin (half) = 84 bytes per 256 elements.
+    /// Per-element decode: <c>value = d × scale × q2 − dmin × dmin_coef</c>.
+    /// </summary>
+    [SkipLocalsInit]
+    public static unsafe void DequantizeQ2_K(nint src, long elementCount, Span<float> dest)
+    {
+        if (elementCount % KQuantGroupSize != 0)
+            throw new ArgumentException(
+                $"Q2_K requires elementCount to be a multiple of {KQuantGroupSize}.", nameof(elementCount));
+        // Bounds the int destination index below: dest.Length is an int, so this also
+        // guarantees elementCount <= int.MaxValue when called directly (not via ToFloat32).
+        if (dest.Length < elementCount)
+            throw new ArgumentException(
+                $"Destination span too small: {dest.Length} < {elementCount}", nameof(dest));
+
+        long superBlocks = elementCount / KQuantGroupSize;
+        byte* basePtr = (byte*)src;
+
+        for (long sb = 0; sb < superBlocks; sb++)
+        {
+            byte* block = basePtr + sb * Q2_K_BlockBytes;
+            byte* scales = block;          // 16 bytes
+            byte* qs = block + 16;         // 64 bytes
+            float d = (float)Unsafe.ReadUnaligned<Half>(block + 80);
+            float dmin = (float)Unsafe.ReadUnaligned<Half>(block + 82);
+
+            int outOffset = (int)(sb * KQuantGroupSize);
+            for (int t = 0; t < KQuantGroupSize; t++)
+            {
+                int sub = t >> 4;          // t / 16
+                int byteIdx = t >> 2;      // t / 4
+                int bitOff = (t & 0x3) << 1; // (t % 4) * 2
+                int q2 = (qs[byteIdx] >> bitOff) & 0x3;
+                int scale = scales[sub] & 0xF;
+                int dmCoef = (scales[sub] >> 4) & 0xF;
+                dest[outOffset + t] = d * scale * q2 - dmin * dmCoef;
+            }
+        }
+    }
+
+    // ──────────────────── Q3_K ────────────────────
+
+    /// <summary>
+    /// Dispatches Q3_K dequantization. Block layout (per ggml-quants.h):
+    /// <c>hmask[32]</c> (1 high bit per element) + <c>qs[64]</c> (2 low bits
+    /// per element) + <c>scales[12]</c> (16 packed 6-bit signed-after-bias
+    /// scales) + <c>d[2]</c> (FP16 super-block delta). 110 bytes per 256
+    /// elements. Per-element value:
+    /// <c>d × (signedScale[sub]) × ((hbit&lt;&lt;2 | qbits) - 4)</c> where sub
+    /// = element_idx / 16.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void DequantizeQ3_K(nint src, long elementCount, Span<float> dest)
+    {
+        if (elementCount % KQuantGroupSize != 0)
+            throw new ArgumentException(
+                $"Q3_K element count must be a multiple of {KQuantGroupSize}, got {elementCount}",
+                nameof(elementCount));
+        // Bounds the int destination index below: dest.Length is an int, so this also
+        // guarantees elementCount <= int.MaxValue when called directly (not via ToFloat32).
+        if (dest.Length < elementCount)
+            throw new ArgumentException(
+                $"Destination span too small: {dest.Length} < {elementCount}", nameof(dest));
+        DequantizeQ3_KScalar(src, elementCount, dest);
+    }
+
+    /// <summary>
+    /// Scalar Q3_K dequantization. Reference port of llama.cpp's
+    /// <c>dequantize_row_q3_K</c>. AVX2 acceleration is a future optimization;
+    /// at V2-Lite scale Q3_K is only used for token_embd.weight + output.weight
+    /// (not the per-call hot-path), so the scalar path is acceptable for now.
+    /// </summary>
+    internal static void DequantizeQ3_KScalar(nint src, long elementCount, Span<float> dest)
+    {
+        long numBlocks = elementCount / KQuantGroupSize;
+        byte* blockBase = (byte*)src;
+        // int base index, mirroring DequantizeQ2_K's outOffset — callers have already
+        // validated elementCount <= dest.Length, so this cannot overflow.
+        int destOffset = 0;
+        Span<byte> scales = stackalloc byte[16];
+
+        for (long b = 0; b < numBlocks; b++)
+        {
+            byte* hmask = blockBase;                 // [32 bytes]
+            byte* qs = blockBase + 32;               // [64 bytes]
+            byte* scales12 = blockBase + 32 + 64;    // [12 bytes]
+            ushort dHalf = *(ushort*)(blockBase + 32 + 64 + 12);
+            float d = (float)BitConverter.UInt16BitsToHalf(dHalf);
+
+            // Unpack 12 bytes → 16 unsigned 6-bit scales (then biased by -32).
+            // Per llama.cpp ggml-quants.c dequantize_row_q3_K (the `aux` shuffle):
+            //   scales[ 0+b] = (s[  b] & 0xF) | (((s[8+b] >> 0) & 3) << 4)
+            //   scales[ 4+b] = (s[4+b] & 0xF) | (((s[8+b] >> 2) & 3) << 4)
+            //   scales[ 8+b] = (s[  b] >> 4)  | (((s[8+b] >> 4) & 3) << 4)
+            //   scales[12+b] = (s[4+b] >> 4)  | (((s[8+b] >> 6) & 3) << 4)   for b in 0..3
+            // i.e. the low nibble comes from bytes 0..7 (low nibble for sub 0..7,
+            // high nibble for sub 8..15) and the high 2 bits come from
+            // byte 8 + (sub % 4) at shift 2 * (sub / 4). The byte/shift pair is
+            // TRANSPOSED relative to the obvious-looking 8 + sub/4 @ (sub%4)*2 —
+            // getting it the wrong way round scrambles 12 of the 16 sub-blocks.
+            for (int sub = 0; sub < 16; sub++)
+            {
+                int lowSrcByte = sub < 8 ? sub : sub - 8;  // sub 8..15 → bytes 0..7 high nibble
+                int lowNibble = sub < 8 ? scales12[lowSrcByte] & 0x0F : (scales12[lowSrcByte] >> 4) & 0x0F;
+                int hiByte = 8 + (sub % 4);
+                int hiShift = (sub / 4) * 2;
+                int hiBits = (scales12[hiByte] >> hiShift) & 0x03;
+                scales[sub] = (byte)(lowNibble | (hiBits << 4));
+            }
+
+            // 16 sub-blocks × 16 elements = 256 elements per super-block.
+            //
+            // Element ordering (llama.cpp dequantize_row_q3_K): the 2-bit quants
+            // are NOT stored 4-consecutive-elements-per-byte. Each 128-element
+            // half of the super-block uses 32 qs bytes, and each byte supplies
+            // FOUR elements 32 apart — element e reads bit-pair (e/32)%4 of
+            // byte (e%32) + 32*(e/128). The hmask is likewise transposed: element
+            // e reads bit e/32 of byte e%32. Reading them as e/4 @ (e%4)*2 and
+            // e/8 @ e%8 permutes every element of every super-block into the
+            // wrong sub-block scale — decoded weights correlate ~0.01 with the
+            // true values.
+            for (int sub = 0; sub < 16; sub++)
+            {
+                int signedScale = scales[sub] - 32;  // [-32, 31]
+                float scaleD = d * signedScale;
+                int eBase = sub * 16;
+                int qsSubBase = 32 * (sub >> 3) + 16 * (sub & 1);
+                int qShift = ((sub >> 1) & 3) * 2;
+                int hmSubBase = 16 * (sub & 1);
+                int hBitIdx = sub >> 1;
+                for (int l = 0; l < 16; l++)
+                {
+                    int qBits = (qs[qsSubBase + l] >> qShift) & 0x03;
+                    int hBit = (hmask[hmSubBase + l] >> hBitIdx) & 0x01;
+                    int signed3 = ((hBit << 2) | qBits) - 4;  // [-4, 3]
+                    dest[destOffset + eBase + l] = scaleD * signed3;
+                }
+            }
+
+            blockBase += Q3_K_BlockBytes;
+            destOffset += KQuantGroupSize;
         }
     }
 

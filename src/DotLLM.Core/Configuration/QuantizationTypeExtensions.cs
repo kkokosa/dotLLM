@@ -20,6 +20,8 @@ public static class QuantizationTypeExtensions
         QuantizationType.Q5_0 => elementCount / 32 * 22,
         QuantizationType.Q5_1 => elementCount / 32 * 24,
         QuantizationType.Q8_0 => elementCount / 32 * 34,
+        QuantizationType.Q2_K => elementCount / 256 * 84,
+        QuantizationType.Q3_K => elementCount / 256 * 110,
         QuantizationType.Q4_K => elementCount / 256 * 144,
         QuantizationType.Q5_K => elementCount / 256 * 176,
         QuantizationType.Q6_K => elementCount / 256 * 210,

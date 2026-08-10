@@ -12,6 +12,8 @@ public sealed unsafe class DequantizeTests
     private const int Q8_0GroupSize = 32;
     private const int Q5_0BlockBytes = 22;
     private const int Q5_0GroupSize = 32;
+    private const int Q4_1BlockBytes = 20;
+    private const int Q5_1BlockBytes = 24;
 
     // ──────────────────── FP16 ────────────────────
 
@@ -375,7 +377,206 @@ public sealed unsafe class DequantizeTests
             Dequantize.ToFloat32(nint.Zero, 33, QuantizationType.Q8_0, dest));
     }
 
+    // ──────────────────── Q4_1 ────────────────────
+
+    [Fact]
+    public void Q4_1_SingleBlock_HandCalculated()
+    {
+        // Layout (20 bytes / 32 elements): d(Half@0), m(Half@2), qs[16]@4.
+        // value = d * nibble + m, with the low nibble of qs[j] feeding element j and
+        // the high nibble feeding element j + 16 (llama.cpp dequantize_row_q4_1).
+        // d = 0.5, m = -3. qs[0] = 0x9A → lo = 0xA (10), hi = 0x9 (9).
+        //   dest[0]  = 0.5 * 10 - 3 = 2.0
+        //   dest[16] = 0.5 *  9 - 3 = 1.5
+        // qs[15] = 0x0F → lo = 15, hi = 0.
+        //   dest[15] = 0.5 * 15 - 3 = 4.5
+        //   dest[31] = 0.5 *  0 - 3 = -3.0
+        nint ptr = AllocQ4_1Block((Half)0.5f, (Half)(-3.0f), j => j switch
+        {
+            0 => (byte)0x9A,
+            15 => (byte)0x0F,
+            _ => (byte)0x00,
+        });
+        try
+        {
+            float[] dest = new float[Q8_0GroupSize];
+            Dequantize.ToFloat32(ptr, Q8_0GroupSize, QuantizationType.Q4_1, dest);
+
+            Assert.Equal(2.0f, dest[0], 1e-4f);
+            Assert.Equal(1.5f, dest[16], 1e-4f);
+            Assert.Equal(4.5f, dest[15], 1e-4f);
+            Assert.Equal(-3.0f, dest[31], 1e-4f);
+            // Every untouched nibble decodes to the block minimum.
+            for (int j = 1; j < 15; j++)
+            {
+                Assert.Equal(-3.0f, dest[j], 1e-4f);
+                Assert.Equal(-3.0f, dest[j + 16], 1e-4f);
+            }
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
+    [Fact]
+    public void Q4_1_TwoBlocks_StrideCorrect()
+    {
+        // Catches a wrong block stride (e.g. 18 bytes — the Q4_0 size — instead of 20).
+        const int blockCount = 2;
+        nint ptr = (nint)NativeMemory.AlignedAlloc(blockCount * Q4_1BlockBytes, 64);
+        try
+        {
+            NativeMemory.Clear((void*)ptr, blockCount * Q4_1BlockBytes);
+            byte* b0 = (byte*)ptr;
+            byte* b1 = (byte*)ptr + Q4_1BlockBytes;
+
+            *(Half*)b0 = (Half)1.0f;  *(Half*)(b0 + 2) = (Half)0.0f;  b0[4] = 0x03;  // lo = 3
+            *(Half*)b1 = (Half)2.0f;  *(Half*)(b1 + 2) = (Half)1.0f;  b1[4] = 0x05;  // lo = 5
+
+            float[] dest = new float[blockCount * Q8_0GroupSize];
+            Dequantize.ToFloat32(ptr, blockCount * Q8_0GroupSize, QuantizationType.Q4_1, dest);
+
+            Assert.Equal(3.0f, dest[0], 1e-4f);   // 1.0 * 3 + 0
+            Assert.Equal(11.0f, dest[32], 1e-4f); // 2.0 * 5 + 1
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
+    [Fact]
+    public void Q4_1_RowByteSize_Matches()
+    {
+        Assert.Equal(20L, Dequantize.RowByteSize(32, QuantizationType.Q4_1));
+        Assert.Equal(640L, Dequantize.RowByteSize(1024, QuantizationType.Q4_1));
+    }
+
+    [Fact]
+    public void Q4_1_NonAlignedCount_Throws()
+    {
+        float[] dest = new float[40];
+        Assert.Throws<ArgumentException>(() =>
+            Dequantize.ToFloat32(nint.Zero, 40, QuantizationType.Q4_1, dest));
+    }
+
+    // ──────────────────── Q5_1 ────────────────────
+
+    [Fact]
+    public void Q5_1_SingleBlock_HandCalculated()
+    {
+        // Layout (24 bytes / 32 elements): d(Half@0), m(Half@2), qh[4]@4, qs[16]@8.
+        // value = d * ((qh_bit << 4) | nibble) + m. Element j takes qh bit j,
+        // element j + 16 takes qh bit j + 16 (llama.cpp dequantize_row_q5_1).
+        // d = 0.25, m = 1. qs[0] = 0x21 → lo = 1, hi = 2. qh bit 0 set, bit 16 set.
+        //   dest[0]  = 0.25 * (16 | 1) + 1 = 0.25 * 17 + 1 = 5.25
+        //   dest[16] = 0.25 * (16 | 2) + 1 = 0.25 * 18 + 1 = 5.5
+        // qs[1] = 0x21 with no qh bits set:
+        //   dest[1]  = 0.25 * 1 + 1 = 1.25
+        //   dest[17] = 0.25 * 2 + 1 = 1.5
+        uint qh = (1u << 0) | (1u << 16);
+        nint ptr = AllocQ5_1Block((Half)0.25f, (Half)1.0f, qh, j => j <= 1 ? (byte)0x21 : (byte)0x00);
+        try
+        {
+            float[] dest = new float[Q5_0GroupSize];
+            Dequantize.ToFloat32(ptr, Q5_0GroupSize, QuantizationType.Q5_1, dest);
+
+            Assert.Equal(5.25f, dest[0], 1e-4f);
+            Assert.Equal(5.5f, dest[16], 1e-4f);
+            Assert.Equal(1.25f, dest[1], 1e-4f);
+            Assert.Equal(1.5f, dest[17], 1e-4f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
+    [Fact]
+    public void Q5_1_AllBitsSet_GivesMaxCode()
+    {
+        // Every nibble 0xF and every high bit set → code 31 everywhere.
+        nint ptr = AllocQ5_1Block((Half)1.0f, (Half)0.0f, 0xFFFFFFFFu, _ => 0xFF);
+        try
+        {
+            float[] dest = new float[Q5_0GroupSize];
+            Dequantize.ToFloat32(ptr, Q5_0GroupSize, QuantizationType.Q5_1, dest);
+            for (int i = 0; i < Q5_0GroupSize; i++)
+                Assert.Equal(31.0f, dest[i], 1e-4f);
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
+    [Fact]
+    public void Q5_1_TwoBlocks_StrideCorrect()
+    {
+        // Catches a wrong block stride (e.g. 22 bytes — the Q5_0 size — instead of 24).
+        const int blockCount = 2;
+        nint ptr = (nint)NativeMemory.AlignedAlloc(blockCount * Q5_1BlockBytes, 64);
+        try
+        {
+            NativeMemory.Clear((void*)ptr, blockCount * Q5_1BlockBytes);
+            byte* b0 = (byte*)ptr;
+            byte* b1 = (byte*)ptr + Q5_1BlockBytes;
+
+            *(Half*)b0 = (Half)1.0f;  *(Half*)(b0 + 2) = (Half)0.0f;  *(uint*)(b0 + 4) = 0u;  b0[8] = 0x07;
+            *(Half*)b1 = (Half)2.0f;  *(Half*)(b1 + 2) = (Half)1.0f;  *(uint*)(b1 + 4) = 1u;  b1[8] = 0x02;
+
+            float[] dest = new float[blockCount * Q5_0GroupSize];
+            Dequantize.ToFloat32(ptr, blockCount * Q5_0GroupSize, QuantizationType.Q5_1, dest);
+
+            Assert.Equal(7.0f, dest[0], 1e-4f);    // 1.0 * 7 + 0
+            Assert.Equal(37.0f, dest[32], 1e-4f);  // 2.0 * (16 | 2) + 1
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)ptr);
+        }
+    }
+
+    [Fact]
+    public void Q5_1_RowByteSize_Matches()
+    {
+        Assert.Equal(24L, Dequantize.RowByteSize(32, QuantizationType.Q5_1));
+        Assert.Equal(768L, Dequantize.RowByteSize(1024, QuantizationType.Q5_1));
+    }
+
+    [Fact]
+    public void Q5_1_NonAlignedCount_Throws()
+    {
+        float[] dest = new float[40];
+        Assert.Throws<ArgumentException>(() =>
+            Dequantize.ToFloat32(nint.Zero, 40, QuantizationType.Q5_1, dest));
+    }
+
     // ──────────────────── Helpers ────────────────────
+
+    private static nint AllocQ4_1Block(Half d, Half m, Func<int, byte> fillQs)
+    {
+        nint ptr = (nint)NativeMemory.AlignedAlloc(Q4_1BlockBytes, 32);
+        byte* p = (byte*)ptr;
+        *(Half*)p = d;
+        *(Half*)(p + 2) = m;
+        for (int i = 0; i < 16; i++)
+            (p + 4)[i] = fillQs(i);
+        return ptr;
+    }
+
+    private static nint AllocQ5_1Block(Half d, Half m, uint qh, Func<int, byte> fillQs)
+    {
+        nint ptr = (nint)NativeMemory.AlignedAlloc(Q5_1BlockBytes, 32);
+        byte* p = (byte*)ptr;
+        *(Half*)p = d;
+        *(Half*)(p + 2) = m;
+        *(uint*)(p + 4) = qh;
+        for (int i = 0; i < 16; i++)
+            (p + 8)[i] = fillQs(i);
+        return ptr;
+    }
 
     private static nint AllocQ8_0Block(Half scale, Func<int, sbyte> fillQs)
     {
