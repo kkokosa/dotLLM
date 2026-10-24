@@ -254,6 +254,7 @@ Both `/v1/chat/completions` and `/v1/completions` validate inputs before inferen
 |-------|-------|----------|
 | Empty messages array | 0 | 400 `"messages array must not be empty"` |
 | Messages count | > 1024 | 400 `"messages array exceeds maximum of 1024"` |
+| Chat completion choices `n` | anything other than 1 | 400 `"n must be 1; multiple completion choices are not supported"` |
 | Empty prompt (completions) | empty/null | 400 `"prompt must not be empty"` |
 | `max_tokens` | &le; 0 | 400 `"max_tokens must be a positive integer"` |
 | Prompt token count | &ge; `MaxSequenceLength` | 400 `"prompt (N tokens) exceeds model context length (M)"` |

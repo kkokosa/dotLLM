@@ -23,6 +23,9 @@ public static class RequestValidator
         if (request.Messages.Length > MaxMessages)
             return $"messages array exceeds maximum of {MaxMessages}";
 
+        if (request.N != 1)
+            return "n must be 1; multiple completion choices are not supported";
+
         if (request.MaxTokens.HasValue && request.MaxTokens.Value <= 0)
             return "max_tokens must be a positive integer";
 

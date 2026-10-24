@@ -8,6 +8,11 @@ namespace DotLLM.Server.Models;
 /// </summary>
 public sealed record ChatCompletionRequest
 {
+    /// <summary>Creates a request with the supported default choice count.</summary>
+    /// <param name="n">Number of completion choices. Defaults to one when omitted.</param>
+    [JsonConstructor]
+    public ChatCompletionRequest(int n = 1) => N = n;
+
     [JsonPropertyName("messages")]
     public required ChatMessageDto[] Messages { get; init; }
 
