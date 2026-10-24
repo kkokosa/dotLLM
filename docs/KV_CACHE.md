@@ -9,18 +9,20 @@ The KV-cache stores previously computed key and value vectors for all layers, av
 Llama 3 8B, FP16, 2048 tokens:
 ```
 2 (K+V) × 32 layers × 8 KV heads × 128 head_dim × 2048 tokens × 2 bytes
-= ~1 GB
+= 268,435,456 bytes = 256 MiB
 ```
+The CPU `SimpleKvCache` uses FP32, so the same geometry requires 512 MiB.
 Scales linearly with sequence length and batch size. Dominant memory consumer in production.
 
 ## Simple KV-Cache (Phase 1)
 
-Pre-allocated contiguous buffer per sequence:
+Pre-allocated contiguous FP32 buffers per sequence in the CPU `SimpleKvCache`:
 ```
-K_cache[layer][kv_head][max_seq_len][head_dim]  — FP16
-V_cache[layer][kv_head][max_seq_len][head_dim]  — FP16
+K_cache[layer][position][kv_head * head_dim + dimension]
+V_cache[layer][position][kv_head * head_dim + dimension]
 ```
-Simple indexing: `K_cache[layer][head][pos] = new_K`. Wastes memory for short sequences.
+Each layer stores `[max_seq_len, num_kv_heads * head_dim]`, with the head dimensions
+contiguous within each position. This wastes memory for short sequences.
 
 ## Paged KV-Cache
 
@@ -51,7 +53,7 @@ Inspired by OS virtual memory paging. This is the **memory management** half of 
 
 ### Attention Integration (v1: Staging Buffer)
 
-Current implementation uses a staging buffer approach: `GetKeysRef()`/`GetValuesRef()` gather block data into a pre-allocated contiguous buffer before each attention call. This avoids modifying attention kernels. The gather cost is O(seqLen × headDim) — negligible compared to attention's O(seqLen² × headDim).
+Current implementation uses a staging buffer approach: `GetKeysRef()`/`GetValuesRef()` gather block data into a pre-allocated contiguous buffer before each attention call. This avoids modifying attention kernels. For a fixed number of heads, gathering costs O(seqKv × headDim), while attention costs O(seqQ × seqKv × headDim). During one-token decode, seqQ = 1, so both are linear in cached context length; the extra copy can be significant. Full prefill has seqQ approximately equal to seqKv and quadratic attention work.
 
 Future optimization: specialized paged attention kernels that read blocks directly via block table indirection, eliminating the staging copy.
 
