@@ -7,7 +7,7 @@ namespace DotLLM.Core.Configuration;
 /// Number of threads. 1 = single-threaded (default), 0 = <see cref="Environment.ProcessorCount"/>.
 /// </param>
 /// <param name="DecodeThreadCount">
-/// Number of threads for decode phase. 0 = auto (memory channel heuristic).
+/// Number of threads for decode phase. 1 = caller only, 0 = auto (memory channel heuristic).
 /// Decode is memory-bandwidth-bound, so more threads than memory channels don't help.
 /// </param>
 /// <param name="EnableNumaPinning">
@@ -47,7 +47,8 @@ public readonly record struct ThreadingConfig(
     /// estimated memory channel count (since decode is bandwidth-bound).
     /// </summary>
     /// <param name="memoryChannelEstimate">Heuristic memory channel count from NUMA topology.</param>
-    /// <returns>Effective decode thread count, clamped to [2, EffectiveThreadCount].</returns>
+    /// <returns>Effective decode thread count. Explicit counts may select one thread;
+    /// automatic selection uses at least two when the total thread count permits.</returns>
     public int EffectiveDecodeThreadCount(int memoryChannelEstimate)
         => DecodeThreadCount > 0
             ? Math.Min(DecodeThreadCount, EffectiveThreadCount)

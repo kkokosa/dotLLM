@@ -91,7 +91,7 @@ public sealed unsafe class ComputeThreadPool : IDisposable
         // When topology is null (no NUMA detection), don't apply the memory channel heuristic —
         // use all configured threads. The cap only makes sense with real topology data.
         _decodeThreadCount = config.DecodeThreadCount > 0
-            ? Math.Clamp(config.DecodeThreadCount, 2, threadCount)
+            ? Math.Clamp(config.DecodeThreadCount, 1, threadCount)
             : topology is not null
                 ? Math.Clamp(topology.MemoryChannelEstimate, 2, threadCount)
                 : threadCount;
@@ -139,7 +139,7 @@ public sealed unsafe class ComputeThreadPool : IDisposable
     {
         _currentMode = mode;
         _activeWorkerCount = mode == DispatchMode.SpinWait
-            ? Math.Clamp(_decodeThreadCount - 1, 1, _threadCount - 1)
+            ? Math.Clamp(_decodeThreadCount - 1, 0, _threadCount - 1)
             : _threadCount - 1;
     }
 
@@ -169,8 +169,10 @@ public sealed unsafe class ComputeThreadPool : IDisposable
         if (activeWorkers > 0)
             _completion.Reset(activeWorkers);
 
-        // Increment generation counter (wakes spinners)
-        Interlocked.Increment(ref _dispatchGeneration);
+        // Caller-only decode leaves workers parked and does not publish a generation.
+        // Otherwise a spinner completing the previous prefill could consume decode work.
+        if (activeWorkers > 0)
+            Interlocked.Increment(ref _dispatchGeneration);
 
         // Also set events (wakes any workers that fell through to kernel wait)
         for (int i = 0; i < activeWorkers; i++)
