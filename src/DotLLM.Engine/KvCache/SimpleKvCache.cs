@@ -37,18 +37,29 @@ public sealed unsafe class SimpleKvCache : IKvCache
     /// <param name="numKvHeads">Number of KV attention heads per layer.</param>
     /// <param name="headDim">Dimension per attention head.</param>
     /// <param name="maxSeqLen">Maximum number of positions this cache can hold.</param>
+    /// <exception cref="ArgumentOutOfRangeException">A dimension is not positive.</exception>
+    /// <exception cref="OverflowException">The stride or per-layer byte count is too large.</exception>
     public SimpleKvCache(int numLayers, int numKvHeads, int headDim, int maxSeqLen)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(numLayers);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(numKvHeads);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(headDim);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxSeqLen);
+
+        // Validate before recording a layer count so a rejected construction leaves
+        // the finalizer with no partially initialized buffers to traverse.
+        int kvStride = checked(numKvHeads * headDim);
+        nuint bufferBytes = checked((nuint)checked((long)maxSeqLen * kvStride * sizeof(float)));
+
         _numLayers = numLayers;
         _numKvHeads = numKvHeads;
         _headDim = headDim;
         _maxSeqLen = maxSeqLen;
-        _kvStride = numKvHeads * headDim;
+        _kvStride = kvStride;
 
         _keys = new nint[numLayers];
         _values = new nint[numLayers];
 
-        nuint bufferBytes = (nuint)((long)maxSeqLen * _kvStride * sizeof(float));
         for (int i = 0; i < numLayers; i++)
         {
             _keys[i] = (nint)NativeMemory.AlignedAlloc(bufferBytes, 64);
