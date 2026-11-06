@@ -60,7 +60,7 @@ internal sealed record ListExpr(IReadOnlyList<IExpression> Items) : IExpression;
 
 internal sealed record DictExpr(IReadOnlyList<(IExpression Key, IExpression Value)> Pairs) : IExpression;
 
-internal sealed record SliceExpr(IExpression Object, IExpression? Start, IExpression? Stop) : IExpression;
+internal sealed record SliceExpr(IExpression Object, IExpression? Start, IExpression? Stop, IExpression? Step = null) : IExpression;
 
 // ── Operators ──
 

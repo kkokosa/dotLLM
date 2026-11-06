@@ -519,29 +519,73 @@ internal sealed class JinjaEvaluator
         var obj = EvalExpr(expr.Object);
         int? startVal = expr.Start != null ? ToInt(EvalExpr(expr.Start)) : null;
         int? stopVal = expr.Stop != null ? ToInt(EvalExpr(expr.Stop)) : null;
+        int stepVal = expr.Step != null ? ToInt(EvalExpr(expr.Step)) : 1;
+        if (stepVal == 0)
+            throw new JinjaException("Slice step cannot be zero");
 
         if (obj is string s)
         {
-            int from = startVal ?? 0;
-            int to = stopVal ?? s.Length;
-            if (from < 0) from = Math.Max(0, s.Length + from);
-            if (to < 0) to = Math.Max(0, s.Length + to);
-            to = Math.Min(to, s.Length);
-            from = Math.Min(from, to);
-            return s[from..to];
+            if (stepVal > 0)
+            {
+                int from = startVal ?? 0;
+                int to = stopVal ?? s.Length;
+                if (from < 0) from = Math.Max(0, s.Length + from);
+                if (to < 0) to = Math.Max(0, s.Length + to);
+                to = Math.Min(to, s.Length);
+                from = Math.Min(from, to);
+                if (stepVal == 1)
+                    return s[from..to];
+                var sb = new System.Text.StringBuilder();
+                for (int i = from; i < to; i += stepVal)
+                    sb.Append(s[i]);
+                return sb.ToString();
+            }
+            else
+            {
+                int from = startVal.HasValue
+                    ? (startVal.Value < 0 ? s.Length + startVal.Value : Math.Min(startVal.Value, s.Length - 1))
+                    : s.Length - 1;
+                int to = stopVal.HasValue
+                    ? (stopVal.Value < 0 ? s.Length + stopVal.Value : stopVal.Value)
+                    : -1;
+                var sb = new System.Text.StringBuilder();
+                for (int i = from; i > to && i >= 0; i += stepVal)
+                {
+                    if (i < s.Length)
+                        sb.Append(s[i]);
+                }
+                return sb.ToString();
+            }
         }
 
         if (obj is IList list)
         {
-            int from = startVal ?? 0;
-            int to = stopVal ?? list.Count;
-            if (from < 0) from = Math.Max(0, list.Count + from);
-            if (to < 0) to = Math.Max(0, list.Count + to);
-            to = Math.Min(to, list.Count);
-            from = Math.Min(from, to);
             var sliced = new List<object?>();
-            for (int i = from; i < to; i++)
-                sliced.Add(list[i]);
+            if (stepVal > 0)
+            {
+                int from = startVal ?? 0;
+                int to = stopVal ?? list.Count;
+                if (from < 0) from = Math.Max(0, list.Count + from);
+                if (to < 0) to = Math.Max(0, list.Count + to);
+                to = Math.Min(to, list.Count);
+                from = Math.Min(from, to);
+                for (int i = from; i < to; i += stepVal)
+                    sliced.Add(list[i]);
+            }
+            else
+            {
+                int from = startVal.HasValue
+                    ? (startVal.Value < 0 ? list.Count + startVal.Value : Math.Min(startVal.Value, list.Count - 1))
+                    : list.Count - 1;
+                int to = stopVal.HasValue
+                    ? (stopVal.Value < 0 ? list.Count + stopVal.Value : stopVal.Value)
+                    : -1;
+                for (int i = from; i > to && i >= 0; i += stepVal)
+                {
+                    if (i < list.Count)
+                        sliced.Add(list[i]);
+                }
+            }
             return sliced;
         }
 

@@ -501,4 +501,45 @@ public class JinjaEvaluatorTests
         var result = Eval("before{# ignored #}after");
         Assert.Equal("beforeafter", result);
     }
+
+    // ── Slicing with step ──
+
+    [Fact]
+    public void Slice_ReverseList()
+    {
+        var result = Eval(
+            "{% for x in items[::-1] %}{{ x }}{% endfor %}",
+            new() { ["items"] = new List<object?> { "a", "b", "c" } });
+        Assert.Equal("cba", result);
+    }
+
+    [Fact]
+    public void Slice_ReverseString()
+    {
+        Assert.Equal("dcba", Eval("{{ 'abcd'[::-1] }}"));
+    }
+
+    [Fact]
+    public void Slice_PositiveStepList()
+    {
+        var result = Eval(
+            "{% for x in items[::2] %}{{ x }}{% endfor %}",
+            new() { ["items"] = new List<object?> { "a", "b", "c", "d", "e" } });
+        Assert.Equal("ace", result);
+    }
+
+    [Fact]
+    public void Slice_NegativeStepWithBounds()
+    {
+        var result = Eval(
+            "{% for x in items[3:0:-1] %}{{ x }}{% endfor %}",
+            new() { ["items"] = new List<object?> { "a", "b", "c", "d", "e" } });
+        Assert.Equal("dcb", result);
+    }
+
+    [Fact]
+    public void Slice_ZeroStep_Throws()
+    {
+        Assert.Throws<JinjaException>(() => Eval("{{ 'abcd'[::0] }}"));
+    }
 }
