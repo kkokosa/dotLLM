@@ -635,11 +635,27 @@ public sealed unsafe class TransformerModel : IModel
             // Multi-token: L2-tiled GEMM over the R4 layout. Same tiling shape as the row-major
             // path, so it inherits the interleaved dot kernel's advantage instead of fighting
             // register pressure the way the outer-product microkernels do (Step 26, #61).
-            if (qt == QuantizationType.Q8_0 && preQuantizedInput != null)
+            if (preQuantizedInput != null)
             {
-                MatMul.GemmR4TiledQ8_0((byte*)rw.Ptr, preQuantizedInput, c,
-                    rw.FullGroupCount, rw.TailRows, k / 32, m, n, _threadPool);
-                return;
+                switch (qt)
+                {
+                    case QuantizationType.Q8_0:
+                        MatMul.GemmR4TiledQ8_0((byte*)rw.Ptr, preQuantizedInput, c,
+                            rw.FullGroupCount, rw.TailRows, k / 32, m, n, _threadPool);
+                        return;
+                    case QuantizationType.Q4_K:
+                        MatMul.OuterProductGemmQ4_K((byte*)rw.Ptr, preQuantizedInput, c,
+                            rw.FullGroupCount, rw.TailRows, k / 256, m, n, _threadPool);
+                        return;
+                    case QuantizationType.Q5_K:
+                        MatMul.OuterProductGemmQ5_K((byte*)rw.Ptr, preQuantizedInput, c,
+                            rw.FullGroupCount, rw.TailRows, k / 256, m, n, _threadPool);
+                        return;
+                    case QuantizationType.Q6_K:
+                        MatMul.OuterProductGemmQ6_K((byte*)rw.Ptr, preQuantizedInput, c,
+                            rw.FullGroupCount, rw.TailRows, k / 256, m, n, _threadPool);
+                        return;
+                }
             }
 
             Gemm(origWeights, qt, b, c, m, k, n, preQuantizedInput);
