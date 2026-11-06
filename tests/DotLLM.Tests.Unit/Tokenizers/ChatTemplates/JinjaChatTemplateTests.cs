@@ -471,4 +471,34 @@ public class JinjaChatTemplateTests
         Assert.Contains("<|tool|>", result);
         Assert.Contains("It's 22 degrees", result);
     }
+
+    [Fact]
+    public void Qwen3Pattern_ReverseMessageSlice_FindsLastQueryIndex()
+    {
+        // Qwen3 GGUF chat templates iterate over messages[::-1] to locate the last user query
+        const string template =
+            "{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) -%}" +
+            "{%- for message in messages[::-1] -%}" +
+            "{%- set index = (messages|length - 1) - loop.index0 -%}" +
+            "{%- if ns.multi_step_tool and message.role == \"user\" -%}" +
+            "{%- set ns.multi_step_tool = false -%}" +
+            "{%- set ns.last_query_index = index -%}" +
+            "{%- endif -%}" +
+            "{%- endfor -%}" +
+            "last_query={{ ns.last_query_index }}";
+
+        var tmpl = new JinjaChatTemplate(template, "", "");
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "system", Content = "You are Qwen." },
+            new() { Role = "user", Content = "First question" },
+            new() { Role = "assistant", Content = "First answer" },
+            new() { Role = "user", Content = "Second question" },
+            new() { Role = "tool", Content = "Tool result" },
+        };
+
+        var result = tmpl.Apply(messages, new ChatTemplateOptions { AddGenerationPrompt = true });
+
+        Assert.Equal("last_query=3", result);
+    }
 }

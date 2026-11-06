@@ -413,33 +413,46 @@ internal sealed class JinjaParser
                 continue;
             }
 
-            // Index/bracket access: [expr] or slice: [start:stop]
+            // Index/bracket access: [expr] or slice: [start:stop] or [start:stop:step]
             if (CurrentIs(JinjaTokenType.LeftBracket))
             {
                 Advance();
 
                 IExpression? start = null;
                 IExpression? stop = null;
+                IExpression? step = null;
                 bool isSlice = false;
 
                 if (CurrentIs(JinjaTokenType.Colon))
                 {
-                    // [:stop] or [:]
+                    // [:stop], [:], [:stop:step], or [::step]
                     isSlice = true;
                     Advance();
-                    if (!CurrentIs(JinjaTokenType.RightBracket))
+                    if (!CurrentIs(JinjaTokenType.Colon) && !CurrentIs(JinjaTokenType.RightBracket))
                         stop = ParseExpression();
+                    if (CurrentIs(JinjaTokenType.Colon))
+                    {
+                        Advance();
+                        if (!CurrentIs(JinjaTokenType.RightBracket))
+                            step = ParseExpression();
+                    }
                 }
                 else
                 {
                     start = ParseExpression();
                     if (CurrentIs(JinjaTokenType.Colon))
                     {
-                        // [start:stop] or [start:]
+                        // [start:stop], [start:], [start:stop:step], or [start::step]
                         isSlice = true;
                         Advance();
-                        if (!CurrentIs(JinjaTokenType.RightBracket))
+                        if (!CurrentIs(JinjaTokenType.Colon) && !CurrentIs(JinjaTokenType.RightBracket))
                             stop = ParseExpression();
+                        if (CurrentIs(JinjaTokenType.Colon))
+                        {
+                            Advance();
+                            if (!CurrentIs(JinjaTokenType.RightBracket))
+                                step = ParseExpression();
+                        }
                     }
                 }
 
@@ -447,7 +460,7 @@ internal sealed class JinjaParser
 
                 if (isSlice)
                 {
-                    expr = new SliceExpr(expr, start, stop);
+                    expr = new SliceExpr(expr, start, stop, step);
                 }
                 else
                 {

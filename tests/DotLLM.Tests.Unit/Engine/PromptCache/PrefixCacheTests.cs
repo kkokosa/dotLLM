@@ -1,5 +1,12 @@
+using System.Runtime.InteropServices;
+using DotLLM.Core.Attention;
+using DotLLM.Core.Configuration;
+using DotLLM.Core.Models;
+using DotLLM.Core.Tensors;
+using DotLLM.Engine;
 using DotLLM.Engine.KvCache;
 using DotLLM.Engine.PromptCache;
+using DotLLM.Tokenizers;
 using Xunit;
 
 namespace DotLLM.Tests.Unit.Engine.PromptCache;
@@ -173,5 +180,100 @@ public sealed class PrefixCacheTests
     public void Constructor_ThrowsOnZeroMaxEntries()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => new PrefixCache(0));
+    }
+
+    [Fact]
+    public void TextGenerator_WhenCachedKvCapacitySmallerThanRequiredSize_ReallocatesInsteadOfOverflowing()
+    {
+        using var cache = new PrefixCache(4);
+
+        // Pre-populate prefix cache with a small KV cache (MaxLength = 8) that fits
+        // the 4-token prompt [1, 2, 3, 4] but cannot fit promptLen (4) + maxTokens (10) = 14.
+        var smallKv = new SimpleKvCache(NumLayers, NumKvHeads, HeadDim, maxSeqLen: 8);
+        smallKv.SetCurrentLength(3);
+        cache.Store([1, 2, 3], smallKv);
+
+        using var model = new StubModel();
+        var tokenizer = new StubTokenizer([1, 2, 3, 4]);
+        var generator = new TextGenerator(model, tokenizer, prefixCache: cache);
+
+        var response = generator.Generate("test", new InferenceOptions
+        {
+            Temperature = 0f,
+            MaxTokens = 10,
+        });
+
+        Assert.Equal(10, response.GeneratedTokenIds.Length);
+        // The small KV cache's CurrentLength must not have been mutated before rejecting it
+        Assert.Equal(3, smallKv.CurrentLength);
+    }
+
+    private sealed class StubModel : IModel
+    {
+        private const int VocabSize = 8;
+
+        public ModelConfig Config => new()
+        {
+            VocabSize = VocabSize,
+            NumLayers = NumLayers,
+            NumAttentionHeads = NumKvHeads,
+            NumKvHeads = NumKvHeads,
+            HiddenSize = HeadDim * NumKvHeads,
+            IntermediateSize = HeadDim * 4,
+            HeadDim = HeadDim,
+            MaxSequenceLength = 64,
+            Architecture = DotLLM.Core.Configuration.Architecture.Llama,
+        };
+
+        public long ComputeMemoryBytes => 0;
+
+        public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions, int deviceId)
+            => Forward(tokenIds, positions, deviceId, null);
+
+        public unsafe ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
+            int deviceId, IKvCache? kvCache)
+        {
+            int batchSize = tokenIds.Length;
+            long totalFloats = (long)batchSize * VocabSize;
+            nint ptr = (nint)NativeMemory.AlignedAlloc((nuint)(totalFloats * sizeof(float)), 64);
+            var logits = new Span<float>((void*)ptr, (int)totalFloats);
+            logits.Fill(-10f);
+            for (int b = 0; b < batchSize; b++)
+                logits[b * VocabSize + 5] = 10f; // always pick token 5 (non-EOS)
+
+            if (kvCache != null)
+            {
+                int kvStride = NumKvHeads * HeadDim;
+                for (int layer = 0; layer < NumLayers; layer++)
+                {
+                    nint kPtr = (nint)NativeMemory.AlignedAlloc((nuint)(batchSize * kvStride * sizeof(float)), 64);
+                    nint vPtr = (nint)NativeMemory.AlignedAlloc((nuint)(batchSize * kvStride * sizeof(float)), 64);
+                    NativeMemory.Clear((void*)kPtr, (nuint)(batchSize * kvStride * sizeof(float)));
+                    NativeMemory.Clear((void*)vPtr, (nuint)(batchSize * kvStride * sizeof(float)));
+
+                    var kRef = new TensorRef(batchSize, kvStride, DType.Float32, -1, kPtr);
+                    var vRef = new TensorRef(batchSize, kvStride, DType.Float32, -1, vPtr);
+                    kvCache.Update(kRef, vRef, positions, layer);
+
+                    NativeMemory.AlignedFree((void*)kPtr);
+                    NativeMemory.AlignedFree((void*)vPtr);
+                }
+            }
+
+            return new UnmanagedTensor(new TensorShape(batchSize, VocabSize), DType.Float32, deviceId, ptr);
+        }
+
+        public void Dispose() { }
+    }
+
+    private sealed class StubTokenizer(int[] encodedPrompt) : ITokenizer
+    {
+        public int VocabSize => 8;
+        public int BosTokenId => 1;
+        public int EosTokenId => 2;
+        public int[] Encode(string text) => encodedPrompt;
+        public string Decode(ReadOnlySpan<int> tokenIds) => new('x', tokenIds.Length);
+        public string DecodeToken(int tokenId) => "x";
+        public int CountTokens(string text) => encodedPrompt.Length;
     }
 }

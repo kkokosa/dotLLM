@@ -263,4 +263,38 @@ public class JinjaParserTests
         Assert.Equal("default", filter.FilterName);
         Assert.Single(filter.Args);
     }
+
+    [Fact]
+    public void Slice_TwoPart()
+    {
+        var ast = Parse("{{ items[1:-1] }}");
+        var output = Assert.IsType<ExpressionOutputNode>(ast.Nodes[0]);
+        var slice = Assert.IsType<SliceExpr>(output.Expression);
+        Assert.NotNull(slice.Start);
+        Assert.NotNull(slice.Stop);
+        Assert.Null(slice.Step);
+    }
+
+    [Fact]
+    public void Slice_ThreePart_Reverse()
+    {
+        var ast = Parse("{{ messages[::-1] }}");
+        var output = Assert.IsType<ExpressionOutputNode>(ast.Nodes[0]);
+        var slice = Assert.IsType<SliceExpr>(output.Expression);
+        Assert.Null(slice.Start);
+        Assert.Null(slice.Stop);
+        var step = Assert.IsType<UnaryExpr>(slice.Step);
+        Assert.Equal(UnaryOp.Negate, step.Op);
+    }
+
+    [Fact]
+    public void Slice_ThreePart_StartStopStep()
+    {
+        var ast = Parse("{{ items[1:5:2] }}");
+        var output = Assert.IsType<ExpressionOutputNode>(ast.Nodes[0]);
+        var slice = Assert.IsType<SliceExpr>(output.Expression);
+        Assert.NotNull(slice.Start);
+        Assert.NotNull(slice.Stop);
+        Assert.NotNull(slice.Step);
+    }
 }
