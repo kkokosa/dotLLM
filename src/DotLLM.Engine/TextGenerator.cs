@@ -185,7 +185,7 @@ public sealed class TextGenerator
                     for (int i = 0; i < prefillLen; i++)
                         positions[i] = prefillStart + i;
 
-                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
+                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache, lastLogitOnly: true))
                     {
                         long ts1 = Stopwatch.GetTimestamp();
                         prefillTicks = ts1 - ts0;
@@ -527,7 +527,7 @@ public sealed class TextGenerator
                     for (int i = 0; i < prefillLen; i++)
                         positions[i] = prefillStart + i;
 
-                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache))
+                    using (ITensor prefillLogits = _model.Forward(suffixTokens, positions, deviceId: -1, kvCache, lastLogitOnly: true))
                     {
                         long ts1 = Stopwatch.GetTimestamp();
                         prefillTicks = ts1 - ts0;
@@ -948,7 +948,7 @@ public sealed class TextGenerator
                 positions[i] = i;
 
             using ITensor _ = _draftModel!.Forward(promptIds, positions.AsSpan(0, promptLen),
-                deviceId: -1, draftKvCache);
+                deviceId: -1, draftKvCache, lastLogitOnly: true);
         }
         finally
         {
