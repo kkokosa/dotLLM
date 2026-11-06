@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Kernels;
@@ -74,6 +75,132 @@ public sealed unsafe class MatMulQ5_0Tests
         {
             NativeMemory.AlignedFree((void*)q5Ptr);
             NativeMemory.AlignedFree((void*)q8Ptr);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(18)]
+    [InlineData(128)]
+    public void VecDotQ5_0Q8_1_Neon_BitIdenticalToScalarPure(int blockCount)
+    {
+        if (!Dp.IsSupported || !AdvSimd.Arm64.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        int k = blockCount * Q5_0GroupSize;
+        nint q5Ptr = AllocRandomQ5_0Blocks(blockCount, rng);
+        nint q8_1Ptr = (nint)NativeMemory.AlignedAlloc((nuint)(blockCount * MatMul.Q8_1BlockBytes), 64);
+        try
+        {
+            float[] input = new float[k];
+            for (int i = 0; i < k; i++)
+                input[i] = rng.NextSingle() * 2f - 1f;
+            fixed (float* ip = input)
+                MatMul.QuantizeF32ToQ8_1(ip, (byte*)q8_1Ptr, k);
+
+            float scalarPure = MatMul.VecDotQ5_0Q8_1ScalarPure((byte*)q5Ptr, (byte*)q8_1Ptr, blockCount);
+            float neon = MatMul.VecDotQ5_0Q8_1Neon((byte*)q5Ptr, (byte*)q8_1Ptr, blockCount);
+            float dispatched = MatMul.VecDotQ5_0Q8_1Scalar((byte*)q5Ptr, (byte*)q8_1Ptr, blockCount);
+
+            Assert.Equal(
+                BitConverter.SingleToInt32Bits(scalarPure),
+                BitConverter.SingleToInt32Bits(neon));
+            Assert.Equal(
+                BitConverter.SingleToInt32Bits(scalarPure),
+                BitConverter.SingleToInt32Bits(dispatched));
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)q5Ptr);
+            NativeMemory.AlignedFree((void*)q8_1Ptr);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(18)]
+    [InlineData(128)]
+    public void VecDotQ5_0Q8_1R4_Neon_BitIdenticalToScalarR4Pure(int blockCount)
+    {
+        if (!Dp.IsSupported || !AdvSimd.Arm64.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        int k = blockCount * Q5_0GroupSize;
+        nint q5Ptr = AllocRandomQ5_0Blocks(4 * blockCount, rng);
+        nint q8_1Ptr = (nint)NativeMemory.AlignedAlloc((nuint)(blockCount * MatMul.Q8_1BlockBytes), 64);
+        try
+        {
+            float[] input = new float[k];
+            for (int i = 0; i < k; i++)
+                input[i] = rng.NextSingle() * 2f - 1f;
+            fixed (float* ip = input)
+                MatMul.QuantizeF32ToQ8_1(ip, (byte*)q8_1Ptr, k);
+
+            using var rw = WeightRepacking.RepackR4(q5Ptr, QuantizationType.Q5_0, 4, k);
+
+            for (int r = 0; r < 4; r++)
+            {
+                float scalarPure = MatMul.VecDotQ5_0Q8_1ScalarR4Pure((byte*)rw.Ptr, r, (byte*)q8_1Ptr, blockCount);
+                float neon = MatMul.VecDotQ5_0Q8_1NeonR4((byte*)rw.Ptr, r, (byte*)q8_1Ptr, blockCount);
+                float dispatched = MatMul.VecDotQ5_0Q8_1ScalarR4((byte*)rw.Ptr, r, (byte*)q8_1Ptr, blockCount);
+
+                Assert.Equal(
+                    BitConverter.SingleToInt32Bits(scalarPure),
+                    BitConverter.SingleToInt32Bits(neon));
+                Assert.Equal(
+                    BitConverter.SingleToInt32Bits(scalarPure),
+                    BitConverter.SingleToInt32Bits(dispatched));
+            }
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)q5Ptr);
+            NativeMemory.AlignedFree((void*)q8_1Ptr);
+        }
+    }
+
+    [Fact]
+    public void VecDotQ5_0Q8_1_Neon_All32HighBitPatterns_BitIdenticalToScalarPure()
+    {
+        if (!Dp.IsSupported || !AdvSimd.Arm64.IsSupported)
+            return;
+
+        var rng = new Random(123);
+        nint q5Ptr = AllocRandomQ5_0Blocks(1, rng);
+        nint q8_1Ptr = (nint)NativeMemory.AlignedAlloc((nuint)MatMul.Q8_1BlockBytes, 64);
+        try
+        {
+            float[] input = new float[Q5_0GroupSize];
+            for (int i = 0; i < Q5_0GroupSize; i++)
+                input[i] = rng.NextSingle() * 2f - 1f;
+            fixed (float* ip = input)
+                MatMul.QuantizeF32ToQ8_1(ip, (byte*)q8_1Ptr, Q5_0GroupSize);
+
+            for (int bit = 0; bit < 32; bit++)
+            {
+                uint qh = 1u << bit;
+                Unsafe.WriteUnaligned((byte*)q5Ptr + 2, qh);
+
+                float scalarPure = MatMul.VecDotQ5_0Q8_1ScalarPure((byte*)q5Ptr, (byte*)q8_1Ptr, 1);
+                float neon = MatMul.VecDotQ5_0Q8_1Neon((byte*)q5Ptr, (byte*)q8_1Ptr, 1);
+                Assert.Equal(
+                    BitConverter.SingleToInt32Bits(scalarPure),
+                    BitConverter.SingleToInt32Bits(neon));
+            }
+
+            Unsafe.WriteUnaligned((byte*)q5Ptr + 2, 0xFFFFFFFFu);
+            Assert.Equal(
+                BitConverter.SingleToInt32Bits(MatMul.VecDotQ5_0Q8_1ScalarPure((byte*)q5Ptr, (byte*)q8_1Ptr, 1)),
+                BitConverter.SingleToInt32Bits(MatMul.VecDotQ5_0Q8_1Neon((byte*)q5Ptr, (byte*)q8_1Ptr, 1)));
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)q5Ptr);
+            NativeMemory.AlignedFree((void*)q8_1Ptr);
         }
     }
 
@@ -153,7 +280,7 @@ public sealed unsafe class MatMulQ5_0Tests
         {
             byte* block = (byte*)ptr + b * Q5_0BlockBytes;
             Unsafe.WriteUnaligned(block, (Half)(rng.NextSingle() * 0.1f));
-            uint qh = (uint)rng.Next();
+            uint qh = ((uint)rng.Next() << 1) ^ (uint)rng.Next();
             Unsafe.WriteUnaligned(block + 2, qh);
             for (int i = 0; i < 16; i++)
                 block[6 + i] = (byte)rng.Next(256);
