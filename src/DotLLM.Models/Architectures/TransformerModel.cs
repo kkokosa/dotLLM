@@ -136,6 +136,11 @@ public sealed unsafe class TransformerModel : IModel
     /// <returns>Logits tensor of shape [seqLen, vocab_size] for all input positions.</returns>
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
                            int deviceId, IKvCache? kvCache)
+        => Forward(tokenIds, positions, deviceId, kvCache, lastLogitOnly: false);
+
+    /// <inheritdoc/>
+    public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
+                           int deviceId, IKvCache? kvCache, bool lastLogitOnly)
     {
         int maxSeq = Config.MaxSequenceLength;
         for (int i = 0; i < positions.Length; i++)
@@ -146,6 +151,8 @@ public sealed unsafe class TransformerModel : IModel
         }
 
         int seqLen = tokenIds.Length;
+        int logitStart = lastLogitOnly ? seqLen - 1 : 0;
+        int logitRows = seqLen - logitStart;
         int hiddenSize = Config.HiddenSize;
         int numHeads = Config.NumAttentionHeads;
         int numKvHeads = Config.NumKvHeads;
@@ -155,7 +162,7 @@ public sealed unsafe class TransformerModel : IModel
         int kvStride = numKvHeads * headDim;
         float eps = Config.NormEpsilon;
 
-        _state.EnsureCapacity(seqLen);
+        _state.EnsureCapacity(seqLen, logitRows);
 
         // Adaptive dispatch mode: spin-wait for decode (short, frequent dispatches),
         // event-based for prefill (long dispatches where kernel transition cost is negligible).
@@ -394,8 +401,8 @@ public sealed unsafe class TransformerModel : IModel
             }
         }
 
-        // 3. FINAL NORM (in-place: hidden → hidden)
-        for (int t = 0; t < seqLen; t++)
+        // 3. FINAL NORM (in-place: hidden → hidden; last token only when lastLogitOnly is true)
+        for (int t = logitStart; t < seqLen; t++)
         {
             float* hiddenT = hidden + t * hiddenSize;
             // Use normOut as temp so we can copy back
@@ -410,19 +417,20 @@ public sealed unsafe class TransformerModel : IModel
             new Span<float>(normOutT, hiddenSize).CopyTo(new Span<float>(hiddenT, hiddenSize));
         }
 
-        // 4. LM HEAD — all positions (enables batched speculative decoding verification)
+        // 4. LM HEAD — last position only for prefill (lastLogitOnly=true), or all positions for speculative verification
         {
             var rwOutput = _weights.RepackedOutput ?? default;
             GemmInterleaved(_weights.OutputWeight, _weights.OutputQuantType,
-                hidden, logits, _weights.OutputOutputDim, _weights.OutputInputDim, seqLen,
+                hidden + (long)logitStart * hiddenSize, logits,
+                _weights.OutputOutputDim, _weights.OutputInputDim, logitRows,
                 null, in rwOutput);
         }
 
-        // 5. RETURN [seqLen, vocabSize]
-        var shape = new TensorShape(seqLen, vocabSize);
+        // 5. RETURN [logitRows, vocabSize]
+        var shape = new TensorShape(logitRows, vocabSize);
         var result = UnmanagedTensor.Allocate(shape, DType.Float32, deviceId);
-        new Span<float>(logits, seqLen * vocabSize).CopyTo(
-            new Span<float>((void*)result.DataPointer, seqLen * vocabSize));
+        new Span<float>(logits, logitRows * vocabSize).CopyTo(
+            new Span<float>((void*)result.DataPointer, logitRows * vocabSize));
 
         return result;
     }
@@ -635,11 +643,27 @@ public sealed unsafe class TransformerModel : IModel
             // Multi-token: L2-tiled GEMM over the R4 layout. Same tiling shape as the row-major
             // path, so it inherits the interleaved dot kernel's advantage instead of fighting
             // register pressure the way the outer-product microkernels do (Step 26, #61).
-            if (qt == QuantizationType.Q8_0 && preQuantizedInput != null)
+            if (preQuantizedInput != null)
             {
-                MatMul.GemmR4TiledQ8_0((byte*)rw.Ptr, preQuantizedInput, c,
-                    rw.FullGroupCount, rw.TailRows, k / 32, m, n, _threadPool);
-                return;
+                switch (qt)
+                {
+                    case QuantizationType.Q8_0:
+                        MatMul.GemmR4TiledQ8_0((byte*)rw.Ptr, preQuantizedInput, c,
+                            rw.FullGroupCount, rw.TailRows, k / 32, m, n, _threadPool);
+                        return;
+                    case QuantizationType.Q4_K:
+                        MatMul.OuterProductGemmQ4_K((byte*)rw.Ptr, preQuantizedInput, c,
+                            rw.FullGroupCount, rw.TailRows, k / 256, m, n, _threadPool);
+                        return;
+                    case QuantizationType.Q5_K:
+                        MatMul.OuterProductGemmQ5_K((byte*)rw.Ptr, preQuantizedInput, c,
+                            rw.FullGroupCount, rw.TailRows, k / 256, m, n, _threadPool);
+                        return;
+                    case QuantizationType.Q6_K:
+                        MatMul.OuterProductGemmQ6_K((byte*)rw.Ptr, preQuantizedInput, c,
+                            rw.FullGroupCount, rw.TailRows, k / 256, m, n, _threadPool);
+                        return;
+                }
             }
 
             Gemm(origWeights, qt, b, c, m, k, n, preQuantizedInput);

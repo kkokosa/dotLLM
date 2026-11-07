@@ -2239,15 +2239,44 @@ public static unsafe partial class MatMul
         int blockBytes,
         delegate* managed<byte*, byte*, float*, int, int, int, void> computeRowsInterleaved)
     {
-        int q8kRowBytes = superBlockCount * Q8_K_BlockBytes;
-
-        // Process each R4 group against all N tokens before moving to next group
-        // This keeps the R4 group data hot in cache for all token passes
-        for (int t = 0; t < n; t++)
+        if (m <= 0 || n <= 0)
+            return;
+        if (superBlockCount <= 0)
         {
-            byte* xQ8K = inputQ8K + (long)t * q8kRowBytes;
-            computeRowsInterleaved(repackedWeights, xQ8K, c + (long)t * m,
-                fullGroups, tailRows, superBlockCount);
+            new Span<float>(c, checked(m * n)).Clear();
+            return;
+        }
+
+        int q8kRowBytes = superBlockCount * Q8_K_BlockBytes;
+        long groupBytes = 4L * superBlockCount * blockBytes;
+        int tileGroups = Math.Max(1, ComputeTileM(superBlockCount * blockBytes) / 4);
+
+        // Process each R4 group tile against all N tokens before moving to next tile.
+        // This keeps the R4 group data hot in L2 cache for all token passes.
+        for (int gStart = 0; gStart < fullGroups; gStart += tileGroups)
+        {
+            int gCount = Math.Min(tileGroups, fullGroups - gStart);
+            byte* tileWeights = repackedWeights + gStart * groupBytes;
+            int outRowOffset = gStart * 4;
+
+            for (int t = 0; t < n; t++)
+            {
+                byte* xQ8K = inputQ8K + (long)t * q8kRowBytes;
+                computeRowsInterleaved(tileWeights, xQ8K, c + (long)t * m + outRowOffset,
+                    gCount, 0, superBlockCount);
+            }
+        }
+
+        if (tailRows > 0)
+        {
+            byte* tailBase = repackedWeights + fullGroups * groupBytes;
+            int tailOffset = fullGroups * 4;
+            for (int t = 0; t < n; t++)
+            {
+                byte* xQ8K = inputQ8K + (long)t * q8kRowBytes;
+                computeRowsInterleaved(tailBase, xQ8K, c + (long)t * m + tailOffset,
+                    0, tailRows, superBlockCount);
+            }
         }
     }
 
@@ -2263,15 +2292,14 @@ public static unsafe partial class MatMul
         public int M;
         public int N;
         public int BlockBytes;
+        public int TileGroups;
         public delegate* managed<byte*, byte*, float*, int, int, int, void> ComputeRowsInterleaved;
     }
 
     /// <summary>
-    /// Parallel outer-product GEMM for K-quant R4 weights.
-    /// For K-quants, we parallelize by partitioning tokens across threads,
-    /// each processing the full weight matrix for their token subset.
-    /// This avoids the complexity of partitioning R4 groups with K-quant's
-    /// multi-super-block structure while maintaining good parallelism.
+    /// Parallel R4-tiled GEMM for K-quant R4 weights.
+    /// Partitions R4 row groups across threads and tiles within each thread's share
+    /// so every weight tile stays hot in L2 cache across all N tokens.
     /// </summary>
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
@@ -2281,6 +2309,14 @@ public static unsafe partial class MatMul
         delegate* managed<byte*, byte*, float*, int, int, int, void> computeRowsInterleaved,
         ComputeThreadPool? pool)
     {
+        if (m <= 0 || n <= 0)
+            return;
+        if (superBlockCount <= 0)
+        {
+            new Span<float>(c, checked(m * n)).Clear();
+            return;
+        }
+
         if (pool is null || m < ParallelMinRows)
         {
             OuterProductGemmKQuant(repackedWeights, inputQ8K, c, fullGroups, tailRows,
@@ -2293,7 +2329,9 @@ public static unsafe partial class MatMul
             RepackedWeights = repackedWeights, InputQ8K = inputQ8K, C = c,
             FullGroups = fullGroups, TailRows = tailRows,
             SuperBlockCount = superBlockCount, M = m, N = n,
-            BlockBytes = blockBytes, ComputeRowsInterleaved = computeRowsInterleaved
+            BlockBytes = blockBytes,
+            TileGroups = Math.Max(1, ComputeTileM(superBlockCount * blockBytes) / 4),
+            ComputeRowsInterleaved = computeRowsInterleaved
         };
         pool.Dispatch((nint)(&ctx), &OuterProductGemmKQuantWorker);
     }
@@ -2302,20 +2340,39 @@ public static unsafe partial class MatMul
     {
         ref var ctx = ref Unsafe.AsRef<OuterProductGemmKQuantCtx>((void*)ctxPtr);
 
-        // Partition tokens across threads
-        int tokensPerThread = (ctx.N + threadCount - 1) / threadCount;
-        int startToken = threadIdx * tokensPerThread;
-        int endToken = Math.Min(startToken + tokensPerThread, ctx.N);
-
-        if (startToken >= ctx.N) return;
-
         int q8kRowBytes = ctx.SuperBlockCount * Q8_K_BlockBytes;
+        long groupBytes = 4L * ctx.SuperBlockCount * ctx.BlockBytes;
 
-        for (int t = startToken; t < endToken; t++)
+        // Partition R4 groups across threads, then tile within each thread's share.
+        int groupsPerThread = (ctx.FullGroups + threadCount - 1) / threadCount;
+        int startGroup = threadIdx * groupsPerThread;
+        int endGroup = Math.Min(startGroup + groupsPerThread, ctx.FullGroups);
+
+        for (int gStart = startGroup; gStart < endGroup; gStart += ctx.TileGroups)
         {
-            byte* xQ8K = ctx.InputQ8K + (long)t * q8kRowBytes;
-            ctx.ComputeRowsInterleaved(ctx.RepackedWeights, xQ8K, ctx.C + (long)t * ctx.M,
-                ctx.FullGroups, ctx.TailRows, ctx.SuperBlockCount);
+            int gCount = Math.Min(ctx.TileGroups, endGroup - gStart);
+            byte* tileWeights = ctx.RepackedWeights + gStart * groupBytes;
+            int outRowOffset = gStart * 4;
+
+            for (int t = 0; t < ctx.N; t++)
+            {
+                byte* xQ8K = ctx.InputQ8K + (long)t * q8kRowBytes;
+                ctx.ComputeRowsInterleaved(tileWeights, xQ8K, ctx.C + (long)t * ctx.M + outRowOffset,
+                    gCount, 0, ctx.SuperBlockCount);
+            }
+        }
+
+        // Thread 0 handles the row-major tail rows.
+        if (threadIdx == 0 && ctx.TailRows > 0)
+        {
+            byte* tailBase = ctx.RepackedWeights + ctx.FullGroups * groupBytes;
+            int tailOffset = ctx.FullGroups * 4;
+            for (int t = 0; t < ctx.N; t++)
+            {
+                byte* xQ8K = ctx.InputQ8K + (long)t * q8kRowBytes;
+                ctx.ComputeRowsInterleaved(tailBase, xQ8K, ctx.C + (long)t * ctx.M + tailOffset,
+                    0, ctx.TailRows, ctx.SuperBlockCount);
+            }
         }
     }
 
