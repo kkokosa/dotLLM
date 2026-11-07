@@ -208,9 +208,33 @@ public sealed class PrefixCacheTests
         Assert.Equal(3, smallKv.CurrentLength);
     }
 
+    [Fact]
+    public async Task TextGenerator_PrefillRequestsLastLogitOnly_InSyncAndStreamingPaths()
+    {
+        int[] prompt = [1, 10, 11, 12, 13];
+        var model = new StubModel();
+        var tokenizer = new StubTokenizer(prompt);
+        var generator = new TextGenerator(model, tokenizer);
+        var options = new DotLLM.Core.Configuration.InferenceOptions { MaxTokens = 2, Temperature = 0f };
+
+        var syncRes = generator.Generate("prompt", options);
+        Assert.Equal(2, syncRes.GeneratedTokenIds.Length);
+        Assert.Contains(model.Calls, c => c.BatchSize == prompt.Length && c.LastLogitOnly);
+
+        model.Calls.Clear();
+        int streamedTokens = 0;
+        await foreach (var _ in generator.GenerateStreamingTokensAsync("prompt", options))
+            streamedTokens++;
+
+        Assert.Equal(2, streamedTokens);
+        Assert.Contains(model.Calls, c => c.BatchSize == prompt.Length && c.LastLogitOnly);
+    }
+
     private sealed class StubModel : IModel
     {
         private const int VocabSize = 8;
+
+        public List<(int BatchSize, bool LastLogitOnly)> Calls { get; } = [];
 
         public ModelConfig Config => new()
         {
@@ -228,17 +252,24 @@ public sealed class PrefixCacheTests
         public long ComputeMemoryBytes => 0;
 
         public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions, int deviceId)
-            => Forward(tokenIds, positions, deviceId, null);
+            => Forward(tokenIds, positions, deviceId, null, lastLogitOnly: false);
+
+        public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
+            int deviceId, IKvCache? kvCache)
+            => Forward(tokenIds, positions, deviceId, kvCache, lastLogitOnly: false);
 
         public unsafe ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions,
-            int deviceId, IKvCache? kvCache)
+            int deviceId, IKvCache? kvCache, bool lastLogitOnly)
         {
             int batchSize = tokenIds.Length;
-            long totalFloats = (long)batchSize * VocabSize;
+            int logitRows = lastLogitOnly ? 1 : batchSize;
+            Calls.Add((batchSize, lastLogitOnly));
+
+            long totalFloats = (long)logitRows * VocabSize;
             nint ptr = (nint)NativeMemory.AlignedAlloc((nuint)(totalFloats * sizeof(float)), 64);
             var logits = new Span<float>((void*)ptr, (int)totalFloats);
             logits.Fill(-10f);
-            for (int b = 0; b < batchSize; b++)
+            for (int b = 0; b < logitRows; b++)
                 logits[b * VocabSize + 5] = 10f; // always pick token 5 (non-EOS)
 
             if (kvCache != null)
@@ -260,7 +291,7 @@ public sealed class PrefixCacheTests
                 }
             }
 
-            return new UnmanagedTensor(new TensorShape(batchSize, VocabSize), DType.Float32, deviceId, ptr);
+            return new UnmanagedTensor(new TensorShape(logitRows, VocabSize), DType.Float32, deviceId, ptr);
         }
 
         public void Dispose() { }

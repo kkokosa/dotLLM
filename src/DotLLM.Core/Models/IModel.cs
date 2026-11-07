@@ -37,6 +37,20 @@ public interface IModel : IDisposable
     /// <param name="positions">Position indices for each token.</param>
     /// <param name="deviceId">Target device for computation.</param>
     /// <param name="kvCache">Optional KV-cache. When null, behaves identically to the uncached forward pass.</param>
-    /// <returns>Logits tensor of shape [1, vocab_size] for the last token.</returns>
+    /// <returns>Logits tensor of shape [1, vocab_size] or [seqLen, vocab_size].</returns>
     ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions, int deviceId, IKvCache? kvCache);
+
+    /// <summary>
+    /// Runs a forward pass with optional KV-cache, optionally computing output logits only for the final token.
+    /// During prompt prefill, only the last token's logits are needed to sample the first generated token,
+    /// whereas speculative decoding verification requires logits for all input positions.
+    /// </summary>
+    /// <param name="tokenIds">Input token IDs for this step.</param>
+    /// <param name="positions">Position indices for each token.</param>
+    /// <param name="deviceId">Target device for computation.</param>
+    /// <param name="kvCache">Optional KV-cache. When null, behaves identically to the uncached forward pass.</param>
+    /// <param name="lastLogitOnly">When true, skips final normalization and LM head projection for positions 0..seqLen-2 and returns [1, vocab_size].</param>
+    /// <returns>Logits tensor of shape [1, vocab_size] when <paramref name="lastLogitOnly"/> is true, otherwise [seqLen, vocab_size].</returns>
+    ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions, int deviceId, IKvCache? kvCache, bool lastLogitOnly)
+        => Forward(tokenIds, positions, deviceId, kvCache);
 }
