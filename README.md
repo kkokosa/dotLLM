@@ -23,7 +23,7 @@ dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around lla
 
 ## Key Features
 
-### Performance
+### CPU/CUDA Performance
 - **Zero-GC inference** — unmanaged memory (`NativeMemory.AlignedAlloc`, 64-byte aligned) for all tensor data; no managed heap allocations on the hot path
 - **SIMD vectorization** — `TensorPrimitives` + hand-tuned `System.Runtime.Intrinsics` for quantized matmul, RMSNorm, RoPE, softmax
 - **Memory-mapped model loading** — GGUF files loaded via `MemoryMappedFile`; OS demand-paging means multi-GB models load in milliseconds
@@ -41,6 +41,10 @@ dotLLM is a ground-up LLM inference engine for .NET — not a wrapper around lla
 - **Speculative decoding** — draft-verify-accept with KV-cache rollback (greedy mode today; non-greedy planned — see issue #121)
 - **Structured output** — FSM/PDA-based constrained decoding guaranteeing valid JSON, JSON Schema, regex, and grammar
 - **(Planned) Continuous batching** — iteration-level scheduling with preemption and priority queuing — Phase 9, see [Roadmap](#roadmap)
+
+### Experimental Ascend
+- **Single-card CANN backend** — dense Llama/Qwen2 GGUF F32/F16/Q8_0 loading, FP32 expanded weights/activations, contiguous FP16 KV, and `--device ascend[:N]` for run/chat/serve.
+- Requires a separately built native bridge on Linux; source builds only, with a narrower model/option scope than CPU/CUDA. See [runtime and commands](docs/ASCEND_RUNTIME.md) and [910B4 validation/performance results](https://github.com/Cheongroach/dotLLM/blob/archive/ascend-research-20261024/docs/ASCEND_FULL_RESULTS.md).
 
 ### Extensibility
 - **Pluggable backends** — `IBackend` interface with separate packages per backend (CPU, CUDA, ROCm)

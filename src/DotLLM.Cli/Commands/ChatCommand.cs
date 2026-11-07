@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using DotLLM.Ascend;
 using DotLLM.Cli.Helpers;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
@@ -116,7 +117,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
 
         /// <summary>Compute device.</summary>
         [CommandOption("--device|-d")]
-        [Description("Compute device: 'cpu' (default), 'gpu', 'gpu:0', 'gpu:1'.")]
+        [Description("Compute device: 'cpu' (default), 'gpu:N', or experimental 'ascend:N'.")]
         [DefaultValue("cpu")]
         public string Device { get; set; } = "cpu";
 
@@ -210,6 +211,8 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
     /// <inheritdoc/>
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
     {
+        AscendDevice.ValidateOptions(settings.Device, settings.GpuLayers, settings.CacheTypeK,
+            settings.CacheTypeV, settings.Paged, cacheWindow: settings.CacheWindow);
         // Resolve before loading the model so a bad path fails fast.
         if (!TextArgument.TryResolve(settings.SystemPrompt, settings.SystemPromptFile,
                 "--system|-s", "--system-file", required: false,
@@ -242,7 +245,12 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                 tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
                 int gpuLayers = ResolveGpuLayers(settings, config);
-                if (gpuLayers <= 0)
+                if (AscendDevice.TryParse(settings.Device, out int npuId))
+                {
+                    ctx.Status($"Loading {config.Architecture} on Ascend {npuId}...");
+                    model = AscendTransformerModel.LoadFromGguf(gguf, config, npuId);
+                }
+                else if (gpuLayers <= 0)
                 {
                     var threading = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
                     ctx.Status($"Loading {config.Architecture} model ({config.NumLayers} layers, {threading.EffectiveThreadCount} threads)...");
@@ -346,7 +354,8 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
         var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
         var quantLabel = InferQuantLabel(resolvedPath, settings.Quant);
         var samplingLabel = BuildSamplingLabel(settings);
-        var deviceLabel = model is DotLLM.Cuda.CudaTransformerModel
+        var deviceLabel = model is AscendTransformerModel ascend ? $"Ascend {ascend.DeviceId} FP32"
+            : model is DotLLM.Cuda.CudaTransformerModel
             ? DotLLM.Cuda.CudaDevice.GetDevice(settings.Device.IndexOf(':') is int ci and > 0
                 ? int.Parse(settings.Device.AsSpan(ci + 1)) : 0).ToString()
             : $"{threadingInfo.EffectiveThreadCount} threads";
@@ -368,7 +377,11 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
 
         Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
         DotLLM.Engine.KvCache.PagedKvCacheFactory? pagedFactory = null;
-        if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
+        if (model is AscendTransformerModel ascendModel)
+        {
+            kvFactory = (_, size) => ascendModel.CreateKvCache(size);
+        }
+        else if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
         {
             if (settings.Paged)
                 AnsiConsole.MarkupLine("[yellow]WARNING: Paged KV-cache not supported with CUDA, using GPU cache.[/]");
@@ -402,7 +415,7 @@ internal sealed class ChatCommand : AsyncCommand<ChatCommand.Settings>
                 kvConfig.KeyDType, kvConfig.ValueDType, kvConfig.MixedPrecisionWindowSize);
         }
 
-        PrefixCache? prefixCache = !settings.NoPromptCache
+        PrefixCache? prefixCache = !settings.NoPromptCache && model is not AscendTransformerModel
             ? new PrefixCache(settings.PromptCacheSize)
             : null;
         var generator = new TextGenerator(model!, tokenizer!, kvFactory, prefixCache);

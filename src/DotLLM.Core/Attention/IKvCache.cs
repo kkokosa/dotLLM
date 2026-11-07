@@ -13,6 +13,9 @@ public interface IKvCache : IDisposable
     /// <summary>Maximum number of positions this cache can hold.</summary>
     int MaxLength { get; }
 
+    /// <summary>Allocated cache storage in bytes, or zero when the backend does not report it.</summary>
+    long AllocatedBytes => 0;
+
     /// <summary>
     /// Appends new key and value projections at the given positions.
     /// </summary>

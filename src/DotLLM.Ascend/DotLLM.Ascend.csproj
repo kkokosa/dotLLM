@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <Description>Experimental single-card AscendCL FP16 dense transformer inference.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../DotLLM.Core/DotLLM.Core.csproj" />
+    <ProjectReference Include="../DotLLM.Models/DotLLM.Models.csproj" />
+  </ItemGroup>
+</Project>

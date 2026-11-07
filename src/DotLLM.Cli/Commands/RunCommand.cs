@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using DotLLM.Ascend;
 using DotLLM.Cli.Helpers;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
@@ -98,7 +99,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         public bool PCoreOnly { get; set; }
 
         [CommandOption("--device|-d")]
-        [Description("Compute device: 'cpu' (default), 'gpu', 'gpu:0', 'gpu:1'.")]
+        [Description("Compute device: 'cpu' (default), 'gpu:N', or experimental 'ascend:N'.")]
         [DefaultValue("cpu")]
         public string Device { get; set; } = "cpu";
 
@@ -177,6 +178,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
     {
+        AscendDevice.ValidateOptions(settings.Device, settings.GpuLayers, settings.CacheTypeK,
+            settings.CacheTypeV, settings.Paged, settings.SpeculativeModel, settings.CacheWindow);
         if (!TextArgument.TryResolve(settings.Prompt, settings.PromptFile,
                 "--prompt|-p", "--prompt-file", required: true,
                 out string? resolvedPrompt, out string? promptError))
@@ -206,7 +209,11 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
             int gpuLayers = ResolveGpuLayers(settings, config);
-            if (gpuLayers <= 0)
+            if (AscendDevice.TryParse(settings.Device, out int npuId))
+            {
+                model = AscendTransformerModel.LoadFromGguf(gguf, config, npuId);
+            }
+            else if (gpuLayers <= 0)
             {
                 model = TransformerModel.LoadFromGguf(gguf, config,
                     new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly));
@@ -224,98 +231,102 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             }
         }
 
-        var loadSw = Stopwatch.StartNew();
-        if (settings.Json)
-        {
-            LoadModel();
-        }
-        else
-        {
-            AnsiConsole.Status()
-                .Spinner(Spinner.Known.Dots)
-                .Start("Loading model...", _ => LoadModel());
-        }
-        loadSw.Stop();
-
-        // Display VRAM warning after spinner completes (so it stays visible).
-        // In JSON mode, write to stderr so it doesn't corrupt the JSON output.
-        string? vramWarning = (model as DotLLM.Cuda.CudaTransformerModel)?.VramWarning
-                           ?? (model as DotLLM.Cuda.HybridTransformerModel)?.VramWarning;
-        if (vramWarning is not null)
-        {
-            if (settings.Json)
-                Console.Error.WriteLine($"WARNING: {vramWarning}");
-            else
-                AnsiConsole.MarkupLine($"[yellow]WARNING: {Markup.Escape(vramWarning)}[/]");
-        }
-
-        var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
-
-        // Parse tool definitions and format prompt via chat template when tools are provided
-        ToolDefinition[]? tools = ChatCommand.ParseToolDefinitions(settings.Tools);
-        IToolCallParser? toolCallParser = null;
-        string effectivePrompt = prompt;
-        if (tools is { Length: > 0 })
-        {
-            string bosToken = tokenizer.DecodeToken(tokenizer.BosTokenId);
-            string eosToken = tokenizer.DecodeToken(tokenizer.EosTokenId);
-            var chatTemplate = GgufChatTemplateFactory.TryCreate(gguf.Metadata, tokenizer)
-                ?? new JinjaChatTemplate(ChatCommand.DefaultChatMlTemplateText, bosToken, eosToken);
-
-            var messages = new List<ChatMessage>
-            {
-                new() { Role = "user", Content = prompt }
-            };
-            effectivePrompt = chatTemplate.Apply(messages, new ChatTemplateOptions
-            {
-                AddGenerationPrompt = true,
-                Tools = tools
-            });
-            toolCallParser = GgufChatTemplateFactory.CreateToolCallParser(gguf.Metadata, config.Architecture);
-        }
-
-        // Build inference options from CLI flags
-        var responseFormat = settings.ResponseFormat.ToLowerInvariant() switch
-        {
-            "json_object" => (Core.Configuration.ResponseFormat)new Core.Configuration.ResponseFormat.JsonObject(),
-            "json_schema" => BuildJsonSchemaFormat(settings.Schema),
-            "regex" => BuildRegexFormat(settings.Pattern),
-            "grammar" => BuildGrammarFormat(settings.Grammar),
-            _ => null
-        };
-        var inferenceOptions = new InferenceOptions
-        {
-            Temperature = settings.Temperature,
-            TopK = settings.TopK,
-            TopP = settings.TopP,
-            MinP = settings.MinP,
-            RepetitionPenalty = settings.RepeatPenalty,
-            RepetitionPenaltyWindow = settings.RepeatLastN,
-            MaxTokens = settings.MaxTokens,
-            Seed = settings.Seed,
-            ResponseFormat = responseFormat,
-            Threading = threadingInfo
-        };
-
-        if (!settings.Json)
-        {
-            // Build compact pre-gen header rule
-            var quantLabel = InferQuantLabel(resolvedPath, settings.Quant);
-            var samplingLabel = BuildSamplingLabel(settings);
-            var deviceLabel = model switch
-            {
-                DotLLM.Cuda.CudaTransformerModel => DotLLM.Cuda.CudaDevice.GetDevice(ParseGpuId(settings.Device)).ToString(),
-                DotLLM.Cuda.HybridTransformerModel h => $"hybrid {h.NumGpuLayers}gpu/{config.NumLayers - h.NumGpuLayers}cpu",
-                _ => $"{threadingInfo.EffectiveThreadCount} threads"
-            };
-            var segments = $"{config.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {deviceLabel} | {samplingLabel}";
-            AnsiConsole.Write(new Rule($"[grey]dotllm | {Markup.Escape(segments)}[/]").LeftJustified());
-            AnsiConsole.WriteLine();
-        }
-
         DotLLM.Engine.KvCache.PagedKvCacheFactory? pagedFactory = null;
+        IModel? draftModel = null;
+        GgufFile? draftGguf = null;
         try
         {
+            var loadSw = Stopwatch.StartNew();
+            if (settings.Json)
+            {
+                LoadModel();
+            }
+            else
+            {
+                AnsiConsole.Status()
+                    .Spinner(Spinner.Known.Dots)
+                    .Start("Loading model...", _ => LoadModel());
+            }
+            loadSw.Stop();
+
+            // Display VRAM warning after spinner completes (so it stays visible).
+            // In JSON mode, write to stderr so it doesn't corrupt the JSON output.
+            string? vramWarning = (model as DotLLM.Cuda.CudaTransformerModel)?.VramWarning
+                               ?? (model as DotLLM.Cuda.HybridTransformerModel)?.VramWarning;
+            if (vramWarning is not null)
+            {
+                if (settings.Json)
+                    Console.Error.WriteLine($"WARNING: {vramWarning}");
+                else
+                    AnsiConsole.MarkupLine($"[yellow]WARNING: {Markup.Escape(vramWarning)}[/]");
+            }
+
+            var threadingInfo = new ThreadingConfig(settings.Threads, settings.DecodeThreads, settings.NumaPin, settings.PCoreOnly);
+
+            // Parse tool definitions and format prompt via chat template when tools are provided
+            ToolDefinition[]? tools = ChatCommand.ParseToolDefinitions(settings.Tools);
+            IToolCallParser? toolCallParser = null;
+            string effectivePrompt = prompt;
+            if (tools is { Length: > 0 })
+            {
+                string bosToken = tokenizer.DecodeToken(tokenizer.BosTokenId);
+                string eosToken = tokenizer.DecodeToken(tokenizer.EosTokenId);
+                var chatTemplate = GgufChatTemplateFactory.TryCreate(gguf.Metadata, tokenizer)
+                    ?? new JinjaChatTemplate(ChatCommand.DefaultChatMlTemplateText, bosToken, eosToken);
+
+                var messages = new List<ChatMessage>
+                {
+                    new() { Role = "user", Content = prompt }
+                };
+                effectivePrompt = chatTemplate.Apply(messages, new ChatTemplateOptions
+                {
+                    AddGenerationPrompt = true,
+                    Tools = tools
+                });
+                toolCallParser = GgufChatTemplateFactory.CreateToolCallParser(gguf.Metadata, config.Architecture);
+            }
+
+            // Build inference options from CLI flags
+            var responseFormat = settings.ResponseFormat.ToLowerInvariant() switch
+            {
+                "json_object" => (Core.Configuration.ResponseFormat)new Core.Configuration.ResponseFormat.JsonObject(),
+                "json_schema" => BuildJsonSchemaFormat(settings.Schema),
+                "regex" => BuildRegexFormat(settings.Pattern),
+                "grammar" => BuildGrammarFormat(settings.Grammar),
+                _ => null
+            };
+            var inferenceOptions = new InferenceOptions
+            {
+                Temperature = settings.Temperature,
+                TopK = settings.TopK,
+                TopP = settings.TopP,
+                MinP = settings.MinP,
+                RepetitionPenalty = settings.RepeatPenalty,
+                RepetitionPenaltyWindow = settings.RepeatLastN,
+                MaxTokens = settings.MaxTokens,
+                Seed = settings.Seed,
+                ResponseFormat = responseFormat,
+                Threading = threadingInfo
+            };
+
+            if (!settings.Json)
+            {
+                // Build compact pre-gen header rule
+                var quantLabel = InferQuantLabel(resolvedPath, settings.Quant);
+                var samplingLabel = BuildSamplingLabel(settings);
+                var deviceLabel = model switch
+                {
+                    AscendTransformerModel a => $"Ascend {a.DeviceId} FP32",
+                    DotLLM.Cuda.CudaTransformerModel => DotLLM.Cuda.CudaDevice.GetDevice(ParseGpuId(settings.Device)).ToString(),
+                    DotLLM.Cuda.HybridTransformerModel h => $"hybrid {h.NumGpuLayers}gpu/{config.NumLayers - h.NumGpuLayers}cpu",
+                    _ => $"{threadingInfo.EffectiveThreadCount} threads"
+                };
+                var segments = $"{config.Architecture} {config.NumLayers}L/{config.HiddenSize}H | {quantLabel} | {deviceLabel} | {samplingLabel}";
+                AnsiConsole.Write(new Rule($"[grey]dotllm | {Markup.Escape(segments)}[/]").LeftJustified());
+                AnsiConsole.WriteLine();
+            }
+
+
             // Add stop sequences for tool calling end-of-turn tokens
             if (tools is { Length: > 0 })
             {
@@ -338,7 +349,11 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 settings.CacheWindow);
 
             Func<ModelConfig, int, DotLLM.Core.Attention.IKvCache>? kvFactory = null;
-            if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
+            if (model is AscendTransformerModel ascendModel)
+            {
+                kvFactory = (_, size) => ascendModel.CreateKvCache(size);
+            }
+            else if (model is DotLLM.Cuda.CudaTransformerModel cudaModel)
             {
                 if (settings.Paged)
                     Console.Error.WriteLine("WARNING: Paged KV-cache not supported with CUDA, using GPU cache.");
@@ -373,8 +388,6 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             }
 
             // Load speculative draft model if requested
-            IModel? draftModel = null;
-            GgufFile? draftGguf = null;
             if (!string.IsNullOrEmpty(settings.SpeculativeModel))
             {
                 var draftPath = GgufFileResolver.Resolve(settings.SpeculativeModel, null);
@@ -449,7 +462,8 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
             // Memory metrics
             long fileSize = new FileInfo(resolvedPath).Length;
-            long modelWeightsBytes = fileSize - gguf.DataSectionOffset;
+            long modelWeightsBytes = model is AscendTransformerModel ascend
+                ? ascend.DeviceWeightBytes : fileSize - gguf.DataSectionOffset;
             long computeBytes = model.ComputeMemoryBytes;
             int cacheSize = Math.Min(promptLen + settings.MaxTokens, config.MaxSequenceLength);
             // Use actual KV-cache bytes from engine timings (reflects quantization compression).
@@ -462,7 +476,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             else
                 kvCacheBytes = (long)config.NumLayers * 2 * cacheSize
                     * config.NumKvHeads * config.HeadDim
-                    * (model is DotLLM.Cuda.CudaTransformerModel ? sizeof(ushort) : sizeof(float));
+                    * (model is DotLLM.Cuda.CudaTransformerModel or AscendTransformerModel ? sizeof(ushort) : sizeof(float));
             // R4-interleaved buffers are a second, committed copy of the weights held alongside
             // the mapped file — counting only the mapping understates the footprint by ~2x.
             long repackedBytes = model.RepackedWeightBytes;
@@ -557,6 +571,7 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 bodyLines.Add(new Text(""));
                 bodyLines.Add(new Markup("  [bold]Memory[/]"));
                 bodyLines.Add(new Markup(MemLine("Weights", modelWeightsBytes,
+                    model is AscendTransformerModel ? "(NPU FP32 expansion)" :
                     repackedBytes > 0 ? "(memory-mapped, +repacked below)" : "(memory-mapped)")));
                 if (repackedBytes > 0)
                     bodyLines.Add(new Markup(MemLine("Repacked (R4)", repackedBytes, "(committed)")));
@@ -589,9 +604,12 @@ internal sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         }
         finally
         {
-            pagedFactory?.Dispose();
-            model.Dispose();
-            gguf.Dispose();
+            try { pagedFactory?.Dispose(); draftModel?.Dispose(); }
+            finally
+            {
+                try { draftGguf?.Dispose(); model?.Dispose(); }
+                finally { gguf?.Dispose(); }
+            }
         }
 
         return 0;

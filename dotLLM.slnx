@@ -31,6 +31,7 @@
     <Project Path="samples/DotLLM.Sample.ToolCalling/DotLLM.Sample.ToolCalling.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/DotLLM.Ascend/DotLLM.Ascend.csproj" />
     <Project Path="src/DotLLM.Cli/DotLLM.Cli.csproj" />
     <Project Path="src/DotLLM.Core/DotLLM.Core.csproj" />
     <Project Path="src/DotLLM.Cpu/DotLLM.Cpu.csproj" />
@@ -44,6 +45,7 @@
     <Project Path="src/DotLLM.Tokenizers/DotLLM.Tokenizers.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/DotLLM.Tests.Ascend/DotLLM.Tests.Ascend.csproj" />
     <Project Path="tests/DotLLM.Tests.Integration/DotLLM.Tests.Integration.csproj" />
     <Project Path="tests/DotLLM.Tests.Unit/DotLLM.Tests.Unit.csproj" />
   </Folder>

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using DotLLM.Ascend;
 using DotLLM.Engine;
 using DotLLM.Server;
 using Spectre.Console;
@@ -33,7 +34,7 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
 
         /// <summary>Compute device.</summary>
         [CommandOption("--device|-d")]
-        [Description("Compute device: 'cpu' (default), 'gpu', 'gpu:0', 'gpu:1'.")]
+        [Description("Compute device: 'cpu' (default), 'gpu:N', or experimental 'ascend:N'.")]
         [DefaultValue("cpu")]
         public string Device { get; set; } = "cpu";
 
@@ -128,6 +129,8 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
     /// <inheritdoc/>
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
     {
+        AscendDevice.ValidateOptions(settings.Device, settings.GpuLayers, settings.CacheTypeK,
+            settings.CacheTypeV, speculativeModel: settings.SpeculativeModel);
         var serverOptions = new ServerOptions
         {
             Model = settings.Model ?? "",
@@ -218,10 +221,8 @@ internal sealed class ServeCommand : AsyncCommand<ServeCommand.Settings>
         }
 
         // Run server (blocks until shutdown)
-        await app.RunAsync(url);
-
-        // Cleanup
-        state.Dispose();
+        try { await app.RunAsync(url); }
+        finally { state.Dispose(); await app.DisposeAsync(); }
         return 0;
     }
 }

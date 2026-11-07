@@ -1021,6 +1021,6 @@ public sealed class TextGenerator
     {
         KvCache.SimpleKvCache simple => simple.AllocatedBytes,
         KvCache.QuantizedKvCache quantized => quantized.AllocatedBytes,
-        _ => 0 // GPU caches — AllocatedBytes is on the concrete type, accessed by CLI directly
+        _ => kvCache.AllocatedBytes
     };
 }

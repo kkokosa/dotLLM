@@ -13,7 +13,7 @@ public sealed record ServerOptions
     /// <summary>Quantization filter (e.g., Q8_0, Q4_K_M).</summary>
     public string? Quant { get; init; }
 
-    /// <summary>Compute device: "cpu", "gpu", "gpu:0".</summary>
+    /// <summary>Compute device: "cpu", "gpu[:ordinal]", "ascend[:ordinal]".</summary>
     public string Device { get; init; } = "cpu";
 
     /// <summary>Number of GPU layers for hybrid offloading.</summary>
@@ -128,7 +128,7 @@ public sealed record ServerOptions
 
         if (model is null)
         {
-            Console.Error.WriteLine("Usage: dotllm-server --model <path-or-repo> [--port 8080] [--device cpu|gpu]");
+            Console.Error.WriteLine("Usage: dotllm-server --model <path-or-repo> [--port 8080] [--device cpu|gpu|ascend]");
             Environment.Exit(1);
         }
 
