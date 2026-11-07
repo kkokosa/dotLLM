@@ -219,7 +219,11 @@ public sealed unsafe class ComputeThreadPool : IDisposable
         if (_workerCoreAssignment[arrayIdx] >= 0)
             CpuAffinity.PinCurrentThread(_workerCoreAssignment[arrayIdx]);
 
-        int lastGeneration = Volatile.Read(ref _dispatchGeneration);
+        // Workers are started once in the constructor before any dispatch (generation 0).
+        // Initializing to 0 ensures that if Dispatch() increments _dispatchGeneration to 1
+        // before the OS schedules this thread onto a core, the first dispatch is not mistaken
+        // for a stale wake-up.
+        int lastGeneration = 0;
 
         while (true)
         {
