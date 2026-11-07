@@ -66,8 +66,7 @@ public static class RequestConverter
     public static InferenceOptions ToInferenceOptions(ChatCompletionRequest request,
         IReadOnlyList<string> stopSequences, SamplingDefaults defaults, ThreadingConfig threading)
     {
-        var allStops = new List<string>(stopSequences);
-        AddRequestStopSequences(allStops, request.Stop);
+        var allStops = BuildStopSequences(stopSequences, request.Stop);
 
         return new InferenceOptions
         {
@@ -92,8 +91,7 @@ public static class RequestConverter
     public static InferenceOptions ToInferenceOptions(CompletionRequest request,
         SamplingDefaults defaults, ThreadingConfig threading)
     {
-        var stops = new List<string>();
-        AddRequestStopSequences(stops, request.Stop);
+        var stops = BuildStopSequences(Array.Empty<string>(), request.Stop);
 
         return new InferenceOptions
         {
@@ -257,25 +255,44 @@ public static class RequestConverter
         };
     }
 
-    private static void AddRequestStopSequences(List<string> target, JsonElement? stopElement)
+    private static IReadOnlyList<string> BuildStopSequences(IReadOnlyList<string> defaults, JsonElement? stopElement)
     {
-        if (stopElement is null || stopElement.Value.ValueKind == JsonValueKind.Undefined)
-            return;
+        int extraCapacity = stopElement is { } element ? element.ValueKind switch
+        {
+            JsonValueKind.String => element.ValueEquals("") ? 0 : 1,
+            JsonValueKind.Array => element.GetArrayLength(),
+            _ => 0,
+        } : 0;
 
-        if (stopElement.Value.ValueKind == JsonValueKind.String)
+        if (extraCapacity == 0)
         {
-            string? s = stopElement.Value.GetString();
-            if (!string.IsNullOrEmpty(s))
-                target.Add(s);
+            if (defaults.Count == 0)
+                return Array.Empty<string>();
+            var copy = new string[defaults.Count];
+            if (defaults is string[] array)
+                array.CopyTo(copy, 0);
+            else
+                for (int i = 0; i < defaults.Count; i++)
+                    copy[i] = defaults[i];
+            return copy;
         }
-        else if (stopElement.Value.ValueKind == JsonValueKind.Array)
+
+        var result = new List<string>(defaults.Count + extraCapacity);
+        result.AddRange(defaults);
+        if (stopElement is { } stop)
         {
-            foreach (var item in stopElement.Value.EnumerateArray())
+            if (stop.ValueKind == JsonValueKind.String)
+                result.Add(stop.GetString()!);
+            else
             {
-                string? s = item.GetString();
-                if (!string.IsNullOrEmpty(s))
-                    target.Add(s);
+                foreach (var item in stop.EnumerateArray())
+                {
+                    string? value = item.GetString();
+                    if (!string.IsNullOrEmpty(value))
+                        result.Add(value);
+                }
             }
         }
+        return result;
     }
 }
