@@ -1,6 +1,8 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
+using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Kernels;
 using Xunit;
 
@@ -259,6 +261,97 @@ public sealed unsafe class MatMulTests
         {
             NativeMemory.AlignedFree((void*)aPtr);
             NativeMemory.AlignedFree((void*)bPtr);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(7)]
+    [InlineData(16)]
+    [InlineData(128)]
+    [InlineData(344)]
+    public void VecDotQ8_0_Neon_BitIdenticalToScalarPure(int blockCount)
+    {
+        if (!Dp.IsSupported || !AdvSimd.Arm64.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        nuint totalBytes = (nuint)(blockCount * Q8_0BlockBytes);
+
+        nint aPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        nint bPtr = (nint)NativeMemory.AlignedAlloc(totalBytes, 64);
+        try
+        {
+            FillRandomQ8_0Blocks((byte*)aPtr, blockCount, rng);
+            FillRandomQ8_0Blocks((byte*)bPtr, blockCount, rng);
+            // Explicitly exercise sbyte.MinValue (-128) on the first block
+            ((sbyte*)((byte*)aPtr + 2))[0] = sbyte.MinValue;
+            ((sbyte*)((byte*)bPtr + 2))[0] = sbyte.MinValue;
+            ((sbyte*)((byte*)aPtr + 2))[31] = sbyte.MinValue;
+            ((sbyte*)((byte*)bPtr + 2))[31] = sbyte.MaxValue;
+
+            float scalarPure = MatMul.VecDotQ8_0ScalarPure((byte*)aPtr, (byte*)bPtr, blockCount);
+            float neon = MatMul.VecDotQ8_0Neon((byte*)aPtr, (byte*)bPtr, blockCount);
+            float dispatched = MatMul.VecDotQ8_0Scalar((byte*)aPtr, (byte*)bPtr, blockCount);
+
+            Assert.Equal(
+                BitConverter.SingleToInt32Bits(scalarPure),
+                BitConverter.SingleToInt32Bits(neon));
+            Assert.Equal(
+                BitConverter.SingleToInt32Bits(scalarPure),
+                BitConverter.SingleToInt32Bits(dispatched));
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)aPtr);
+            NativeMemory.AlignedFree((void*)bPtr);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(17)]
+    [InlineData(128)]
+    public void VecDotQ8_0R4_Neon_BitIdenticalToScalarR4Pure(int blockCount)
+    {
+        if (!Dp.IsSupported || !AdvSimd.Arm64.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        int k = blockCount * Q8_0GroupSize;
+        nuint weightsBytes = (nuint)(4 * blockCount * Q8_0BlockBytes);
+        nuint xBytes = (nuint)(blockCount * Q8_0BlockBytes);
+
+        nint wPtr = (nint)NativeMemory.AlignedAlloc(weightsBytes, 64);
+        nint xPtr = (nint)NativeMemory.AlignedAlloc(xBytes, 64);
+        try
+        {
+            FillRandomQ8_0Blocks((byte*)wPtr, 4 * blockCount, rng);
+            FillRandomQ8_0Blocks((byte*)xPtr, blockCount, rng);
+
+            using var rw = WeightRepacking.RepackR4(wPtr, QuantizationType.Q8_0, 4, k);
+
+            for (int r = 0; r < 4; r++)
+            {
+                float scalarPure = MatMul.VecDotQ8_0ScalarR4Pure((byte*)rw.Ptr, r, (byte*)xPtr, blockCount);
+                float neon = MatMul.VecDotQ8_0NeonR4((byte*)rw.Ptr, r, (byte*)xPtr, blockCount);
+                float dispatched = MatMul.VecDotQ8_0ScalarR4((byte*)rw.Ptr, r, (byte*)xPtr, blockCount);
+
+                Assert.Equal(
+                    BitConverter.SingleToInt32Bits(scalarPure),
+                    BitConverter.SingleToInt32Bits(neon));
+                Assert.Equal(
+                    BitConverter.SingleToInt32Bits(scalarPure),
+                    BitConverter.SingleToInt32Bits(dispatched));
+            }
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)wPtr);
+            NativeMemory.AlignedFree((void*)xPtr);
         }
     }
 

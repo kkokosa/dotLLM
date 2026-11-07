@@ -3,6 +3,7 @@ using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Cpu.Threading;
 
@@ -197,11 +198,50 @@ public static unsafe partial class MatMul
     // ──────────────────── R4 Interleaved VecDot + ComputeRows for Q8_0 ────────────────────
 
     /// <summary>
-    /// Scalar Q8_0 dot product for a single row within an R4-interleaved group.
+    /// Scalar / ARM64 NEON Q8_0 dot product for a single row within an R4-interleaved group.
     /// Block stride is 4 * Q8_0BlockBytes (blocks from 4 rows are interleaved).
     /// </summary>
     [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static float VecDotQ8_0ScalarR4(byte* groupBase, int rowInGroup, byte* xQ8, int blockCount)
+    {
+        if (Dp.IsSupported && AdvSimd.Arm64.IsSupported)
+            return VecDotQ8_0NeonR4(groupBase, rowInGroup, xQ8, blockCount);
+        return VecDotQ8_0ScalarR4Pure(groupBase, rowInGroup, xQ8, blockCount);
+    }
+
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static float VecDotQ8_0NeonR4(byte* groupBase, int rowInGroup, byte* xQ8, int blockCount)
+    {
+        float sumf = 0;
+        const int wStride = 4 * Q8_0BlockBytes;
+
+        for (int block = 0; block < blockCount; block++)
+        {
+            byte* wBlock = groupBase + block * wStride + rowInGroup * Q8_0BlockBytes;
+            byte* xBlock = xQ8 + block * Q8_0BlockBytes;
+
+            float dw = (float)Unsafe.ReadUnaligned<Half>(wBlock);
+            float dx = (float)Unsafe.ReadUnaligned<Half>(xBlock);
+
+            Vector128<int> acc = Dp.DotProduct(
+                Vector128<int>.Zero,
+                Unsafe.ReadUnaligned<Vector128<sbyte>>(wBlock + 2),
+                Unsafe.ReadUnaligned<Vector128<sbyte>>(xBlock + 2));
+            acc = Dp.DotProduct(
+                acc,
+                Unsafe.ReadUnaligned<Vector128<sbyte>>(wBlock + 18),
+                Unsafe.ReadUnaligned<Vector128<sbyte>>(xBlock + 18));
+
+            int sumi = AdvSimd.Arm64.AddAcross(acc).ToScalar();
+            sumf += dw * dx * sumi;
+        }
+        return sumf;
+    }
+
+    [SkipLocalsInit]
+    internal static float VecDotQ8_0ScalarR4Pure(byte* groupBase, int rowInGroup, byte* xQ8, int blockCount)
     {
         float sumf = 0;
         const int wStride = 4 * Q8_0BlockBytes;
@@ -622,10 +662,49 @@ public static unsafe partial class MatMul
     // ──────────────────── Scalar reference ────────────────────
 
     /// <summary>
-    /// Scalar Q8_0 dot product: sum over blocks of (da * db * sum(qa[i] * qb[i])).
+    /// Scalar / ARM64 NEON Q8_0 dot product: sum over blocks of (da * db * sum(qa[i] * qb[i])).
     /// </summary>
     [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static float VecDotQ8_0Scalar(byte* a, byte* b, int blockCount)
+    {
+        if (Dp.IsSupported && AdvSimd.Arm64.IsSupported)
+            return VecDotQ8_0Neon(a, b, blockCount);
+        return VecDotQ8_0ScalarPure(a, b, blockCount);
+    }
+
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static float VecDotQ8_0Neon(byte* a, byte* b, int blockCount)
+    {
+        float sumf = 0;
+
+        for (int block = 0; block < blockCount; block++)
+        {
+            byte* aBlock = a + block * Q8_0BlockBytes;
+            byte* bBlock = b + block * Q8_0BlockBytes;
+
+            float da = (float)Unsafe.ReadUnaligned<Half>(aBlock);
+            float db = (float)Unsafe.ReadUnaligned<Half>(bBlock);
+
+            Vector128<int> acc = Dp.DotProduct(
+                Vector128<int>.Zero,
+                Unsafe.ReadUnaligned<Vector128<sbyte>>(aBlock + 2),
+                Unsafe.ReadUnaligned<Vector128<sbyte>>(bBlock + 2));
+            acc = Dp.DotProduct(
+                acc,
+                Unsafe.ReadUnaligned<Vector128<sbyte>>(aBlock + 18),
+                Unsafe.ReadUnaligned<Vector128<sbyte>>(bBlock + 18));
+
+            int sumi = AdvSimd.Arm64.AddAcross(acc).ToScalar();
+            sumf += da * db * sumi;
+        }
+
+        return sumf;
+    }
+
+    [SkipLocalsInit]
+    internal static float VecDotQ8_0ScalarPure(byte* a, byte* b, int blockCount)
     {
         float sumf = 0;
 

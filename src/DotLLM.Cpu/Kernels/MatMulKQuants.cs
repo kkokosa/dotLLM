@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Cpu.Threading;
 
@@ -179,7 +180,112 @@ public static unsafe partial class MatMul
     /// Q8_K layout: d(float)@0, qs[256]@4, bsums[16]@260.
     /// </summary>
     [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static float VecDotQ6_K_Q8_KScalar(byte* qk, byte* q8k, int superBlockCount)
+    {
+        if (Dp.IsSupported && AdvSimd.Arm64.IsSupported)
+            return VecDotQ6_K_Q8_KNeon(qk, q8k, superBlockCount);
+        return VecDotQ6_K_Q8_KScalarPure(qk, q8k, superBlockCount);
+    }
+
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static float VecDotQ6_K_Q8_KNeon(byte* qk, byte* q8k, int superBlockCount)
+    {
+        float sumf = 0;
+        Vector128<byte> mask0F = Vector128.Create((byte)0x0F);
+        Vector128<byte> mask30 = Vector128.Create((byte)0x30);
+        Vector128<sbyte> bias32 = Vector128.Create((sbyte)32);
+
+        for (int sb = 0; sb < superBlockCount; sb++)
+        {
+            byte* ql = qk;
+            byte* qh = qk + 128;
+            sbyte* scales = (sbyte*)(qk + 192);
+            float d6 = (float)Unsafe.ReadUnaligned<Half>(qk + 208);
+
+            float d8 = Unsafe.ReadUnaligned<float>(q8k);
+            byte* q8qs = q8k + 4;
+
+            float dProd = d6 * d8;
+
+            for (int half = 0; half < 2; half++)
+            {
+                byte* qlHalf = ql + half * 64;
+                byte* qhHalf = qh + half * 32;
+                byte* q8Half = q8qs + half * 128;
+                int subBase = half * 8;
+
+                Vector128<byte> ql0 = Unsafe.ReadUnaligned<Vector128<byte>>(qlHalf);
+                Vector128<byte> ql1 = Unsafe.ReadUnaligned<Vector128<byte>>(qlHalf + 16);
+                Vector128<byte> ql2 = Unsafe.ReadUnaligned<Vector128<byte>>(qlHalf + 32);
+                Vector128<byte> ql3 = Unsafe.ReadUnaligned<Vector128<byte>>(qlHalf + 48);
+
+                Vector128<byte> qh0 = Unsafe.ReadUnaligned<Vector128<byte>>(qhHalf);
+                Vector128<byte> qh1 = Unsafe.ReadUnaligned<Vector128<byte>>(qhHalf + 16);
+
+                // sh = 0..3: lower 4 bits of ql0..ql3 + 2 bits of qh0/qh1
+                Vector128<sbyte> q6_0 = AdvSimd.Subtract(
+                    AdvSimd.Or(AdvSimd.And(ql0, mask0F), AdvSimd.And(AdvSimd.ShiftLeftLogical(qh0, 4), mask30)).AsSByte(),
+                    bias32);
+                Vector128<sbyte> q6_1 = AdvSimd.Subtract(
+                    AdvSimd.Or(AdvSimd.And(ql1, mask0F), AdvSimd.And(AdvSimd.ShiftLeftLogical(qh1, 4), mask30)).AsSByte(),
+                    bias32);
+                Vector128<sbyte> q6_2 = AdvSimd.Subtract(
+                    AdvSimd.Or(AdvSimd.And(ql2, mask0F), AdvSimd.And(AdvSimd.ShiftLeftLogical(qh0, 2), mask30)).AsSByte(),
+                    bias32);
+                Vector128<sbyte> q6_3 = AdvSimd.Subtract(
+                    AdvSimd.Or(AdvSimd.And(ql3, mask0F), AdvSimd.And(AdvSimd.ShiftLeftLogical(qh1, 2), mask30)).AsSByte(),
+                    bias32);
+
+                // sh = 4..7: upper 4 bits of ql0..ql3 + 2 bits of qh0/qh1
+                Vector128<sbyte> q6_4 = AdvSimd.Subtract(
+                    AdvSimd.Or(AdvSimd.ShiftRightLogical(ql0, 4), AdvSimd.And(qh0, mask30)).AsSByte(),
+                    bias32);
+                Vector128<sbyte> q6_5 = AdvSimd.Subtract(
+                    AdvSimd.Or(AdvSimd.ShiftRightLogical(ql1, 4), AdvSimd.And(qh1, mask30)).AsSByte(),
+                    bias32);
+                Vector128<sbyte> q6_6 = AdvSimd.Subtract(
+                    AdvSimd.Or(AdvSimd.ShiftRightLogical(ql2, 4), AdvSimd.And(AdvSimd.ShiftRightLogical(qh0, 2), mask30)).AsSByte(),
+                    bias32);
+                Vector128<sbyte> q6_7 = AdvSimd.Subtract(
+                    AdvSimd.Or(AdvSimd.ShiftRightLogical(ql3, 4), AdvSimd.And(AdvSimd.ShiftRightLogical(qh1, 2), mask30)).AsSByte(),
+                    bias32);
+
+                int sumi0 = AdvSimd.Arm64.AddAcross(Dp.DotProduct(Vector128<int>.Zero, q6_0, Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Half))).ToScalar();
+                sumf += (dProd * scales[subBase + 0]) * sumi0;
+
+                int sumi1 = AdvSimd.Arm64.AddAcross(Dp.DotProduct(Vector128<int>.Zero, q6_1, Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Half + 16))).ToScalar();
+                sumf += (dProd * scales[subBase + 1]) * sumi1;
+
+                int sumi2 = AdvSimd.Arm64.AddAcross(Dp.DotProduct(Vector128<int>.Zero, q6_2, Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Half + 32))).ToScalar();
+                sumf += (dProd * scales[subBase + 2]) * sumi2;
+
+                int sumi3 = AdvSimd.Arm64.AddAcross(Dp.DotProduct(Vector128<int>.Zero, q6_3, Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Half + 48))).ToScalar();
+                sumf += (dProd * scales[subBase + 3]) * sumi3;
+
+                int sumi4 = AdvSimd.Arm64.AddAcross(Dp.DotProduct(Vector128<int>.Zero, q6_4, Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Half + 64))).ToScalar();
+                sumf += (dProd * scales[subBase + 4]) * sumi4;
+
+                int sumi5 = AdvSimd.Arm64.AddAcross(Dp.DotProduct(Vector128<int>.Zero, q6_5, Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Half + 80))).ToScalar();
+                sumf += (dProd * scales[subBase + 5]) * sumi5;
+
+                int sumi6 = AdvSimd.Arm64.AddAcross(Dp.DotProduct(Vector128<int>.Zero, q6_6, Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Half + 96))).ToScalar();
+                sumf += (dProd * scales[subBase + 6]) * sumi6;
+
+                int sumi7 = AdvSimd.Arm64.AddAcross(Dp.DotProduct(Vector128<int>.Zero, q6_7, Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Half + 112))).ToScalar();
+                sumf += (dProd * scales[subBase + 7]) * sumi7;
+            }
+
+            qk += Q6_K_BlockBytes;
+            q8k += Q8_K_BlockBytes;
+        }
+
+        return sumf;
+    }
+
+    [SkipLocalsInit]
+    internal static float VecDotQ6_K_Q8_KScalarPure(byte* qk, byte* q8k, int superBlockCount)
     {
         float sumf = 0;
 
@@ -230,16 +336,100 @@ public static unsafe partial class MatMul
         return sumf;
     }
 
-    // ──────────────────── Q4_K × Q8_K scalar ────────────────────
+    // ──────────────────── Q4_K × Q8_K scalar / NEON ────────────────────
 
     /// <summary>
-    /// Scalar Q4_K × Q8_K dot product.
+    /// Scalar / ARM64 NEON Q4_K × Q8_K dot product.
     /// Q4_K layout: d(Half@0), dmin(Half@2), scales[12]@4, qs[128]@16.
     /// Q8_K layout: d(float)@0, qs[256]@4, bsums[16]@260.
     /// Uses precomputed bsums for the min correction term.
     /// </summary>
     [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static float VecDotQ4_K_Q8_KScalar(byte* qk, byte* q8k, int superBlockCount)
+    {
+        if (Dp.IsSupported && AdvSimd.Arm64.IsSupported)
+            return VecDotQ4_K_Q8_KNeon(qk, q8k, superBlockCount);
+        return VecDotQ4_K_Q8_KScalarPure(qk, q8k, superBlockCount);
+    }
+
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static float VecDotQ4_K_Q8_KNeon(byte* qk, byte* q8k, int superBlockCount)
+    {
+        float sumf = 0;
+        Vector128<byte> mask0F = Vector128.Create((byte)0x0F);
+
+        byte* scBuf = stackalloc byte[8];
+        byte* mnBuf = stackalloc byte[8];
+
+        for (int sb = 0; sb < superBlockCount; sb++)
+        {
+            float d4 = (float)Unsafe.ReadUnaligned<Half>(qk);
+            float dmin = (float)Unsafe.ReadUnaligned<Half>(qk + 2);
+            Dequantize.UnpackQ4Q5Scales(qk + 4, scBuf, mnBuf);
+            byte* qs = qk + 16;
+
+            float d8 = Unsafe.ReadUnaligned<float>(q8k);
+            byte* q8qs = q8k + 4;
+            short* bsums = (short*)(q8k + 260);
+
+            for (int pairIdx = 0; pairIdx < 4; pairIdx++)
+            {
+                int j0 = pairIdx * 2;
+                int j1 = pairIdx * 2 + 1;
+
+                byte* qsPair = qs + pairIdx * 32;
+                Vector128<byte> v0 = Unsafe.ReadUnaligned<Vector128<byte>>(qsPair);
+                Vector128<byte> v1 = Unsafe.ReadUnaligned<Vector128<byte>>(qsPair + 16);
+
+                Vector128<sbyte> lo0 = AdvSimd.And(v0, mask0F).AsSByte();
+                Vector128<sbyte> lo1 = AdvSimd.And(v1, mask0F).AsSByte();
+                Vector128<sbyte> hi0 = AdvSimd.ShiftRightLogical(v0, 4).AsSByte();
+                Vector128<sbyte> hi1 = AdvSimd.ShiftRightLogical(v1, 4).AsSByte();
+
+                byte* q8Vals0 = q8qs + j0 * 32;
+                Vector128<int> acc0 = Dp.DotProduct(
+                    Vector128<int>.Zero,
+                    lo0,
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Vals0));
+                acc0 = Dp.DotProduct(
+                    acc0,
+                    lo1,
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Vals0 + 16));
+                int prodSum0 = AdvSimd.Arm64.AddAcross(acc0).ToScalar();
+
+                float sc0 = d4 * scBuf[j0];
+                float mn0 = dmin * mnBuf[j0];
+                int q8Sum0 = bsums[j0 * 2] + bsums[j0 * 2 + 1];
+                sumf += d8 * (sc0 * prodSum0 - mn0 * q8Sum0);
+
+                byte* q8Vals1 = q8qs + j1 * 32;
+                Vector128<int> acc1 = Dp.DotProduct(
+                    Vector128<int>.Zero,
+                    hi0,
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Vals1));
+                acc1 = Dp.DotProduct(
+                    acc1,
+                    hi1,
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Vals1 + 16));
+                int prodSum1 = AdvSimd.Arm64.AddAcross(acc1).ToScalar();
+
+                float sc1 = d4 * scBuf[j1];
+                float mn1 = dmin * mnBuf[j1];
+                int q8Sum1 = bsums[j1 * 2] + bsums[j1 * 2 + 1];
+                sumf += d8 * (sc1 * prodSum1 - mn1 * q8Sum1);
+            }
+
+            qk += Q4_K_BlockBytes;
+            q8k += Q8_K_BlockBytes;
+        }
+
+        return sumf;
+    }
+
+    [SkipLocalsInit]
+    internal static float VecDotQ4_K_Q8_KScalarPure(byte* qk, byte* q8k, int superBlockCount)
     {
         float sumf = 0;
 
@@ -287,15 +477,115 @@ public static unsafe partial class MatMul
         return sumf;
     }
 
-    // ──────────────────── Q5_K × Q8_K scalar ────────────────────
+    // ──────────────────── Q5_K × Q8_K scalar / NEON ────────────────────
 
     /// <summary>
-    /// Scalar Q5_K × Q8_K dot product.
+    /// Scalar / ARM64 NEON Q5_K × Q8_K dot product.
     /// Q5_K layout: d(Half@0), dmin(Half@2), scales[12]@4, qh[32]@16, qs[128]@48.
     /// Q8_K layout: d(float)@0, qs[256]@4, bsums[16]@260.
     /// </summary>
     [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static float VecDotQ5_K_Q8_KScalar(byte* qk, byte* q8k, int superBlockCount)
+    {
+        if (Dp.IsSupported && AdvSimd.Arm64.IsSupported)
+            return VecDotQ5_K_Q8_KNeon(qk, q8k, superBlockCount);
+        return VecDotQ5_K_Q8_KScalarPure(qk, q8k, superBlockCount);
+    }
+
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    internal static float VecDotQ5_K_Q8_KNeon(byte* qk, byte* q8k, int superBlockCount)
+    {
+        float sumf = 0;
+        Vector128<byte> mask0F = Vector128.Create((byte)0x0F);
+        Vector128<byte> mask10 = Vector128.Create((byte)0x10);
+
+        byte* scBuf = stackalloc byte[8];
+        byte* mnBuf = stackalloc byte[8];
+
+        for (int sb = 0; sb < superBlockCount; sb++)
+        {
+            float d5 = (float)Unsafe.ReadUnaligned<Half>(qk);
+            float dmin = (float)Unsafe.ReadUnaligned<Half>(qk + 2);
+            Dequantize.UnpackQ4Q5Scales(qk + 4, scBuf, mnBuf);
+            byte* qh = qk + 16;
+            byte* qs = qk + 48;
+
+            Vector128<byte> qh0 = Unsafe.ReadUnaligned<Vector128<byte>>(qh);
+            Vector128<byte> qh1 = Unsafe.ReadUnaligned<Vector128<byte>>(qh + 16);
+
+            float d8 = Unsafe.ReadUnaligned<float>(q8k);
+            byte* q8qs = q8k + 4;
+            short* bsums = (short*)(q8k + 260);
+
+            for (int pairIdx = 0; pairIdx < 4; pairIdx++)
+            {
+                int j0 = pairIdx * 2;
+                int j1 = pairIdx * 2 + 1;
+
+                byte* qsPair = qs + pairIdx * 32;
+                Vector128<byte> v0 = Unsafe.ReadUnaligned<Vector128<byte>>(qsPair);
+                Vector128<byte> v1 = Unsafe.ReadUnaligned<Vector128<byte>>(qsPair + 16);
+
+                Vector128<byte> bitMask0 = Vector128.Create((byte)(1 << j0));
+                Vector128<sbyte> q0_0 = AdvSimd.Or(
+                    AdvSimd.And(v0, mask0F),
+                    AdvSimd.And(AdvSimd.CompareTest(qh0, bitMask0), mask10)).AsSByte();
+                Vector128<sbyte> q0_1 = AdvSimd.Or(
+                    AdvSimd.And(v1, mask0F),
+                    AdvSimd.And(AdvSimd.CompareTest(qh1, bitMask0), mask10)).AsSByte();
+
+                byte* q8Vals0 = q8qs + j0 * 32;
+                Vector128<int> acc0 = Dp.DotProduct(
+                    Vector128<int>.Zero,
+                    q0_0,
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Vals0));
+                acc0 = Dp.DotProduct(
+                    acc0,
+                    q0_1,
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Vals0 + 16));
+                int prodSum0 = AdvSimd.Arm64.AddAcross(acc0).ToScalar();
+
+                float sc0 = d5 * scBuf[j0];
+                float mn0 = dmin * mnBuf[j0];
+                int q8Sum0 = bsums[j0 * 2] + bsums[j0 * 2 + 1];
+                sumf += d8 * (sc0 * prodSum0 - mn0 * q8Sum0);
+
+                Vector128<byte> bitMask1 = Vector128.Create((byte)(1 << j1));
+                Vector128<sbyte> q1_0 = AdvSimd.Or(
+                    AdvSimd.ShiftRightLogical(v0, 4),
+                    AdvSimd.And(AdvSimd.CompareTest(qh0, bitMask1), mask10)).AsSByte();
+                Vector128<sbyte> q1_1 = AdvSimd.Or(
+                    AdvSimd.ShiftRightLogical(v1, 4),
+                    AdvSimd.And(AdvSimd.CompareTest(qh1, bitMask1), mask10)).AsSByte();
+
+                byte* q8Vals1 = q8qs + j1 * 32;
+                Vector128<int> acc1 = Dp.DotProduct(
+                    Vector128<int>.Zero,
+                    q1_0,
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Vals1));
+                acc1 = Dp.DotProduct(
+                    acc1,
+                    q1_1,
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(q8Vals1 + 16));
+                int prodSum1 = AdvSimd.Arm64.AddAcross(acc1).ToScalar();
+
+                float sc1 = d5 * scBuf[j1];
+                float mn1 = dmin * mnBuf[j1];
+                int q8Sum1 = bsums[j1 * 2] + bsums[j1 * 2 + 1];
+                sumf += d8 * (sc1 * prodSum1 - mn1 * q8Sum1);
+            }
+
+            qk += Q5_K_BlockBytes;
+            q8k += Q8_K_BlockBytes;
+        }
+
+        return sumf;
+    }
+
+    [SkipLocalsInit]
+    internal static float VecDotQ5_K_Q8_KScalarPure(byte* qk, byte* q8k, int superBlockCount)
     {
         float sumf = 0;
 

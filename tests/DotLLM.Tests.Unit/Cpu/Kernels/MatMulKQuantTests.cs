@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 using DotLLM.Core.Configuration;
 using DotLLM.Cpu.Kernels;
@@ -549,6 +550,107 @@ public sealed unsafe class MatMulKQuantTests
             NativeMemory.AlignedFree((void*)w1);
             NativeMemory.AlignedFree((void*)w2);
             NativeMemory.AlignedFree((void*)w3);
+            NativeMemory.AlignedFree((void*)q8k);
+        }
+    }
+
+    // ──────────────────── ARM64 NEON bit-identical parity ────────────────────
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(5)]
+    [InlineData(16)]
+    public void VecDotQ4_K_Q8_K_Neon_BitIdenticalToScalarPure(int superBlockCount)
+    {
+        if (!Dp.IsSupported || !AdvSimd.Arm64.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        nint q4k = AllocRandomKQuantBlocks(Q4_K_BlockBytes, superBlockCount, rng);
+        nint q8k = AllocRandomQ8_KBlocks(superBlockCount, rng);
+        try
+        {
+            float scalarPure = MatMul.VecDotQ4_K_Q8_KScalarPure((byte*)q4k, (byte*)q8k, superBlockCount);
+            float neon = MatMul.VecDotQ4_K_Q8_KNeon((byte*)q4k, (byte*)q8k, superBlockCount);
+            float dispatched = MatMul.VecDotQ4_K_Q8_KScalar((byte*)q4k, (byte*)q8k, superBlockCount);
+
+            Assert.Equal(
+                BitConverter.SingleToInt32Bits(scalarPure),
+                BitConverter.SingleToInt32Bits(neon));
+            Assert.Equal(
+                BitConverter.SingleToInt32Bits(scalarPure),
+                BitConverter.SingleToInt32Bits(dispatched));
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)q4k);
+            NativeMemory.AlignedFree((void*)q8k);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(5)]
+    [InlineData(16)]
+    public void VecDotQ5_K_Q8_K_Neon_BitIdenticalToScalarPure(int superBlockCount)
+    {
+        if (!Dp.IsSupported || !AdvSimd.Arm64.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        nint q5k = AllocRandomKQuantBlocks(Q5_K_BlockBytes, superBlockCount, rng);
+        nint q8k = AllocRandomQ8_KBlocks(superBlockCount, rng);
+        try
+        {
+            float scalarPure = MatMul.VecDotQ5_K_Q8_KScalarPure((byte*)q5k, (byte*)q8k, superBlockCount);
+            float neon = MatMul.VecDotQ5_K_Q8_KNeon((byte*)q5k, (byte*)q8k, superBlockCount);
+            float dispatched = MatMul.VecDotQ5_K_Q8_KScalar((byte*)q5k, (byte*)q8k, superBlockCount);
+
+            Assert.Equal(
+                BitConverter.SingleToInt32Bits(scalarPure),
+                BitConverter.SingleToInt32Bits(neon));
+            Assert.Equal(
+                BitConverter.SingleToInt32Bits(scalarPure),
+                BitConverter.SingleToInt32Bits(dispatched));
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)q5k);
+            NativeMemory.AlignedFree((void*)q8k);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(5)]
+    [InlineData(16)]
+    public void VecDotQ6_K_Q8_K_Neon_BitIdenticalToScalarPure(int superBlockCount)
+    {
+        if (!Dp.IsSupported || !AdvSimd.Arm64.IsSupported)
+            return;
+
+        var rng = new Random(42);
+        nint q6k = AllocRandomKQuantBlocks(Q6_K_BlockBytes, superBlockCount, rng);
+        nint q8k = AllocRandomQ8_KBlocks(superBlockCount, rng);
+        try
+        {
+            float scalarPure = MatMul.VecDotQ6_K_Q8_KScalarPure((byte*)q6k, (byte*)q8k, superBlockCount);
+            float neon = MatMul.VecDotQ6_K_Q8_KNeon((byte*)q6k, (byte*)q8k, superBlockCount);
+            float dispatched = MatMul.VecDotQ6_K_Q8_KScalar((byte*)q6k, (byte*)q8k, superBlockCount);
+
+            Assert.Equal(
+                BitConverter.SingleToInt32Bits(scalarPure),
+                BitConverter.SingleToInt32Bits(neon));
+            Assert.Equal(
+                BitConverter.SingleToInt32Bits(scalarPure),
+                BitConverter.SingleToInt32Bits(dispatched));
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)q6k);
             NativeMemory.AlignedFree((void*)q8k);
         }
     }
